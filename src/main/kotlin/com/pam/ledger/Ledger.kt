@@ -293,6 +293,15 @@ class Ledger private constructor(
         val stagedByKey = HashMap<String, Staged>()
         val checkpointRequests = ArrayList<CheckpointRequest>(0)
 
+        // Rejections are NOT reported straight away. A rejection may depend on an
+        // earlier request in this same batch (e.g. "already settled" by a cash-out
+        // staged two lines up, or "insufficient funds" because a staged bet spent
+        // the money). Telling the caller before that earlier request is durable
+        // would cite a fact that might never exist: if the fsync then failed,
+        // the caller was refused because of a ghost. So rejections wait for the
+        // batch outcome: delivered after commit, or replaced by LedgerFailed.
+        val rejections = ArrayList<Pair<CompletableFuture<Receipt>, LedgerException>>(0)
+
         for (cmd in batch) {
             when (cmd) {
                 is CheckpointRequest -> checkpointRequests += cmd
@@ -315,7 +324,7 @@ class Ledger private constructor(
                     val sibling = stagedByKey[req.idempotencyKey]
                     if (sibling != null) {
                         if (sibling.fingerprint == cmd.fingerprint) sibling.duplicates += cmd.future
-                        else cmd.future.completeExceptionally(IdempotencyConflictException(req.idempotencyKey))
+                        else rejections += cmd.future to IdempotencyConflictException(req.idempotencyKey)
                         continue
                     }
                     // (3) Accounting rules against the overlay (committed + earlier in batch).
@@ -324,7 +333,7 @@ class Ledger private constructor(
                             overlay[it] ?: accounts[it]
                         }
                     } catch (e: LedgerException) {
-                        cmd.future.completeExceptionally(e) // rejected; nothing changes
+                        rejections += cmd.future to e // rejected; nothing changes (reported after commit)
                         continue
                     }
                     // (4) Accepted: give it a place in history and seal it into the chain.
@@ -361,6 +370,7 @@ class Ledger private constructor(
                     s.future.completeExceptionally(ex)
                     s.duplicates.forEach { it.completeExceptionally(ex) }
                 }
+                rejections.forEach { (f, _) -> f.completeExceptionally(ex) }
                 checkpointRequests.forEach { it.future.completeExceptionally(ex) }
                 return
             }
@@ -385,6 +395,8 @@ class Ledger private constructor(
                 s.duplicates.forEach { it.complete(receipt.copy(replayed = true)) }
             }
         }
+        // Everything any rejection could have depended on is now durable and visible.
+        rejections.forEach { (f, e) -> f.completeExceptionally(e) }
 
         val sinceCheckpoint = headRef.size - (latestCheckpoint?.head?.treeSize ?: 0L)
         if (checkpointRequests.isNotEmpty() || sinceCheckpoint >= config.checkpointEvery) {
