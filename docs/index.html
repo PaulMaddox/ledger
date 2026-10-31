@@ -187,7 +187,75 @@ pre.cmd{margin:0;background:var(--code-bg);border:1px solid var(--rule);padding:
 .filemap code{color:var(--accent);font-weight:600}
 footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 
+/* ---------- cloud architecture ---------- */
+.cloudbar{display:flex;flex-wrap:wrap;gap:10px 16px;justify-content:space-between;align-items:center}
+.cloudbar .lbl{font:600 .72rem var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);margin-right:6px}
+.cloud{display:grid;grid-template-columns:minmax(0,1.55fr) minmax(0,1fr);gap:20px;align-items:start}
+.regions{display:grid;gap:14px;min-width:0}
+.region{border:1.5px solid var(--rule);display:grid;gap:0;min-width:0;background:var(--panel)}
+.region.primary{border-color:var(--accent)}
+.region.dr{border-style:dashed}
+.region.outside .tnodes,.region.dr .tnodes{padding:10px 12px}
+.rhead{display:flex;flex-wrap:wrap;gap:4px 10px;align-items:baseline;padding:8px 12px;border-bottom:1px solid var(--rule);background:var(--paper)}
+.rhead b{font:700 .95rem var(--f-display)}
+.rhead span{font-size:.76rem;color:var(--muted)}
+.tiers{display:grid;gap:1px;background:var(--rule)}
+.tier{background:var(--panel);display:grid;grid-template-columns:118px minmax(0,1fr);gap:12px;padding:10px 12px;align-items:center}
+.tier .tl{font:600 .7rem/1.3 var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.tier .tl span{display:block;text-transform:none;letter-spacing:0;font-weight:400;font-size:.72rem}
+.tnodes{display:flex;flex-wrap:wrap;gap:6px;min-width:0}
+.cn{border:1px solid var(--rule);background:var(--paper);color:var(--ink);padding:6px 9px;text-align:left;display:grid;gap:1px;font:600 .8rem/1.3 var(--f-body);cursor:pointer;border-radius:4px;min-width:0;max-width:100%}
+.cn small{font:400 .68rem/1.3 var(--f-mono);color:var(--muted);overflow-wrap:anywhere}
+.cn:hover{border-color:var(--accent)}
+.cn.on{border-color:var(--accent);background:var(--hl);box-shadow:inset 0 0 0 1px var(--accent)}
+.cn.degraded{border-color:var(--warn)}
+.cn.degraded small::after{content:" · degraded";color:var(--warn)}
+.cn.down{opacity:.38;border-style:dashed}
+.cn.down small::after{content:" · down";color:var(--bad)}
+.cn.promoted{border-color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok)}
+.cn.promoted small::after{content:" · promoted";color:var(--ok)}
+.shardbox{display:grid;gap:6px;min-width:0}
+.shardgrid{display:grid;grid-template-columns:auto repeat(3,minmax(0,1fr));gap:4px;font:.7rem var(--f-mono);align-items:center}
+.shardgrid .hd{color:var(--muted);text-align:center}
+.shardgrid .hd.dead{color:var(--bad);text-decoration:line-through}
+.rep{border:1px solid var(--rule);padding:3px 4px;text-align:center;background:var(--paper);border-radius:3px}
+.rep.L{background:var(--hl);border-color:var(--accent);font-weight:600}
+.rep.dead{opacity:.35;border-style:dashed}
+.rep.moved{border-color:var(--ok);box-shadow:inset 0 0 0 1px var(--ok)}
+.cdetail{position:sticky;top:calc(env(safe-area-inset-top,0px) + 16px);border-left:3px solid var(--accent);padding:2px 0 2px 16px;display:grid;gap:10px;min-width:0}
+.cdetail .prov{font:600 .7rem var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--accent)}
+.cdetail h3{font-size:1.25rem}
+.cdetail .svc{font-family:var(--f-mono);font-size:.82rem;color:var(--ink)}
+.cdetail dl{margin:0;display:grid;gap:8px}
+.cdetail dt{font:600 .7rem var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.cdetail dd{margin:0;font-size:.9rem}
+.drillnote{font-size:.9rem;padding:10px 12px;border:1px solid var(--rule);background:var(--panel)}
+.drillnote.warn{border-color:var(--warn)} .drillnote.bad{border-color:var(--bad)}
+.presets{display:flex;flex-wrap:wrap;gap:6px}
+.presets button{font:600 .78rem var(--f-body);border:1px solid var(--rule);background:var(--paper);color:var(--ink);padding:5px 10px;border-radius:999px;cursor:pointer}
+.presets button[aria-pressed="true"]{border-color:var(--accent);background:var(--hl)}
+.loadrow{display:grid;grid-template-columns:minmax(0,1fr) auto;gap:12px;align-items:center}
+.loadrow input{width:100%;accent-color:var(--accent)}
+.loadrow output{font:600 1.3rem var(--f-display);font-variant-numeric:tabular-nums;white-space:nowrap}
+.meters{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,180px),1fr));gap:1px;background:var(--rule);border:1px solid var(--rule)}
+.meter{background:var(--panel);padding:10px 12px;display:grid;gap:4px;align-content:start}
+.meter .k{font:600 .68rem var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted)}
+.meter b{font:700 1.25rem var(--f-display);font-variant-numeric:tabular-nums}
+.meter span{font-size:.78rem;color:var(--muted)}
+.bar{height:6px;background:var(--code-bg);border-radius:3px;overflow:hidden}
+.bar i{display:block;height:100%;background:var(--accent)}
+.bar i.hot{background:var(--warn)} .bar i.over{background:var(--bad)}
+.principles{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,280px),1fr));gap:16px}
+.principles .card h3{font-size:1.05rem}
+.principles .card p{font-size:.9rem}
+.roadmap{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,320px),1fr));gap:16px}
+.roadmap ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:.9rem}
+
 @media (max-width:900px){
+  .cloud{grid-template-columns:1fr}
+  .cdetail{position:static}
+  .tier{grid-template-columns:1fr;gap:6px}
+
   .arch{grid-template-columns:1fr}
   .bench{grid-template-columns:1fr;min-height:0}
   .codecol{border-right:0;border-bottom:1px solid var(--rule)}
@@ -213,7 +281,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <div><strong>Crash-safe</strong><span>Receipt only after fsync; torn writes quarantined</span></div>
   </div>
   <nav class="toc" aria-label="Contents">
-    <a href="#architecture">Architecture</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Step-through debugger</a><a href="#regulators">Regulatory tests</a><a href="#files">Files & running</a>
+    <a href="#architecture">Architecture</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Step-through debugger</a><a href="#cloud">Cloud architecture</a><a href="#regulators">Regulatory tests</a><a href="#files">Files & running</a>
   </nav>
 </header>
 
@@ -338,6 +406,76 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
         <div class="pane" style="border-bottom:0"><h4>Log</h4><div class="body"><div class="console" id="console"></div></div></div>
       </div>
     </div>
+  </div>
+</section>
+
+<!-- ======================= CLOUD ======================= -->
+<section id="cloud">
+  <div class="eyebrow">Deployment</div>
+  <h2>Cloud architecture</h2>
+  <p class="prose">How the ledger runs in production when every bet must be exact, a zone outage must lose nothing, and a World Cup final can multiply traffic a hundredfold in seconds. Switch provider, select any component for the reasoning behind it, run a failure drill, or drag the load slider to see where the pressure goes.</p>
+  <div class="cloudbar">
+    <div><span class="lbl">Provider</span><span class="seg" role="group" aria-label="Cloud provider"><button type="button" id="pvAws" aria-pressed="true">AWS</button><button type="button" id="pvAzure" aria-pressed="false">Azure</button></span></div>
+    <div><span class="lbl">Drill</span><span class="seg" role="group" aria-label="Failure drill" id="drills"><button type="button" data-drill="none" aria-pressed="true">Healthy</button><button type="button" data-drill="az" aria-pressed="false">Lose a zone</button><button type="button" data-drill="region" aria-pressed="false">Lose the region</button></span></div>
+  </div>
+  <div id="drillNote" class="drillnote" aria-live="polite"></div>
+  <div class="cloud">
+    <div class="regions">
+      <div class="region primary">
+        <div class="rhead"><b>Primary region</b><span>in country · 3 availability zones · all plaintext stays here</span></div>
+        <div class="tiers" id="tiers"></div>
+      </div>
+      <div class="region outside">
+        <div class="rhead"><b>Outside the platform</b><span>in country</span></div>
+        <div class="tnodes" id="outsideNodes"></div>
+      </div>
+      <div class="region dr">
+        <div class="rhead"><b>DR region</b><span>abroad · pilot light · ciphertext only, no keys</span></div>
+        <div class="tnodes" id="drNodes"></div>
+      </div>
+    </div>
+    <aside class="cdetail" id="cdetail" aria-live="polite"></aside>
+  </div>
+
+  <div class="card" style="gap:16px">
+    <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;align-items:center">
+      <h3>Peak load model</h3>
+      <div class="presets" id="presets"></div>
+    </div>
+    <div class="loadrow">
+      <input type="range" id="load" min="0" max="100" step="1" value="62" aria-label="Bets per second">
+      <output id="loadOut" for="load"></output>
+    </div>
+    <div class="meters" id="meters"></div>
+    <p id="loadNote" style="font-size:.9rem"></p>
+    <p style="font-size:.8rem;color:var(--muted)">Illustrative model: 64 shard groups, about 25,000 transactions per second of CPU headroom per shard leader, a 1.5 ms commit round (cross-zone quorum plus fsync), and 2,000 requests per second per API pod. Benchmark your own hardware before relying on any figure here.</p>
+  </div>
+
+  <div class="principles">
+    <div class="card"><h3>Consistency: shard by player</h3><p>A bet touches only one player's cash and escrow, so every account a transaction needs lives on one shard, and each shard keeps the code's single-writer guarantee. No distributed transactions, no two-phase commit. House accounts become per shard (<code>house:revenue:EUR:s17</code>) and are summed for reporting, which keeps every entry inside one hash chain.</p></div>
+    <div class="card"><h3>Resilience: quorum, then acknowledge</h3><p>Each shard is three replicas in three availability zones. The leader replicates every group-commit batch and only issues receipts once two replicas have fsynced it, so losing a whole zone loses no acknowledged bet. A new leader is elected in seconds; clients retry with the same idempotency keys and get their original receipts.</p></div>
+    <div class="card"><h3>Residency: ciphertext travels, keys don't</h3><p>Every journal segment, snapshot and stream record is encrypted inside the primary region with keys that never leave its HSMs, before replication starts. The DR region only ever holds bytes it cannot read. It becomes able to read them only after a declared disaster, when key custodians bring the keys there in a recorded ceremony that the regulator is told about.</p></div>
+    <div class="card"><h3>Elasticity: absorb, don't reshard</h3><p>The stateless API scales out in seconds and is pre-scaled from the fixture calendar. Inside a shard, group commit turns more traffic into bigger batches rather than more fsyncs. Settlement storms at the final whistle queue in Kafka and drain at full speed. Shards are added ahead of events, never during them.</p></div>
+  </div>
+
+  <div class="roadmap">
+    <div class="card"><h3>Already in this codebase</h3><ul>
+      <li>Single-writer engine with group commit and lock-free reads</li>
+      <li>Idempotency keys with content fingerprints, so retries after failover are safe</li>
+      <li>Bounded queue with <code>OverloadedException</code> for back-pressure</li>
+      <li>Signed tree heads behind a pluggable <code>TreeHeadSigner</code></li>
+      <li>Offline <code>LedgerVerifier</code> for the audit account</li>
+    </ul></div>
+    <div class="card"><h3>Needed for this architecture</h3><ul>
+      <li>Raft replication of journal batches with quorum fsync before receipts</li>
+      <li>Term-based fencing in place of the local directory lock</li>
+      <li>Shard router and per-shard house accounts</li>
+      <li>Journal segment rotation and upload to WORM storage</li>
+      <li>Change-data-capture publisher to the event stream</li>
+      <li>Application-level envelope encryption of segments before replication</li>
+      <li>Restore tooling that decrypts, replays and checks against the regulator's last signed head</li>
+      <li>gRPC service wrapper and an HSM-backed signer</li>
+    </ul></div>
   </div>
 </section>
 
@@ -849,6 +987,250 @@ function render(scroll) {
   $("console").scrollTop = 1e6;
 }
 selectScenario("bet");
+</script>
+<script>
+"use strict";
+/* ============================== CLOUD ARCHITECTURE ==============================
+   Each component has a provider-neutral role plus AWS and Azure specifics.
+   Fields: label, sub (shown on the node), role, why (per provider), alt (per provider),
+   peaks (behaviour under load), fail (behaviour in an outage). */
+const CLOUD = {
+  // ---- Edge ----
+  dns: { label: "Global DNS", tier: "edge", role: "Sends players to the primary region, and to DR only after a declared disaster.",
+    aws: { svc: "Amazon Route 53", why: "Health-checked failover records with low TTLs. Failover to DR is a deliberate, manual change of record, never automatic, because DR must not start serving before its keys are in place.", alt: "Global Accelerator, which fails over automatically: wrong here, because an automatic switch to a region without keys would only produce errors." },
+    azure: { svc: "Azure DNS", why: "Zone records pointing at Front Door. The DR switch is a deliberate Front Door origin change, made only after the key ceremony.", alt: "Traffic Manager priority routing, rejected for the same reason: automatic failover to a keyless region helps no one." },
+    peaks: "DNS is not in the request path after resolution, so peaks do not touch it.", fail: "Anycast and multi-provider name servers. The record change to DR is part of the runbook." },
+  front: { label: "Edge & TLS", tier: "edge", role: "Terminates TLS close to players, serves the static app, and passes API calls through uncached.",
+    aws: { svc: "Amazon CloudFront", why: "Absorbs connection storms at the edge and keeps TLS handshakes off the origin. Balances and bets are never cached: a cached balance is a wrong balance.", alt: "Exposing the load balancer directly, which puts every handshake of a peak on the origin." },
+    azure: { svc: "Azure Front Door Premium", why: "Global edge with integrated WAF and Private Link to the origin, so the origin has no public endpoint at all.", alt: "Azure CDN alone, which lacks the Private Link origin and WAF integration." },
+    peaks: "Edge capacity is effectively unlimited for this workload; it smooths reconnect storms after a goal.", fail: "Multi-PoP by design." },
+  waf: { label: "WAF & DDoS", tier: "edge", role: "Blocks abusive traffic and bot betting before it reaches compute.",
+    aws: { svc: "AWS WAF + Shield Advanced", why: "Rate-based rules per account and IP stop bet-scripting bots; Shield Advanced adds DDoS response support and protects against scaling-cost spikes during an attack.", alt: "Rate limiting only in the API, which spends compute on traffic that should never arrive." },
+    azure: { svc: "Front Door WAF + Azure DDoS Protection", why: "Managed rule sets plus custom rate limits at the edge, with network-layer DDoS protection on the region's public IPs.", alt: "Application Gateway WAF only, which acts after traffic has already reached the region." },
+    peaks: "Rules are tuned so a legitimate peak is not mistaken for an attack: limits are per account, not global.", fail: "Fails closed for known-bad patterns, open for capacity." },
+  // ---- Ingress ----
+  lb: { label: "Load balancer", tier: "ingress", role: "Spreads API traffic across all three zones, privately reachable from the edge.",
+    aws: { svc: "Application Load Balancer (3 AZ)", why: "Zone-redundant, integrates with EKS via the Load Balancer Controller, scales automatically. For known mega-events request capacity in advance so it is not scaling during kickoff.", alt: "API Gateway, whose per-account request quotas and added latency suit this hot path less well." },
+    azure: { svc: "Application Gateway for Containers", why: "Zone-redundant Layer 7 ingress built for AKS, reachable from Front Door over Private Link.", alt: "Standard Load Balancer (Layer 4), which would push routing and TLS concerns into the pods." },
+    peaks: "Pre-provisioned ahead of scheduled fixtures from the event calendar.", fail: "Zone-redundant: losing a zone removes its targets automatically." },
+  // ---- Services ----
+  k8s: { label: "Kubernetes", tier: "services", role: "Runs the stateless API, the workers and the ledger shard replicas across three zones.",
+    aws: { svc: "Amazon EKS", why: "Managed control plane across AZs; StatefulSets with zone-pinned volumes for ledger replicas; separate node pools isolate ledger nodes from noisy API pods.", alt: "ECS, simpler but weaker for stateful, zone-aware placement of the ledger replicas." },
+    azure: { svc: "Azure Kubernetes Service", why: "Zone-spread node pools, a dedicated pool for ledger replicas, and zonal disks bound per pod.", alt: "Container Apps, simpler but without the fine-grained placement the replicas need." },
+    peaks: "API node pools scale; ledger node pools are sized for the season and stay put.", fail: "Pod disruption budgets keep two of three replicas of every shard running during upgrades." },
+  api: { label: "Wallet API", tier: "services", role: "Stateless Kotlin service: authenticates, routes each request to the shard owning that player, returns receipts.",
+    aws: { svc: "Pods on EKS (gRPC to shards)", why: "Holds no state, so any pod can serve any player and pods can be added or killed freely.", alt: "Embedding the ledger in the API process, which would tie scaling of reads and writes together." },
+    azure: { svc: "Pods on AKS (gRPC to shards)", why: "Same stateless design; routing uses a cached copy of the shard directory.", alt: "As for AWS." },
+    peaks: "The main elastic tier: from a handful of pods to hundreds. Back-pressure from a shard arrives as a 429 with Retry-After and the same idempotency key.", fail: "Any pod can die mid-request; the client retries with its key and gets the original receipt." },
+  workers: { label: "Settlement & PSP workers", tier: "services", role: "Consume the settlement feed and payment webhooks from the stream and call the ledger.",
+    aws: { svc: "Consumers on EKS", why: "At-least-once consumption is safe because every message carries an idempotency key: redeliveries become replays.", alt: "Lambda consumers: workable, but concurrency limits and cold starts are awkward at the final whistle." },
+    azure: { svc: "Consumers on AKS", why: "Same idempotent design, scaled on consumer lag.", alt: "Azure Functions with Event Hubs triggers, with similar burst caveats." },
+    peaks: "Scale with consumer lag. Settlement can trail by seconds; placing new bets always has priority.", fail: "Uncommitted offsets are re-read after a crash; duplicates are harmless." },
+  scale: { label: "Autoscaling", tier: "services", role: "Adds pods and nodes for unplanned spikes; pre-scales for planned ones.",
+    aws: { svc: "KEDA + Karpenter + scheduled scaling", why: "KEDA scales pods on requests and lag within seconds; Karpenter provisions right-sized nodes in about a minute; fixture-calendar schedules pre-warm before kickoff so nothing scales cold.", alt: "Cluster Autoscaler with fixed node groups, slower to react and coarser." },
+    azure: { svc: "KEDA + cluster autoscaler (or node auto-provisioning)", why: "Same event-driven pod scaling, nodes added per zone, and scheduled pre-scaling from the fixture calendar.", alt: "Manual scaling ahead of events only, which leaves surprise spikes uncovered." },
+    peaks: "Reactive scaling handles surprises; the calendar handles the predictable 80%.", fail: "If scaling lags, queues bound memory and clients see explicit 429s instead of timeouts." },
+  // ---- Streaming ----
+  bus: { label: "Event stream", tier: "stream", role: "Buffers settlement storms and payment webhooks, and carries change events out of the ledger.",
+    aws: { svc: "Amazon MSK (Kafka)", why: "Partitioned by player id, so one player's events stay ordered and land on the right shard. Multi-AZ replication, configurable retention for replay.", alt: "SQS: simpler, but no ordering per player at high throughput and no long replay." },
+    azure: { svc: "Event Hubs Premium (Kafka endpoint)", why: "Kafka protocol without running brokers, zone-redundant, partitioned by player id.", alt: "Service Bus, which favours per-message workflows over high-throughput ordered streams." },
+    peaks: "Tens of thousands of settlements arriving in one second are absorbed and drained at the shards' pace.", fail: "Replicated across zones; consumers resume from committed offsets." },
+  // ---- Ledger ----
+  shards: { label: "Ledger shard groups", tier: "ledger", role: "64 shard groups, each a single-writer ledger (this codebase) with 3 replicas in 3 zones.",
+    aws: { svc: "StatefulSets on EKS, Raft-replicated", why: "Each player's accounts live on exactly one shard, so every transaction is local to one single-writer ledger: no distributed transactions. The leader replicates each group-commit batch and acknowledges only after two zones have fsynced it.", alt: "A managed database such as Aurora or DynamoDB as the ledger: strong options, but they cannot produce this ledger's hash chain and signed heads natively, and contention on hot player rows behaves worse than a single writer." },
+    azure: { svc: "StatefulSets on AKS, Raft-replicated", why: "Same design: zone-spread replicas, quorum fsync before receipts.", alt: "Cosmos DB with strong consistency: also strong, with the same caveats about native verifiability and hot rows." },
+    peaks: "Group commit grows batches instead of fsyncs. Shards are added before big events, by moving logical shards between pods off-peak.", fail: "Lose a zone: a follower in another zone is elected in seconds, with no acknowledged entry lost." },
+  // ---- Storage ----
+  disk: { label: "Journal volumes", tier: "storage", role: "Low-latency block storage for each replica's journal, one volume per zone.",
+    aws: { svc: "EBS io2 Block Express", why: "Consistent sub-millisecond fsync and high durability; encrypted with an in-country KMS key backed by the HSM.", alt: "Instance-store NVMe: faster, but lost on instance stop, which pushes all durability onto replication." },
+    azure: { svc: "Premium SSD v2 (zonal)", why: "Low, tunable latency and IOPS without resizing; encrypted with customer-managed keys from Managed HSM.", alt: "Ultra Disk, lower latency still at higher cost; a fine upgrade if fsync dominates." },
+    peaks: "Fsync rate per shard stays roughly constant under load thanks to group commit.", fail: "Zonal: loss is covered by the other two replicas." },
+  archive: { label: "WORM archive", tier: "storage", role: "Sealed journal segments and signed heads kept unalterable for the retention period.",
+    aws: { svc: "S3 with Object Lock (compliance mode)", why: "Not even the root account can delete or overwrite during retention. Segments are already encrypted by the application before upload.", alt: "Plain versioned S3, which an administrator could still purge." },
+    azure: { svc: "Blob Storage, locked immutability policy", why: "Time-based retention that cannot be shortened once locked. Segments arrive already encrypted.", alt: "Soft delete and versioning only, which are reversible." },
+    peaks: "Segments upload asynchronously, off the commit path.", fail: "Zone-redundant storage in country." },
+  readdb: { label: "Read models", tier: "storage", role: "Bet history, statements and back-office queries, built from the ledger's change events.",
+    aws: { svc: "DynamoDB on-demand", why: "Absorbs read spikes without capacity planning. Explicitly eventually consistent; the authoritative balance is always read from the shard leader.", alt: "Read replicas of the ledger itself, which would compete with the writer." },
+    azure: { svc: "Cosmos DB autoscale", why: "Same role and caveat: projections may trail by moments; balances come from the shard.", alt: "Azure SQL read replicas, with more capacity planning." },
+    peaks: "Scales independently, so history browsing at half-time never slows bet placement.", fail: "Rebuildable from the journal at any time." },
+  // ---- Security ----
+  hsm: { label: "Hardware HSM", tier: "security", role: "Holds the signing key for tree heads and the root keys for data encryption. Keys never leave it in plaintext.",
+    aws: { svc: "AWS CloudHSM (in-country cluster)", why: "Single-tenant, FIPS 140 Level 3 validated hardware under your exclusive control, in the primary region only. Confirm the HSM model's FIPS certificate and Ed25519 support; TreeHeadSigner can use ECDSA P-256 if needed.", alt: "Multi-region KMS keys: convenient, but they would place usable keys in the DR region permanently, which defeats the residency design." },
+    azure: { svc: "Key Vault Managed HSM (in-country)", why: "Single-tenant, FIPS 140 Level 3 validated pool in the primary region only. Check key-type support for Ed25519; fall back to ECDSA P-256 via TreeHeadSigner.", alt: "Key Vault Standard, whose keys are software-protected." },
+    peaks: "Tree heads are signed every N entries, not per bet, so HSM load is tiny even at peak. Data keys are cached in memory, wrapped.", fail: "HSMs in at least two zones. An HSM outage pauses signing, never commits." },
+  crypto: { label: "Envelope encryption", tier: "security", role: "Encrypts every segment, snapshot and stream record in the application before it is stored or replicated.",
+    aws: { svc: "AES-256-GCM data keys wrapped by CloudHSM", why: "This is what makes residency enforceable. S3 cross-region replication of server-side-encrypted objects decrypts and re-encrypts in transit, so plaintext would briefly leave the country. Encrypting in the app first means replication only ever sees opaque bytes.", alt: "Relying on SSE-KMS with replication, which is the leak described." },
+    azure: { svc: "AES-256-GCM data keys wrapped by Managed HSM", why: "Same reasoning: only client-side ciphertext crosses the border.", alt: "Storage-service encryption with object replication alone, for the same reason." },
+    peaks: "Symmetric encryption at memory speed; negligible next to the fsync.", fail: "Data keys are recoverable from the HSM and from the in-country escrow." },
+  net: { label: "Private network & mTLS", tier: "security", role: "No public IPs below the edge; every service-to-service call is mutually authenticated.",
+    aws: { svc: "VPC private subnets, PrivateLink, mTLS", why: "Ledger shards accept connections only from the API and worker pods, with certificate identity. Security groups and network policies deny by default.", alt: "Flat VPC with security groups only, which leaves lateral movement too easy." },
+    azure: { svc: "VNet, Private Endpoints, mTLS", why: "Front Door reaches the origin via Private Link; data services are reachable only via Private Endpoints.", alt: "Service endpoints, which keep public endpoints alive." },
+    peaks: "No effect.", fail: "Zone-redundant gateways and endpoints." },
+  iam: { label: "Identity & access", tier: "security", role: "Workload identity per service, least privilege, and no human standing access to production data.",
+    aws: { svc: "IAM, EKS Pod Identity, Secrets Manager", why: "Pods get short-lived credentials scoped to exactly what they need. Humans use just-in-time access with approval.", alt: "Long-lived access keys in configuration." },
+    azure: { svc: "Entra Workload ID, Key Vault, PIM", why: "Federated pod identities and Privileged Identity Management for time-boxed human access.", alt: "Service principals with secrets." },
+    peaks: "No effect.", fail: "Regional service with its own resilience." },
+  logs: { label: "Audit trail", tier: "security", role: "Every administrative and key action recorded where the operator cannot edit it.",
+    aws: { svc: "CloudTrail to an Object Lock bucket", why: "Organization trail in a separate log-archive account, including every HSM and key operation.", alt: "Trail in the workload account, which its administrators could disable." },
+    azure: { svc: "Activity and diagnostic logs to immutable storage", why: "Routed to a separate subscription with locked retention.", alt: "Logs kept in the workload subscription." },
+    peaks: "Asynchronous.", fail: "Separate account or subscription." },
+  // ---- Operations ----
+  dir: { label: "Shard directory", tier: "ops", role: "Maps player id ranges to shard groups; versioned so routers and shards agree.",
+    aws: { svc: "DynamoDB table (versioned)", why: "Small, read-mostly, cached by every API pod; shard leaders reject requests carrying a stale map version.", alt: "Static configuration, which makes moving shards a redeploy." },
+    azure: { svc: "Cosmos DB container (versioned)", why: "Same role and fencing rule.", alt: "App Configuration, workable for a slowly changing map." },
+    peaks: "Read from a local cache; not on the hot path.", fail: "Pods keep the last good version." },
+  obs: { label: "Observability", tier: "ops", role: "Metrics, traces and logs: queue depth, batch size, fsync latency, quorum lag per shard.",
+    aws: { svc: "Managed Prometheus, Managed Grafana, CloudWatch", why: "Shard-level dashboards and alerts on replication lag and queue depth, the earliest signs of trouble.", alt: "Logs only, which show problems after customers do." },
+    azure: { svc: "Azure Monitor, Managed Prometheus & Grafana", why: "Same signals and alerts.", alt: "As for AWS." },
+    peaks: "Sampling for traces; full metrics.", fail: "Regional managed services." },
+  audit: { label: "Continuous verifier", tier: "ops", role: "Runs LedgerVerifier continuously against the WORM archive from a separate account.",
+    aws: { svc: "Fargate job in a separate audit account", why: "Separation of duties: the team that runs the ledger cannot silence the job that checks it.", alt: "Running the verifier inside the production account." },
+    azure: { svc: "Container Apps job in a separate audit subscription", why: "Same separation of duties.", alt: "As for AWS." },
+    peaks: "Works from the archive, so never slows production.", fail: "An alert if it cannot run, as well as when it finds a problem." },
+  // ---- Outside the platform ----
+  regulator: { label: "Regulator", tier: "outside", role: "Receives every signed tree head as it is made, can request proofs, and must be notified before DR is activated.",
+    aws: { svc: "STH feed, proof API, read-only audit role", why: "Holding the signed heads independently is what makes history unforgeable even by the operator: any later version of the ledger must be consistent with what the regulator already has. After a disaster, the regulator's last head is the yardstick for what was recovered.", alt: "Periodic reports, which the operator could compose after the fact." },
+    azure: { svc: "STH feed, proof API, read-only audit role", why: "Same: independent custody of the signed heads.", alt: "As for AWS." },
+    peaks: "Heads are periodic, so the feed is small regardless of load.", fail: "Heads are also kept in the WORM archive and resent on reconnection." },
+  custodians: { label: "Key custodians & escrow", tier: "outside", role: "M-of-N named officers holding shares of the escrowed key backup, in an in-country vault.",
+    aws: { svc: "HSM backup + M-of-N quorum", why: "No single person can move keys abroad. The ceremony is filmed and logged, and requires the regulator to be notified.", alt: "A key copy stored in the DR region, which would make the residency promise false." },
+    azure: { svc: "Managed HSM backup + security domain quorum", why: "Managed HSM recovery already requires a quorum of security-domain key holders, which maps directly onto this ceremony.", alt: "As for AWS." },
+    peaks: "Not involved.", fail: "Shares held by more custodians than the quorum needs, in separate locations." },
+  // ---- DR region ----
+  drstore: { label: "Encrypted replica", tier: "dr", role: "Continuous copy of journal segments, snapshots and signed heads, as ciphertext.",
+    aws: { svc: "S3 bucket (Object Lock) in DR region", why: "Receives app-encrypted objects only. Replication lag is typically seconds; that lag is the disaster RPO.", alt: "Database-level cross-region replicas, which would hold readable data abroad." },
+    azure: { svc: "Immutable Blob container in DR region", why: "Receives only app-encrypted objects.", alt: "Geo-redundant storage with readable secondary, readable data abroad." },
+    peaks: "Asynchronous; never in the commit path.", fail: "If the primary region is lost, everything replicated up to the last few seconds is here." },
+  drcluster: { label: "Pilot light cluster", tier: "dr", role: "Network, cluster control plane and images ready; no ledger nodes running.",
+    aws: { svc: "EKS with zero ledger nodes + IaC", why: "Costs little, rehearsed quarterly, scales up in minutes when needed.", alt: "Warm standby with running replicas, which would need keys to be useful and so break residency." },
+    azure: { svc: "AKS with empty pools + IaC", why: "Same pilot light approach.", alt: "As for AWS." },
+    peaks: "Not serving.", fail: "Brought up by the runbook after the ceremony." },
+  drhsm: { label: "Empty HSM", tier: "dr", role: "Initialised HSM holding no keys until the ceremony.",
+    aws: { svc: "CloudHSM cluster, no key material", why: "Ready to receive the backup quickly, but useless to anyone until custodians arrive.", alt: "Keys pre-loaded, which breaks residency." },
+    azure: { svc: "Managed HSM, not activated", why: "Activated only by restoring the security domain with the custodians' quorum.", alt: "As for AWS." },
+    peaks: "Not involved.", fail: "Its only job is to exist and be empty." },
+};
+const TIERS = [
+  ["edge", "Edge", "global"], ["ingress", "Ingress", "3 zones"], ["services", "Stateless services", "elastic"],
+  ["stream", "Event stream", "3 zones"], ["ledger", "Ledger", "3 zones, quorum"], ["storage", "Storage", "in country"],
+  ["security", "Security", "keys stay here"], ["ops", "Operations", "separate accounts"],
+];
+const SHARD_ROWS = [["s01", 0], ["s02", 1], ["s03", 2], ["s04", 0]]; // leader zone index for 4 of 64 groups
+
+const CEREMONY = [
+  "Incident commander declares the primary region lost; the regulator is notified before any key moves.",
+  "M-of-N key custodians retrieve their shares from the in-country escrow and travel to (or remotely attest at) the DR site.",
+  "The HSM backup is restored into the DR region's empty HSM under the custodians' quorum; every step is logged and recorded.",
+  "The pilot light cluster scales up its ledger node pools from infrastructure-as-code.",
+  "Segments are decrypted and replayed by the same code that verifies every hash, then checked against the regulator's last signed tree head.",
+  "Any gap between the replica and the regulator's head is declared, and filled by idempotent client retries and PSP reconciliation.",
+  "DNS is switched to the DR region and the platform reopens. Plaintext now exists abroad, by declared and recorded exception.",
+];
+
+let pv = "aws", drill = "none", cSel = "hsm";
+function nodeStatus(id) {
+  const t = CLOUD[id].tier;
+  if (drill === "az") return ["shards", "disk", "k8s", "bus", "lb"].includes(id) ? "degraded" : "";
+  if (drill === "region") {
+    if (t === "dr" || id === "dns") return "promoted";
+    if (t === "outside") return "promoted";
+    return "down";
+  }
+  return "";
+}
+function nodeBtn(id) {
+  const n = CLOUD[id], st = nodeStatus(id);
+  return `<button type="button" class="cn ${st}${cSel === id ? " on" : ""}" data-cn="${id}" aria-pressed="${cSel === id}">${n.label}<small>${esc(n[pv].svc)}</small></button>`;
+}
+function shardGrid() {
+  const zones = ["zone a", "zone b", "zone c"];
+  const deadZone = drill === "az" ? 1 : -1, allDead = drill === "region";
+  let h = `<div class="shardbox">${nodeBtn("shards")}<div class="shardgrid"><span></span>${zones.map((z, i) => `<span class="hd${i === deadZone || allDead ? " dead" : ""}">${z}</span>`).join("")}`;
+  for (const [name, lz] of SHARD_ROWS) {
+    const leader = deadZone === lz ? (lz + 1) % 3 : lz;
+    h += `<span>${name}</span>`;
+    for (let z = 0; z < 3; z++) {
+      const dead = z === deadZone || allDead, isL = z === leader && !allDead;
+      h += `<span class="rep${isL ? " L" : ""}${dead ? " dead" : ""}${isL && leader !== lz ? " moved" : ""}">${isL ? "leader" : "follower"}</span>`;
+    }
+  }
+  return h + `</div></div>`;
+}
+function renderCloud() {
+  $("tiers").innerHTML = TIERS.map(([t, label, sub]) => {
+    const ids = Object.keys(CLOUD).filter(k => CLOUD[k].tier === t);
+    const inner = t === "ledger" ? shardGrid() : `<div class="tnodes">${ids.map(nodeBtn).join("")}</div>`;
+    return `<div class="tier"><div class="tl">${label}<span>${sub}</span></div>${inner}</div>`;
+  }).join("");
+  $("outsideNodes").innerHTML = ["regulator", "custodians"].map(nodeBtn).join("");
+  $("drNodes").innerHTML = ["drstore", "drcluster", "drhsm"].map(nodeBtn).join("");
+  document.querySelectorAll("[data-cn]").forEach(b => b.addEventListener("click", () => { cSel = b.dataset.cn; renderCloud(); }));
+
+  const n = CLOUD[cSel], p = n[pv], st = nodeStatus(cSel);
+  $("cdetail").innerHTML = `<div class="prov">${pv === "aws" ? "AWS" : "Azure"} · ${n.tier === "dr" ? "DR region" : n.tier === "outside" ? "outside the platform" : "primary region"}${st ? " · " + st : ""}</div>
+    <h3>${n.label}</h3><div class="svc">${esc(p.svc)}</div>
+    <dl><div><dt>Role</dt><dd>${n.role}</dd></div><div><dt>Why this choice</dt><dd>${p.why}</dd></div>
+    <div><dt>Under peak load</dt><dd>${n.peaks}</dd></div><div><dt>When things fail</dt><dd>${n.fail}</dd></div>
+    <div><dt>Considered instead</dt><dd>${p.alt}</dd></div></dl>`;
+
+  const note = $("drillNote");
+  if (drill === "none") { note.className = "drillnote"; note.innerHTML = "<b>Healthy.</b> Everything runs in the primary region across three zones. The DR region holds ciphertext only and its HSM is empty. Select a drill to see what happens in an outage."; }
+  else if (drill === "az") { note.className = "drillnote warn"; note.innerHTML = "<b>Zone b lost.</b> Every shard still has two of three replicas, so quorum holds. Shard s02's leader was in zone b; a follower in zone a is elected within seconds (marked green). No acknowledged bet is lost, because a receipt required fsync in two zones. Requests in flight during the election are retried by clients with the same idempotency keys and receive their original receipts. Stateless pods reschedule into zones a and c. Data never left the country."; }
+  else { note.className = "drillnote bad"; note.innerHTML = `<b>Primary region lost.</b> Nothing in the DR region can read the data yet. Recovery is a deliberate ceremony, not an automatic failover:<ol class="steps-list" style="font-family:var(--f-body);font-size:.88rem;margin-top:6px">${CEREMONY.map(c => `<li>${c}</li>`).join("")}</ol><span style="display:block;margin-top:6px">Recovery point: the replication lag at the moment of loss, typically seconds, made visible by comparing with the regulator's last signed head. Recovery time: the length of the ceremony plus scale-up, typically within hours, which should be agreed with the regulator in advance.</span>`; }
+}
+function setPv(p) { pv = p; $("pvAws").setAttribute("aria-pressed", String(p === "aws")); $("pvAzure").setAttribute("aria-pressed", String(p === "azure")); renderCloud(); }
+$("pvAws").onclick = () => setPv("aws");
+$("pvAzure").onclick = () => setPv("azure");
+document.querySelectorAll("#drills button").forEach(b => b.onclick = () => {
+  drill = b.dataset.drill;
+  document.querySelectorAll("#drills button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
+  if (drill === "az") cSel = "shards"; else if (drill === "region") cSel = "custodians";
+  renderCloud();
+});
+renderCloud();
+
+/* ============================== PEAK LOAD MODEL ============================== */
+const SHARDS = 64, PER_SHARD_CAP = 25000, ROUND_MS = 1.5, POD_RPS = 2000, MAX_RPS = 600000;
+const toRps = v => Math.round(1000 * Math.pow(MAX_RPS / 1000, v / 100));
+const toSlider = r => Math.round(100 * Math.log(r / 1000) / Math.log(MAX_RPS / 1000));
+const PRESETS = [["Tuesday afternoon", 3000], ["Saturday 3pm kickoffs", 40000], ["Champions League goal", 150000], ["World Cup final whistle", 450000]];
+$("presets").innerHTML = PRESETS.map(([n, r]) => `<button type="button" data-r="${r}" aria-pressed="false">${n}</button>`).join("");
+$("presets").querySelectorAll("button").forEach(b => b.onclick = () => { $("load").value = toSlider(+b.dataset.r); renderLoad(+b.dataset.r); });
+$("load").addEventListener("input", () => renderLoad());
+const fmt = n => n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? Math.round(n / 1e3) + "k" : n >= 1e3 ? (n / 1e3).toFixed(1) + "k" : String(Math.round(n));
+function meter(k, v, sub, frac) {
+  const cls = frac > 0.9 ? "over" : frac > 0.65 ? "hot" : "";
+  return `<div class="meter"><span class="k">${k}</span><b>${v}</b>${frac === undefined ? "" : `<div class="bar"><i class="${cls}" style="width:${Math.min(100, Math.max(2, frac * 100)).toFixed(0)}%"></i></div>`}<span>${sub}</span></div>`;
+}
+function renderLoad(exact) {
+  const rps = exact ?? toRps(+$("load").value);
+  $("loadOut").textContent = fmt(rps) + " bets/s";
+  $("presets").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(+b.dataset.r === exact)));
+  const pods = Math.max(6, Math.ceil(rps / POD_RPS));
+  const per = rps / SHARDS, util = per / PER_SHARD_CAP;
+  const rounds = Math.min(per, 1000 / ROUND_MS), batch = Math.max(1, per / (1000 / ROUND_MS));
+  const p99 = util >= 1 ? Infinity : 2 * ROUND_MS / (1 - Math.min(util, 0.95));
+  const backlog = rps * 20; // open bets settling together at a final whistle (rough)
+  const spare = SHARDS * PER_SHARD_CAP * 0.9 - rps;
+  const drain = spare > 0 ? backlog / spare : Infinity;
+  $("meters").innerHTML = [
+    meter("API pods", fmt(pods), "stateless, any zone", pods / 300),
+    meter("Load per shard", fmt(per) + "/s", `${Math.round(util * 100)}% of one leader's headroom`, util),
+    meter("Batch per commit", batch < 10 ? batch.toFixed(1) : fmt(batch), "transactions sharing one quorum fsync", batch / 1024),
+    meter("Commit rounds per shard", fmt(rounds) + "/s", "flat once batching kicks in", rounds / (1000 / ROUND_MS)),
+    meter("p99 commit latency", Number.isFinite(p99) ? p99.toFixed(1) + " ms" : "saturated", "queueing plus quorum round", Number.isFinite(p99) ? p99 / 50 : 1),
+    meter("Final whistle backlog", fmt(backlog), Number.isFinite(drain) ? `settlements drain in about ${drain < 1 ? "<1" : Math.ceil(drain)} s` : "add shards before this event", Number.isFinite(drain) ? Math.min(1, drain / 60) : 1),
+  ].join("");
+  $("loadNote").innerHTML = util < 0.3
+    ? "Plenty of headroom. Batches are small, so latency is close to one quorum round."
+    : util < 0.65
+      ? "Group commit is doing the work: transactions per fsync rise while fsyncs per second stay flat. The API tier scales out; the ledger tier does not need to."
+      : util < 0.9
+        ? "Approaching a leader's CPU budget. For a scheduled event, add shard groups beforehand by moving logical shards onto new pods off-peak."
+        : "Beyond planned capacity. Shards return back-pressure (429 with Retry-After) rather than slowing everyone down; the fixture calendar should have triggered more shard groups.";
+}
+$("load").value = toSlider(150000);
+renderLoad(150000);
 </script>
 
 </body>
