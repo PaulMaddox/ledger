@@ -121,19 +121,6 @@ class Audit(
 
     data class AuditResult(val report: LedgerVerifier.Report, val millis: Long, val note: String)
 
-    /** Give a lab a private signed snapshot, and always remove its temporary files afterwards. */
-    internal fun <T> withSnapshot(action: (Path, SignedTreeHead) -> T): T {
-        val anchor = checkpointNow()
-        val copy = snapshot(anchor)
-        try {
-            return action(copy, anchor)
-        } finally {
-            check(copy.toFile().deleteRecursively()) { "could not remove lab snapshot $copy" }
-        }
-    }
-
-    internal fun verifySnapshot(directory: Path) = LedgerVerifier.verify(directory, ledgerId, trustedKeys)
-
     /** Run the offline verifier, exactly as a regulator would, over a fresh snapshot. */
     fun fullAudit(): AuditResult {
         val started = System.nanoTime()
@@ -162,6 +149,19 @@ class Audit(
         val checkpoint = checkpointNow() // the tamper must alter history covered by this signed head
         val dir = snapshot(checkpoint)
         try {
+            val started = System.nanoTime()
+            val note = tamperStorage(dir, ledgerId, mode)
+            val report = LedgerVerifier.verify(dir, ledgerId, trustedKeys)
+            return AuditResult(report, (System.nanoTime() - started) / 1_000_000, "$note (snapshot copy)")
+        } finally {
+            dir.toFile().deleteRecursively()
+        }
+    }
+
+    companion object {
+        /** Demo-only attack on a CLOSED ledger, under its directory lock. Never a writer operation. */
+        internal fun tamperStorage(dir: Path, ledgerId: String, mode: String): String {
+            require(mode in setOf("edit", "rewrite", "truncate")) { "mode must be edit, rewrite or truncate" }
             val path = dir.resolve(Ledger.ENTRIES_FILE)
             val records = ArrayList<ByteArray>()
             Journal.scanReadOnly(path) { records += it }
@@ -171,17 +171,17 @@ class Audit(
             val note = when (mode) {
                 "truncate" -> {
                     repeat(5) { records.removeAt(records.size - 1) }
-                    "Deleted the newest 5 entries from a copy of the journal, as if to hide recent payouts."
+                    "Deleted the newest 5 entries from the journal."
                 }
                 else -> {
                     // The victim: the most recent deposit outside the newest few entries.
                     val target = (records.size - 3 downTo 0).first { EntryCodec.decode(body(records[it])).kind == "DEPOSIT" }
                     val original = EntryCodec.decode(body(records[target]))
-                    val forged = original.copy(postings = original.postings.map { it.copy(amount = it.amount * 10) })
+                    val forged = original.copy(postings = original.postings.map { it.copy(amount = Math.multiplyExact(it.amount, 10)) })
                     if (mode == "edit") {
                         // Re-encode the forged entry but keep the stored chain hash: no hashes recomputed.
                         records[target] = EntryCodec.encode(forged) + records[target].copyOfRange(records[target].size - 32, records[target].size)
-                        "Inflated deposit #$target tenfold in a copy of the journal, without touching any hashes."
+                        "Inflated deposit #$target tenfold without touching any hashes."
                     } else {
                         // Recompute the chain from the forged entry onwards: internally consistent.
                         var chain = if (target == 0) Hashes.genesis(ledgerId) else SealedEntry.seal(EntryCodec.decode(body(records[target - 1]))).chainHash
@@ -191,18 +191,14 @@ class Audit(
                             records[i] = sealed.journalRecord()
                             chain = sealed.chainHash
                         }
-                        "Inflated deposit #$target tenfold in a copy of the journal and recomputed every later hash, so the chain is internally perfect."
+                        "Inflated deposit #$target tenfold and recomputed every later hash."
                     }
                 }
             }
             Files.delete(path)
             val (journal, _) = Journal.openForAppend(path) {}
             journal.use { it.appendBatch(records) }
-            val started = System.nanoTime()
-            val report = LedgerVerifier.verify(dir, ledgerId, trustedKeys)
-            return AuditResult(report, (System.nanoTime() - started) / 1_000_000, note)
-        } finally {
-            dir.toFile().deleteRecursively()
+            return note
         }
     }
 

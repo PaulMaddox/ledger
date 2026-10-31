@@ -520,7 +520,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="web-console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
-  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code> for customer wallets, operator dashboards, browser-verified proofs, simulation, Administrator performance graphs and isolated Chaos Monkey experiments. This unauthenticated demo includes a confirmation-protected storage reset that permanently deletes demo history, an explicit exception to the production ledger's append-only rule.</p>
+  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code> for customer wallets, operator dashboards, browser-verified proofs, simulation, Administrator performance graphs and Chaos Monkey attacks on the main demo store. This unauthenticated demo leaves damaged storage for inspection until you use Administrator reset to start again, an explicit demo-only exception to the production ledger's append-only rule.</p>
   <figure class="shot wide">
     <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>
     <figcaption><b>Simulator.</b> Automated customers and their live activity.</figcaption>
@@ -545,7 +545,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   </div>
   <figure class="shot wide">
     <a href="screenshots/chaos-tamper.png"><img src="screenshots/chaos-tamper.png" alt="Chaos Monkey tamper lab: a rewritten history caught by the signed checkpoint" loading="lazy"></a>
-    <figcaption><b>Tamper lab.</b> Rewritten history caught by a signed checkpoint.</figcaption>
+    <figcaption><b>Tamper lab.</b> Main-store history rewritten, recovery refused.</figcaption>
   </figure>
   <div class="shots">
     <figure class="shot">
@@ -553,8 +553,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
       <figcaption><b>Administrator.</b> Live server performance and a protected demo reset.</figcaption>
     </figure>
     <figure class="shot">
-      <a href="screenshots/chaos.png"><img src="screenshots/chaos.png" alt="Chaos Monkey view: seven isolated failure experiments with measured results" loading="lazy"></a>
-      <figcaption><b>Chaos Monkey.</b> Isolated failures and observed protection.</figcaption>
+      <a href="screenshots/chaos.png"><img src="screenshots/chaos.png" alt="Chaos Monkey view: authorized main-store failures, recovery results and manual reset" loading="lazy"></a>
+      <figcaption><b>Chaos Monkey.</b> Main-store failures; reset to start again.</figcaption>
     </figure>
   </div>
 </section>

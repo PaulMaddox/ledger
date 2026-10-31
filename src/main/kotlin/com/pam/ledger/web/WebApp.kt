@@ -53,7 +53,7 @@ import kotlin.system.exitProcess
 
 /*
  * ============================================================================
- *  LEDGER WEB APP: dashboards for customers, operators, regulators and a simulator
+ *  LEDGER WEB APP: dashboards, simulation, telemetry and main-store failure experiments
  * ============================================================================
  *
  *  Run with:  ./gradlew web          (Windows: .\gradlew.bat web)
@@ -110,7 +110,7 @@ fun main(args: Array<String>) {
     println("  Ledger files in            ${app.directory}")
     println("  Press Ctrl+C to stop.")
     if (opts.host != "127.0.0.1" && opts.host != "localhost") {
-        println("  WARNING: listening on ${opts.host}. There is no authentication; anyone who can reach it can move money.")
+        println("  WARNING: listening on ${opts.host}. No authentication; anyone who can reach it can move money or destroy demo storage.")
     }
     Thread.currentThread().join() // serve until interrupted
 }
@@ -189,13 +189,15 @@ class LedgerWebApp private constructor(
     private class Services(
         val ledger: Ledger, val wallet: SportsbookWallet, val readModel: ReadModel,
         val book: Book, val simulator: Simulator, val stats: Stats, val audit: Audit,
-        val performance: Performance, val chaos: ChaosLab, val resources: List<AutoCloseable>,
+        val performance: Performance, val resources: List<AutoCloseable>,
     ) : AutoCloseable {
         override fun close() = closeResources(resources)
     }
 
     // This lock coordinates service lifetime, not ledger writes; the engine still has one writer.
     private val lifecycle = ReentrantReadWriteLock(true)
+    private val chaos = ChaosLab()
+    private var offlineReason: String? = if (services == null) "Main store failed recovery. Use Administrator reset." else null
     private val active get() = services ?: throw LedgerClosedException()
     private val ledger get() = active.ledger
     private val wallet get() = active.wallet
@@ -219,11 +221,16 @@ class LedgerWebApp private constructor(
             val signer = Ed25519TreeHeadSigner(demoKeyPair(dir))
             val resources = ArrayList<AutoCloseable>()
             try {
-                val services = openServices(dir, signer).also(resources::add)
+                val services = try {
+                    openServices(dir, signer).also(resources::add)
+                } catch (e: TamperDetectedException) {
+                    System.err.println("Demo store failed recovery; console remains available for reset: ${e.message}")
+                    null
+                }
                 val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
                 val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
                 resources.add(AutoCloseable { server.stop(0) })
-                val app = LedgerWebApp(dir, LEDGER_ID, services, allowedHosts, resources.drop(1))
+                val app = LedgerWebApp(dir, LEDGER_ID, services, allowedHosts, resources.filter { it !== services })
                 app.server = server
                 server.executor = executor
                 server.createContext("/") { ex -> app.handle(ex) }
@@ -247,10 +254,9 @@ class LedgerWebApp private constructor(
                 val stats = Stats(readModel).also(resources::add)
                 val audit = Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)).also(resources::add)
                 val performance = Performance(ledger, readModel, dir).also(resources::add)
-                val chaos = ChaosLab(audit)
                 CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
                 if (book.fixtures().isEmpty()) repeat(6) { book.addFixture() }
-                return Services(ledger, wallet, readModel, book, simulator, stats, audit, performance, chaos, resources)
+                return Services(ledger, wallet, readModel, book, simulator, stats, audit, performance, resources)
             } catch (failure: Throwable) {
                 closeResources(resources, failure)
                 throw failure
@@ -332,15 +338,22 @@ class LedgerWebApp private constructor(
             val request = Request(ex.requestMethod, segments, params)
             val expectedServices = services
             fun checkGeneration() {
-                if (expectedServices == null) {
-                    throw HttpError(503, "ledger_unavailable", "demo services are stopped; restart the app if storage reset failed")
-                }
                 if (services !== expectedServices) {
                     throw HttpError(409, "storage_reset", "demo storage changed; refresh before retrying")
                 }
             }
-            val result = if (request.method == "POST" && segments == listOf("administrator", "clear")) {
-                lifecycle.write { checkGeneration(); clearStorage(request) }
+            val result = if (request.method == "POST" && segments in listOf(
+                    listOf("administrator", "clear"), listOf("chaos"), listOf("regulator", "tamper"))) {
+                lifecycle.write {
+                    checkGeneration()
+                    when (segments) {
+                        listOf("administrator", "clear") -> clearStorage(request)
+                        listOf("regulator", "tamper") -> runChaos(request.str("mode"), request.str("confirmation")).let {
+                            it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                        }
+                        else -> runChaos(request.str("scenario"), request.str("confirmation"))
+                    }
+                }
             } else lifecycle.read { checkGeneration(); route(request) }
             respond(ex, 200, result)
         } catch (e: Throwable) {
@@ -435,9 +448,15 @@ class LedgerWebApp private constructor(
         fun post(vararg pattern: String) = r.method == "POST" && matches(p, pattern)
         return when {
             get("overview") -> overview()
-            get("administrator") -> active.performance.view()
-            get("chaos") -> active.chaos.view()
-            post("chaos") -> active.chaos.run(r.str("scenario"))
+            get("administrator") -> (services?.performance?.view() ?: mapOf(
+                "series" to emptyList<Any>(), "directory" to directory.toString(),
+                "ioScope" to "Ledger services stopped; telemetry is not live.",
+                "storageFree" to Files.getFileStore(directory).usableSpace,
+                "journalBytes" to listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE).sumOf {
+                    val file = directory.resolve(it)
+                    if (Files.exists(file)) Files.size(file) else 0L
+                })) + mapOf("available" to (services != null), "reason" to offlineReason)
+            get("chaos") -> chaos.view(services != null, offlineReason)
 
             // ---- Customer ----
             get("players") -> searchPlayers(r.params["q"] ?: "")
@@ -487,7 +506,6 @@ class LedgerWebApp private constructor(
             )
             post("regulator", "checkpoint") -> sthView(audit.checkpointNow())
             post("regulator", "audit") -> auditView(audit.fullAudit())
-            post("regulator", "tamper") -> auditView(audit.tamper(r.str("mode")))
             get("regulator", "players", "*") -> playerAudit(p[2])
             get("proof", "inclusion") -> inclusion(r.long("seq"))
             get("proof", "consistency") -> consistency(r.long("from"), r.long("to"))
@@ -498,9 +516,10 @@ class LedgerWebApp private constructor(
 
     private fun clearStorage(r: Request): Any {
         require(r.str("confirmation") == "CLEAR DEMO STORAGE") { "type CLEAR DEMO STORAGE to confirm permanent deletion" }
-        val previous = active
+        val previous = services
         services = null
-        previous.close()
+        offlineReason = "Reset in progress or failed. Use Administrator reset to start again."
+        previous?.close()
         // Only app-owned data files are deleted. Keep both lock inodes and unrelated user files.
         val signer = Ed25519TreeHeadSigner(demoKeyPair(directory))
         FileChannel.open(directory.resolve(Ledger.LOCK_FILE), CREATE, WRITE).use { channel ->
@@ -508,10 +527,42 @@ class LedgerWebApp private constructor(
                 listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE, Book.FIXTURES_FILE).forEach { name ->
                     Files.deleteIfExists(directory.resolve(name))
                 }
+                Files.list(directory).use { files ->
+                    files.filter { file ->
+                        val name = file.fileName.toString()
+                        listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE).any { journal ->
+                            name.startsWith("$journal.torn-") && name.removePrefix("$journal.torn-").let { suffix ->
+                                suffix.isNotEmpty() && suffix.all { it in '0'..'9' }
+                            }
+                        }
+                    }.forEach { Files.delete(it) }
+                }
             } ?: throw IllegalStateException("storage is in use by another ledger")
         }
         services = openServices(directory, signer)
-        return mapOf("cleared" to true, "message" to "Demo history deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
+        offlineReason = null
+        chaos.clearHistory()
+        return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
+    }
+
+    private fun runChaos(scenario: String, confirmation: String): Map<String, Any?> {
+        ChaosLab.validate(scenario, confirmation)
+        val previous = services ?: throw HttpError(503, "ledger_unavailable",
+            "Main store is stopped. Use Administrator reset before another experiment.")
+        // Anchor the exact stopped prefix. The simulator is drained before this final checkpoint.
+        services = null
+        offlineReason = "Main-store chaos in progress or interrupted. Use Administrator reset if needed."
+        previous.close()
+        val signer = Ed25519TreeHeadSigner(demoKeyPair(directory))
+        Ledger.open(LedgerConfig(directory = directory, ledgerId = ledgerId, signer = signer)).use { it.checkpoint() }
+        val result = chaos.run(scenario, directory, signer)
+        if (result["available"] == true) {
+            services = openServices(directory, signer)
+            offlineReason = null
+        } else {
+            offlineReason = result["evidence"].toString()
+        }
+        return result
     }
 
     private fun matches(path: List<String>, pattern: Array<out String>) =
@@ -538,8 +589,14 @@ class LedgerWebApp private constructor(
     )
 
     private fun overview(): Map<String, Any?> {
+        if (services == null) return mapOf(
+            "ledgerId" to ledgerId, "entries" to null, "chainHead" to null,
+            "merkleRoot" to null, "latestCheckpoint" to null, "simulator" to "STOPPED",
+            "available" to false, "reason" to offlineReason,
+        )
         val head = ledger.head()
         return mapOf(
+            "available" to true,
             "ledgerId" to ledgerId,
             "entries" to head.size,
             "chainHead" to head.chainHead,

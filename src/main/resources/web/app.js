@@ -221,10 +221,13 @@ function poll(fn, ms) {
 poll(async () => {
   const o = await api("overview");
   $("ledgerId").textContent = o.ledgerId;
-  $("tipEntries").textContent = int.format(o.entries);
+  $("tipEntries").textContent = o.entries == null ? "–" : int.format(o.entries);
   $("tipChain").textContent = short(o.chainHead);
   $("tipSigned").textContent = o.latestCheckpoint == null ? "–" : int.format(o.latestCheckpoint);
   $("simDot").className = "simdot " + o.simulator;
+  $("storeStatus").textContent = o.available === false ?
+    "Main ledger stopped. Open Administrator to clear storage and start again; damaged files remain for inspection." :
+    "Demonstration only: no authentication. The tabs switch views, they do not control access.";
 }, 1000);
 
 // ============================== customer ==============================
@@ -413,7 +416,8 @@ $("raceBtn").addEventListener("click", async () => {
 let stopCustomer = [];
 views.customer = {
   enter() {
-    loadPlayers(); loadCustFixtures();
+    loadPlayers().catch(e => { $("playerCount").textContent = e.message || String(e); });
+    loadCustFixtures().catch(e => say($("betResult"), false, errText(e)));
     stopCustomer = [poll(refreshPlayer, 1500), poll(loadCustFixtures, 4000), poll(loadPlayers, 5000)];
   },
   leave() { stopCustomer.forEach(f => f()); },
@@ -554,13 +558,8 @@ $("auditBtn").addEventListener("click", async () => {
   catch (e) { $("auditResult").innerHTML = `<div class="verdict bad">${errText(e)}</div>`; }
   $("auditBtn").disabled = false;
 });
-document.querySelectorAll("[data-tamper]").forEach(b => b.addEventListener("click", async () => {
-  $("tamperResult").innerHTML = `<p class="hint">Corrupting a copy and auditing it…</p>`;
-  try {
-    const r = await api("regulator/tamper", { method: "POST", params: { mode: b.dataset.tamper } });
-    $("tamperResult").innerHTML = (r.ok ? `<div class="verdict bad">The verifier did not notice. This would be a bug.</div>` : `<div class="verdict ok">Caught. ${esc(r.problems[0])}</div>`) + `<p>${esc(r.note)}</p>`;
-  } catch (e) { $("tamperResult").innerHTML = `<div class="verdict bad">${errText(e)}</div>`; }
-}));
+document.querySelectorAll("[data-tamper]").forEach(b =>
+  b.addEventListener("click", () => runMainChaos(b.dataset.tamper, $("tamperResult"))));
 
 $("consForm").addEventListener("submit", async e => {
   e.preventDefault();
@@ -762,6 +761,17 @@ async function refreshAdmin() {
   try {
     const data = await api("administrator");
     if (current !== "administrator") return;
+    $("adminCharts").hidden = data.available === false;
+    $("adminReset").style.order = data.available === false ? "-1" : "";
+    $("adminMode").textContent = data.available === false ?
+      "Ledger stopped · reset remains available" : "Server-side samples every second · up to 3 minutes of history";
+    if (data.available === false) {
+      $("adminKpis").innerHTML = "";
+      $("adminDetails").innerHTML = `<dt>Data directory</dt><dd>${esc(data.directory)}</dd><dt>Journal files on disk</dt><dd>${esc(bytesText(data.journalBytes))}</dd><dt>Storage available</dt><dd>${esc(bytesText(data.storageFree))}</dd>`;
+      $("adminScope").textContent = data.ioScope;
+      say($("adminStatus"), false, `${esc(data.reason)} Use Clear demo storage below to start again.`);
+      return;
+    }
     const s = data.series, last = s[s.length - 1];
     if (!last) { say($("adminStatus"), null, "Collecting server measurements…"); return; }
     const kpi = (name, value, note) => `<div class="kpi"><span>${esc(name)}</span><b>${esc(value)}</b><small>${esc(note)}</small></div>`;
@@ -834,30 +844,45 @@ $("clearForm").addEventListener("submit", async e => {
 });
 
 // ============================== chaos monkey ==============================
-let stopChaos = null, chaosSubmitting = false;
+let stopChaos = null, chaosSubmitting = false, chaosAvailable = false;
+function updateChaosControls() {
+  const enabled = chaosAvailable && !chaosSubmitting && $("chaosConfirmation").value === "CHAOS ON MAIN STORE";
+  document.querySelectorAll("[data-chaos], [data-tamper]").forEach(b => { b.disabled = !enabled; });
+}
+$("chaosConfirmation").addEventListener("input", updateChaosControls);
 async function refreshChaos() {
   try {
     const data = await api("chaos");
     if (current !== "chaos") return;
+    chaosAvailable = data.available;
+    say($("chaosStoreStatus"), data.available ? null : false, data.available ?
+      "Main store available. Each experiment stops the simulator; changes remain in the real ledger." :
+      `${esc(data.reason)} <a href="#administrator">Reset the main store</a> before running another experiment.`);
     $("chaosScenarios").innerHTML = data.scenarios.map(s =>
-      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" ${data.running || chaosSubmitting ? "disabled" : ""}>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join("");
+      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" disabled>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join("");
+    updateChaosControls();
     $("chaosHistory").innerHTML = data.history.length ? data.history.map(r =>
-      `<article><div class="panel-head"><b>${esc(r.name)}</b><span class="pill ${r.passed ? "ok" : "bad"}">${r.passed ? "Expected protection observed" : "Protection failed"}</span></div><p>${esc(r.evidence)}</p><p class="hint">${esc(timeOf(r.t))} · ${r.millis} ms · ${esc(r.scope)}</p></article>`).join("") :
+      `<article><div class="panel-head"><b>${esc(r.name)}</b><span class="pill ${r.passed ? "ok" : "bad"}">${r.passed ? "Expected protection observed" : "Protection failed"}</span></div><p>${esc(r.evidence)}</p><p class="hint">${esc(timeOf(r.t))} · ${r.millis} ms · ${esc(r.scope)} · ${r.available ? "reopened" : "STOPPED - reset required"}</p></article>`).join("") :
       `<p class="hint">No experiments yet. Run a scenario to see its measured outcome here.</p>`;
   } catch (e) { say($("chaosResult"), false, `Chaos lab unavailable: ${errText(e)}`); }
 }
 $("chaosScenarios").addEventListener("click", async e => {
   const button = e.target.closest("[data-chaos]");
-  if (!button || chaosSubmitting) return;
-  chaosSubmitting = true;
-  $("chaosScenarios").querySelectorAll("button").forEach(b => { b.disabled = true; });
-  say($("chaosResult"), null, "Running an isolated experiment…");
-  try {
-    const r = await api("chaos", { method: "POST", params: { scenario: button.dataset.chaos } });
-    say($("chaosResult"), r.passed, `<b>${esc(r.name)}: ${r.passed ? "expected protection observed" : "protection FAILED"}</b><p>${esc(r.evidence)}</p>`);
-  } catch (error) { say($("chaosResult"), false, `Experiment failed to complete: ${errText(error)}`); }
-  finally { chaosSubmitting = false; await refreshChaos(); }
+  if (button) await runMainChaos(button.dataset.chaos, $("chaosResult"));
 });
+async function runMainChaos(scenario, target) {
+  if (chaosSubmitting || !chaosAvailable || $("chaosConfirmation").value !== "CHAOS ON MAIN STORE") return;
+  chaosSubmitting = true;
+  const confirmation = $("chaosConfirmation").value;
+  $("chaosConfirmation").value = "";
+  updateChaosControls();
+  say(target, null, "Stopping services and running against the MAIN DATA STORE…");
+  try {
+    const r = await api("chaos", { method: "POST", params: { scenario, confirmation } });
+    say(target, r.passed, `<div class="verdict ${r.passed ? "ok" : "bad"}">${esc(r.name)}: ${r.passed ? "expected protection observed" : "protection FAILED"}</div><p>${esc(r.evidence)}</p>${r.available ? "" : '<a href="#administrator">Clear storage to start again</a>'}`);
+  } catch (error) { say(target, false, `Experiment failed to complete: ${errText(error)}. Check Administrator for storage status and reset.`); }
+  finally { chaosSubmitting = false; await refreshChaos(); }
+}
 views.chaos = {
   enter() { stopChaos = poll(refreshChaos, 1500); },
   leave() { if (stopChaos) stopChaos(); },
@@ -865,5 +890,4 @@ views.chaos = {
 
 // ============================== start ==============================
 const firstView = location.hash.slice(1);
-if (firstView === "customer" || !views[firstView]) loadPlayers();
 show(firstView || "customer");

@@ -104,16 +104,23 @@ ledger, so anything done in one view shows up in the others.
   physical process storage I/O (Linux only), durably committed transactions/sec, platform
   threads, garbage collection and read-model lag. Unsupported counters are labelled unavailable.
   Clearing storage requires typing `CLEAR DEMO STORAGE`; it stops and drains services,
-  permanently deletes only the demo journals and fixtures, then seeds a fresh demo.
+  permanently deletes only the demo journals, torn-tail quarantine files and fixtures, then seeds a fresh demo.
   The signing key, lock files and unrelated files remain. This unauthenticated, demo-only
   reset is an explicit exception to append-only storage, never a production ledger operation.
-- **Chaos Monkey.** Seven bounded, isolated experiments: torn writes, CRC corruption,
+- **Chaos Monkey.** Seven bounded experiments against the **main data store**: torn writes, CRC corruption,
   signed-history rollback, duplicate retry storms, multi-device double spending, conflicting
-  settlement and signing-service outage/fail-stop with recovery. Results include observed
-  evidence and the last 30 runs. No live money or journal is corrupted; snapshot experiments
-  add only a live checkpoint. Experiments run one at a time.
-  The tamper lab also corrupts a *copy* of a signed journal prefix by editing a deposit,
-  rewriting the hash chain or rolling back entries, and shows the verifier catching each.
+  settlement and signing-service outage/fail-stop. Type `CHAOS ON MAIN STORE` before
+  each run. Every run stops and drains the simulator and ledger services; money races
+  create real, visible customers and bets, while storage attacks mutate the main journals
+  under their directory lock. The tamper lab edits deposits, rewrites the chain or rolls
+  back signed entries in that same store. Recovery genuinely attempts to reopen and
+  verify storage, except after the signer outage, which intentionally leaves services stopped.
+  Torn-write recovery preserves committed history; corruption and rollback should refuse
+  to reopen. Damaged files and results remain for inspection, without automatic restore.
+  Administrator reset is available even when the ledger is stopped or the app restarts
+  on corrupt storage. Use it to start again. History retains the last 30 experiments
+  in memory until reset or app restart. These are demo-only, owner-approved exceptions
+  to append-only storage, never production operations.
 
 | Operator | Customer |
 |---|---|

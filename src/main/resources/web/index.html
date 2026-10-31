@@ -31,7 +31,7 @@
     <div><span>signed up to</span><b id="tipSigned">–</b></div>
   </div>
 </header>
-<div class="demo-note">Demonstration only: no authentication. The tabs switch views, they do not control access.</div>
+<div class="demo-note" id="storeStatus" role="status">Demonstration only: no authentication. The tabs switch views, they do not control access.</div>
 
 <main>
 <!-- ============================== CUSTOMER ============================== -->
@@ -211,13 +211,13 @@
   </div>
 </section>
 <!-- Administrator and Chaos Monkey extend the incumbent Operate surface:
-     live server measurements first, explicit destructive confirmation, and isolated
-     experiments with observed evidence rather than decorative failure animations. -->
+     live measurements, explicit main-store fault authorization, and a reset that
+     remains available when recovery correctly refuses corrupted demo history. -->
 <section class="view" id="view-administrator" hidden>
-  <div class="panel-head"><h1>Administrator</h1><span class="hint">Server-side samples every second · up to 3 minutes of history</span></div>
+  <div class="panel-head"><h1>Administrator</h1><span class="hint" id="adminMode">Server-side samples every second · up to 3 minutes of history</span></div>
   <div class="result" id="adminStatus" role="status"></div>
   <div class="kpis" id="adminKpis"></div>
-  <div class="grid3">
+  <div class="grid3" id="adminCharts">
     <div class="panel chart"><h2>JVM CPU</h2><svg id="adminCpu" role="img" aria-label="JVM CPU percentage over time"></svg></div>
     <div class="panel chart"><h2>Heap memory</h2><svg id="adminHeap" role="img" aria-label="Used heap bytes over time"></svg></div>
     <div class="panel chart"><h2>Transactions / second</h2><svg id="adminTps" role="img" aria-label="Durably committed transactions per second"></svg></div>
@@ -227,10 +227,10 @@
   </div>
   <div class="grid2">
     <div class="panel"><h2>Runtime and storage</h2><dl class="kv" id="adminDetails"></dl><p class="hint" id="adminScope"></p></div>
-    <div class="panel danger-zone">
+    <div class="panel danger-zone" id="adminReset">
       <h2>Clear demo storage</h2>
-      <p>Permanently deletes the journal, checkpoints and fixtures, stops the simulator, and starts again with 12 seed deposits and 6 fixtures. The signing key and unrelated files are retained.</p>
-      <p class="hint">Demo-only exception to append-only storage. Export any evidence you need first; this cannot be undone.</p>
+      <p>Permanently deletes the journal, checkpoints, torn-tail quarantine files and fixtures, stops the simulator, and starts again with 12 seed deposits and 6 fixtures. The signing key and unrelated files are retained.</p>
+      <p class="hint">Use this to start again after Chaos Monkey breaks the main store. Export any evidence you need first; this cannot be undone.</p>
       <button type="button" class="danger" id="clearReveal">Clear storage…</button>
       <form id="clearForm" class="field" hidden>
         <label for="clearConfirmation">Type CLEAR DEMO STORAGE to confirm</label>
@@ -243,14 +243,20 @@
 </section>
 
 <section class="view" id="view-chaos" hidden>
-  <div class="panel-head"><h1>Chaos Monkey</h1><span class="pill ok">Isolated experiments</span></div>
-  <p class="hint">Trigger real faults in disposable ledgers or signed journal copies. Live money and storage are never corrupted; snapshot experiments only add a live signed checkpoint.</p>
+  <div class="panel-head"><h1>Chaos Monkey</h1><span class="pill bad">Main data store</span></div>
+  <div class="panel danger-zone">
+    <h2>Break the real demo ledger</h2>
+    <p>Every experiment targets the main data store. The simulator and ledger services stop first; races persist real transactions, and corruption can leave the ledger unable to reopen.</p>
+    <p>Damaged files remain for inspection. Use <a href="#administrator">Administrator → Clear storage</a> to start again. No automatic restore or disposable copy.</p>
+    <div class="field"><label for="chaosConfirmation">Type CHAOS ON MAIN STORE to enable one experiment</label><input id="chaosConfirmation" autocomplete="off" spellcheck="false"></div>
+    <div class="result" id="chaosStoreStatus" role="status"></div>
+  </div>
   <div class="panel">
-    <div class="panel-head"><h2>Tamper lab</h2><span class="hint">Each attack is made on a copy of the journal. The live ledger is never touched.</span></div>
+    <div class="panel-head"><h2>Tamper lab</h2><span class="hint">Attacks the main journal. Recovery should refuse; reset to start again.</span></div>
     <div class="tamper">
-      <button type="button" data-tamper="edit"><b>Edit in place</b><span>Inflate a deposit tenfold, leave the hashes alone</span></button>
-      <button type="button" data-tamper="rewrite"><b>Rewrite history</b><span>Inflate a deposit and recompute every later hash</span></button>
-      <button type="button" data-tamper="truncate"><b>Roll back</b><span>Delete the newest five entries</span></button>
+      <button type="button" data-tamper="edit" disabled><b>Edit in place</b><span>Inflate a deposit tenfold, leave the hashes alone</span></button>
+      <button type="button" data-tamper="rewrite" disabled><b>Rewrite history</b><span>Inflate a deposit and recompute every later hash</span></button>
+      <button type="button" data-tamper="truncate" disabled><b>Roll back</b><span>Delete the newest five entries</span></button>
     </div>
     <div id="tamperResult" class="report" aria-live="polite"></div>
   </div>

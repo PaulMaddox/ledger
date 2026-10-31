@@ -11,7 +11,8 @@ Requires Playwright for Python and a Chromium-based browser:
 or pass an existing Chrome with --chrome /path/to/chrome.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
-build up, then photographs each persona's view into docs/screenshots/.
+build up, then photographs each persona's view into docs/screenshots/. WARNING: the
+Chaos Monkey capture corrupts the target's MAIN journal and resets all demo history.
 """
 import argparse
 import asyncio
@@ -83,16 +84,23 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int) -> 
         await page.wait_for_selector("#adminKpis .kpi")
         await shot("administrator")
         await page.goto(url + "#chaos")
-        await page.click("[data-tamper='rewrite']")
-        await page.wait_for_selector("#tamperResult .verdict", timeout=30000)
-        await close_up("chaos-tamper", "#tamperResult >> xpath=..")
+        await page.fill("#chaosConfirmation", "CHAOS ON MAIN STORE")
         await page.click("[data-chaos='double-spend']")
         await page.wait_for_selector("#chaosHistory article", timeout=30000)
+        await page.fill("#chaosConfirmation", "CHAOS ON MAIN STORE")
+        await page.click("[data-tamper='rewrite']")
+        await page.wait_for_selector("#tamperResult .verdict", timeout=30000)
+        await page.wait_for_function("document.getElementById('storeStatus').textContent.includes('Main ledger stopped')")
+        await close_up("chaos-tamper", "#tamperResult >> xpath=..")
         await shot("chaos")
 
-        # Leave the app as we found it.
-        await page.goto(url + "#simulator")
-        await page.click("#simStop")
+        # Recovery is manual in the product; exercise its reset button to leave a usable demo.
+        await page.goto(url + "#administrator")
+        await page.click("#clearReveal")
+        await page.fill("#clearConfirmation", "CLEAR DEMO STORAGE")
+        async with page.expect_navigation():
+            await page.click("#clearSubmit")
+        await page.wait_for_selector("#adminKpis .kpi", timeout=30000)
         await browser.close()
         if errors:
             raise SystemExit("page errors while capturing:\n  " + "\n  ".join(errors))

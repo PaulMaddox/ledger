@@ -170,6 +170,7 @@ button.danger:hover { background: color-mix(in srgb, var(--bad) 8%, var(--panel)
 .chaos-scenario p { color: var(--muted); margin-top: 4px; }
 .experiment-history { display: grid; gap: 12px; }
 .experiment-history article { border-bottom: 1px solid var(--rule); padding-bottom: 12px; display: grid; gap: 4px; }
+#view-chaos a { color: var(--accent); }
 @media (max-width: 600px) {
   .chaos-scenario { grid-template-columns: minmax(0, 1fr); }
   .chaos-scenario button { justify-self: start; }
