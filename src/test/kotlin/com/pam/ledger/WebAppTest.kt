@@ -6,6 +6,9 @@ import com.pam.ledger.web.LedgerWebApp
 import com.pam.ledger.web.ReadModel
 import com.pam.ledger.web.WebOptions
 import com.pam.ledger.web.Simulator
+import com.pam.ledger.web.parseArgs
+import com.pam.ledger.web.replayPlayerAudit
+import com.pam.ledger.web.allowedRequestHosts
 import com.pam.ledger.TestSupport.config
 import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
@@ -72,6 +75,21 @@ class WebAppTest {
     private fun withApp(body: (LedgerWebApp) -> Unit) {
         val app = LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir()))
         try { body(app) } finally { app.close() }
+    }
+
+    private fun rawRequest(app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null): String {
+        val body = if (method == "POST") "amount=1&ref=allowed-host-test" else ""
+        val path = if (method == "POST") "players/alice/deposit" else "overview"
+        return Socket("127.0.0.1", app.port).use { socket ->
+            socket.soTimeout = 5_000
+            val request = buildString {
+                append("$method /api/$path HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n")
+                if (origin != null) append("Origin: $origin\r\n")
+                append("Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ${body.length}\r\n\r\n$body")
+            }
+            socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+            socket.getInputStream().readBytes().toString(Charsets.UTF_8)
+        }
     }
 
     @Test
@@ -210,6 +228,38 @@ class WebAppTest {
     }
 
     @Test
+    fun `wildcard binding serves only explicitly allowed external hosts with same-origin mutations`() {
+        val options = WebOptions(port = 0, host = "0.0.0.0", dataDir = tempDir(),
+            allowedHosts = setOf("ledger.example", "192.0.2.10"))
+        assertEquals(options.allowedRequestHosts(), options.copy(host = "::").allowedRequestHosts())
+        LedgerWebApp.start(options).use { app ->
+            for (host in listOf("ledger.example", "192.0.2.10", "localhost", "[::1]")) {
+                val response = rawRequest(app, "$host:${app.port}")
+                assertTrue(response.startsWith("HTTP/1.1 200"), response)
+            }
+            val allowed = rawRequest(app, "ledger.example:${app.port}", "POST", "http://ledger.example:${app.port}")
+            assertTrue(allowed.startsWith("HTTP/1.1 200"), allowed)
+            val wrongOrigin = rawRequest(app, "ledger.example:${app.port}", "POST", "http://attacker.example:${app.port}")
+            assertTrue(wrongOrigin.startsWith("HTTP/1.1 403") && wrongOrigin.contains("cross_origin"), wrongOrigin)
+            for (host in listOf("attacker.example:${app.port}", "ledger.example:1")) {
+                val refused = rawRequest(app, host)
+                assertTrue(refused.startsWith("HTTP/1.1 403") && refused.contains("invalid_host"), refused)
+            }
+        }
+    }
+
+    @Test
+    fun `allowed host options accept exact hosts and reject origins ports and wildcards`() {
+        val options = parseArgs(arrayOf("--host", "0.0.0.0", "--allowed-host", "Ledger.Example", "--allowed-host", "::1"))
+        assertEquals("0.0.0.0", options.host)
+        assertEquals(setOf("ledger.example", "::1"), options.allowedHosts)
+        for (invalid in listOf("*", "0.0.0.0", "::", "https://ledger.example", "ledger.example:8080", "ledger.example/path", "user@ledger.example", "")) {
+            assertFailsWith<IllegalArgumentException> { parseArgs(arrayOf("--allowed-host", invalid)) }
+            assertFailsWith<IllegalArgumentException> { LedgerWebApp.start(WebOptions(allowedHosts = setOf(invalid))) }
+        }
+    }
+
+    @Test
     fun `fixture definitions and results survive restart without reusing ids`() {
         val directory = tempDir()
         val first = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
@@ -278,13 +328,17 @@ class WebAppTest {
     }
 
     @Test
-    fun `player audit compares balances from one captured ledger prefix`() = withApp { app ->
+    fun `player audit reconciles account snapshots while money movements commit`() = withApp { app ->
         val outcomes = race(2) { worker ->
             if (worker == 0) {
                 repeat(30) { index ->
                     assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf(
                         "amount" to 1, "ref" to "audit-race-$index",
                     )).first)
+                    assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+                        "fixture" to "F1", "selection" to "HOME", "stake" to 1, "betId" to "audit-race-bet-$index",
+                    )).first)
+                    assertEquals(200, call(app, "POST", "bets/audit-race-bet-$index/cashout").first)
                 }
             } else {
                 repeat(30) {
@@ -294,6 +348,35 @@ class WebAppTest {
             }
         }
         outcomes.forEach { it.getOrThrow() }
+    }
+
+    @Test
+    fun `player audit reconciles engine snapshots at their own sequences and detects wrong balances`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000, "EUR", "audit-funds")
+            val cash = ledger.account(SportsbookWallet.Accounts.cash("p", "EUR"))!!
+            wallet.placeBet("p", "audit-bet", 100, "EUR", "F1|HOME|200")
+            val escrow = ledger.account(SportsbookWallet.Accounts.openBets("p", "EUR"))!!
+            wallet.deposit("p", 10, "EUR", "audit-later")
+            val committedSize = ledger.head().size
+            val report = replayPlayerAudit(ledger, "p", cash, escrow, committedSize)
+            assertEquals(true, report["reconciles"])
+            assertEquals("1000", report["ledgerCash"])
+            assertEquals("1000", report["replayedCash"])
+            assertEquals("100", report["ledgerEscrow"])
+            assertEquals("100", report["replayedEscrow"])
+            assertEquals(cash.lastSeq, report["cashLastSeq"])
+            assertEquals(escrow.lastSeq, report["escrowLastSeq"])
+            assertEquals(false, replayPlayerAudit(ledger, "p", cash.copy(balance = 999), escrow, committedSize)["reconciles"])
+            assertEquals(false, replayPlayerAudit(ledger, "p", cash, escrow.copy(balance = 101), committedSize)["reconciles"])
+            assertEquals(false, replayPlayerAudit(ledger, "p", null, escrow, committedSize)["reconciles"])
+            val missing = replayPlayerAudit(ledger, "missing", null, null, committedSize)
+            assertEquals(true, missing["reconciles"])
+            assertEquals(0, missing["entries"])
+            wallet.deposit("missing", 1, "EUR", "audit-new-account")
+            assertEquals(true, replayPlayerAudit(ledger, "missing", null, null, committedSize)["reconciles"])
+        }
     }
 
     @Test
@@ -426,6 +509,61 @@ class WebAppTest {
         }
     }
 
+    @Test
+    fun `tampered checkpoint sizes cannot filter themselves out of an audit`() {
+        val directory = tempDir()
+        Ledger.open(config(directory, Ed25519TreeHeadSigner.generate())).use { ledger ->
+            SportsbookWallet(ledger).deposit("p", 1, "EUR", "size-tamper-funds")
+            ledger.checkpoint()
+            Audit(ledger, directory, "test-ledger", listOf(ledger.publicKey)).use { audit ->
+                val path = directory.resolve(Ledger.CHECKPOINTS_FILE)
+                val framed = Files.readAllBytes(path)
+                val payloadLength = ByteBuffer.wrap(framed).int
+                val original = SignedTreeHead.decode(framed.copyOfRange(Journal.HEADER, Journal.HEADER + payloadLength))
+                val modified = SignedTreeHead(original.head.copy(treeSize = 1_000), original.keyId, original.signature()).encode()
+                assertEquals(payloadLength, modified.size)
+                modified.copyInto(framed, Journal.HEADER)
+                val crc = CRC32C().apply { update(modified) }
+                ByteBuffer.wrap(framed).putInt(4, crc.value.toInt())
+                Files.write(path, framed)
+
+                val report = audit.fullAudit().report
+                assertFalse(report.ok)
+                assertTrue(report.problems.any { it.contains("invalid signature") }, report.problems.toString())
+            }
+        }
+    }
+
+    @Test
+    fun `open fixture index excludes completed history and rebuilds after restart`() {
+        val directory = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(directory, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                val book = Book(SportsbookWallet(ledger), model, directory)
+                book.addFixture(Random(1))
+                book.addFixture(Random(2))
+                book.settle("F1", "HOME")
+                assertEquals(listOf("F2"), book.openFixtures().map { it.id })
+            }
+        }
+        Ledger.open(config(directory, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                val book = Book(SportsbookWallet(ledger), model, directory)
+                assertEquals(listOf("F2"), book.openFixtures().map { it.id })
+            }
+            ReadModel(ledger).use { model ->
+                val book = Book(SportsbookWallet(ledger), model)
+                repeat(256) { index ->
+                    val fixture = book.addFixture(Random(index))
+                    book.settle(fixture.id, "VOID")
+                }
+                val open = book.addFixture(Random(256))
+                assertEquals(257, book.fixtures().size)
+                assertEquals(listOf(open), book.openFixtures())
+            }
+        }
+    }
     @Test
     fun `read model cumulative money totals do not overflow Long`() {
         val amount = 4_000_000_000_000_000_000L
@@ -566,6 +704,7 @@ class WebAppTest {
                     results.forEach { it.getOrThrow() }
                     readModel.catchUp()
                     assertTrue(readModel.openBetsOn(fixture.id).isEmpty(), "round $round: bets left open on a settled fixture")
+                    assertTrue(book.openFixtures().none { it.id == fixture.id }, "round $round: settled fixture left in open index")
                     // Every placement has exactly one settlement, and every winner was paid.
                     val placements = (0 until ledger.head().size).map { ledger.entry(it).entry }.count { it.kind == "BET_PLACED" }
                     val settlements = (0 until ledger.head().size).map { ledger.entry(it).entry }.count { it.kind == "BET_WON" }

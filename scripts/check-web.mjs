@@ -200,6 +200,35 @@ test("checkpoint cache binds signature, signed bytes, key and displayed commitme
   assert.notEqual(vm.runInContext('checkpointKey(checkpoint, "different-key")', c), original);
 });
 
+test("checkpoint table and options display signed timestamps even after an unsigned time changes", async () => {
+  const root = Buffer.alloc(32, 1), chain = Buffer.alloc(32, 2);
+  const message = Buffer.concat([str("PAM-LEDGER/tree-head/v1"), str("sportsbook-web"), i64(1), root, chain, i64(1000000)]);
+  const keys = await webcrypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
+  const signature = await webcrypto.subtle.sign("Ed25519", keys.privateKey, message);
+  const checkpoint = {
+    ledgerId: "sportsbook-web", treeSize: 1, rootHash: root.toString("hex"), chainHead: chain.toString("hex"),
+    signingBytes: message.toString("base64"), signature: Buffer.from(signature).toString("base64"),
+    time: "1970-01-01T00:00:01Z",
+  };
+  const response = {
+    publicKey: Buffer.from(await webcrypto.subtle.exportKey("spki", keys.publicKey)).toString("base64"),
+    checkpoints: [checkpoint],
+  };
+  const elements = new Map(["sthTable", "consFrom", "consTo"].map(id => [id, { value: "", options: [], dataset: {} }]));
+  const c = context(async () => ({ ok: true, json: async () => response }));
+  c.document = { getElementById: id => elements.get(id) };
+  vm.runInContext(source.slice(source.indexOf("const sigCache ="), source.indexOf('$("consFrom").addEventListener')), c);
+  await c.refreshCheckpoints();
+  const before = [...elements.values()].map(el => el.innerHTML);
+  const signedTime = vm.runInContext("timeOf(1000)", c);
+  before.forEach(html => assert.ok(html.includes(signedTime)));
+  assert.match(before[0], /pill ok.*valid/);
+
+  checkpoint.time = "2099-12-31T23:59:59Z";
+  await c.refreshCheckpoints();
+  assert.deepEqual([...elements.values()].map(el => el.innerHTML), before);
+});
+
 function raceContext(fetch) {
   const s = slipContext(fetch);
   vm.runInContext(source.slice(source.indexOf("// Five devices at once:")).split("let stopCustomer")[0], s.c);

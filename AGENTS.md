@@ -108,8 +108,9 @@ change it describes:
 
 - **README.md** must describe what the code now does: commands, features, layout.
 - **The guide** (`docs/readme.src.html`, then rebuild `docs/index.html`) must match the code.
-- **Screenshots** must be regenerated whenever a change alters what the web console shows
-  or how it behaves, including changes to the API, the simulator, wording, or styles:
+- **Screenshots** must be regenerated when the visible UI changes (layout, styles,
+  wording, or displayed content). Backend or API changes alone do not require new
+  screenshots when the rendered UI is unchanged:
 
   ```
   ./gradlew web --args="--port 18080"     # terminal 1: a fresh ledger

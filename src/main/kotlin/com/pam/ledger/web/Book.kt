@@ -80,6 +80,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     )
 
     private val fixtures = ConcurrentHashMap<String, Fixture>()
+    private val openById = ConcurrentHashMap<String, Fixture>()
     private val counter = AtomicInteger()
     private val persistenceLock = Any()
     private val pendingByBetId = ConcurrentHashMap<String, PendingPlacement>()
@@ -87,9 +88,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
 
     init {
         restoreFixtures()
+        fixtures.values.filter { it.isOpen }.forEach { openById[it.id] = it }
     }
 
     fun fixtures(): List<Fixture> = fixtures.values.sortedBy { it.id.removePrefix("F").toInt() }
+    /** Current betting candidates, without scanning or sorting historical definitions. */
+    fun openFixtures(): List<Fixture> = openById.values.filter { it.isOpen }
     fun fixture(id: String): Fixture = fixtures[id] ?: throw NotFoundException("fixture $id does not exist")
     fun openBetsForPlayer(playerId: String): List<ReadModel.BetView> {
         readModel.catchUp()
@@ -105,7 +109,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         val total = h + d + a
         fun price(p: Double) = (100 / (p / total * 1.06)).let { (it / 5).toInt() * 5 }.coerceAtLeast(105)
         val f = Fixture("F${counter.incrementAndGet()}", home, away, mapOf("HOME" to price(h), "DRAW" to price(d), "AWAY" to price(a)))
-        persistFixtures(additional = f) { fixtures[f.id] = f }
+        persistFixtures(additional = f) {
+            fixtures[f.id] = f
+            openById[f.id] = f
+        }
         return f
     }
 
@@ -183,7 +190,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         }
         val pending = f.lock.write {
             require(f.result == null || f.result == result) { "fixture $fixtureId was already settled as ${f.result}" }
-            persistFixtures(resultOverrides = mapOf(f.id to result)) { f.result = result }
+            persistFixtures(resultOverrides = mapOf(f.id to result)) {
+                f.result = result
+                openById.remove(f.id)
+            }
             f.pendingPlacements.toList()
         }
         pending.forEach { runCatching { it.join() } }

@@ -1,6 +1,7 @@
 package com.pam.ledger.web
 
 import com.pam.ledger.AmountOverflowException
+import com.pam.ledger.AccountState
 import com.pam.ledger.CurrencyMismatchException
 import com.pam.ledger.Ed25519TreeHeadSigner
 import com.pam.ledger.IdempotencyConflictException
@@ -53,7 +54,7 @@ import kotlin.system.exitProcess
  * ============================================================================
  *
  *  Run with:  ./gradlew web          (Windows: .\gradlew.bat web)
- *  Options:   --port 8080  --host 127.0.0.1  --data <folder to keep the ledger in>
+ *  Options:   --port 8080  --host 127.0.0.1  --allowed-host <hostname>  --data <folder>
  *
  *  Uses only the JDK's built-in HTTP server, so the runtime still has no
  *  dependencies beyond the JDK and the Kotlin standard library.
@@ -63,14 +64,40 @@ import kotlin.system.exitProcess
  *  unless --host says otherwise.
  */
 
-data class WebOptions(val port: Int = 8080, val host: String = "127.0.0.1", val dataDir: Path? = null)
+/** Bind address and additional exact request hosts; wildcard binding never permits arbitrary Host headers. */
+data class WebOptions(
+    val port: Int = 8080,
+    val host: String = "127.0.0.1",
+    val dataDir: Path? = null,
+    val allowedHosts: Set<String> = emptySet(),
+)
+
+private fun allowedHost(value: String): String {
+    val authority = if (':' in value && !value.startsWith("[")) "[$value]" else value
+    val uri = try { URI("http://$authority") } catch (e: java.net.URISyntaxException) {
+        throw IllegalArgumentException("--allowed-host must be a hostname or IP address without a port", e)
+    }
+    val host = uri.host?.removeSurrounding("[", "]")?.lowercase()
+    require(host != null && host !in setOf("0.0.0.0", "::") && uri.port == -1 &&
+        uri.rawUserInfo == null && uri.rawPath.isEmpty() && uri.rawQuery == null && uri.rawFragment == null) {
+        "--allowed-host must be a hostname or IP address without a port, not a wildcard"
+    }
+    return host
+}
+
+internal fun WebOptions.allowedRequestHosts(): Set<String> {
+    val configured = host.removeSurrounding("[", "]").lowercase()
+    val loopbacks = setOf("localhost", "127.0.0.1", "::1")
+    val defaults = if (configured in loopbacks || configured in setOf("0.0.0.0", "::")) loopbacks else setOf(configured)
+    return defaults + allowedHosts.map(::allowedHost)
+}
 
 fun main(args: Array<String>) {
     val opts = try {
         parseArgs(args)
     } catch (e: IllegalArgumentException) {
         System.err.println(e.message)
-        System.err.println("usage: web [--port 8080] [--host 127.0.0.1] [--data <folder>]")
+        System.err.println("usage: web [--port 8080] [--host 127.0.0.1] [--allowed-host <hostname>] [--data <folder>]")
         exitProcess(2)
     }
     val app = LedgerWebApp.start(opts)
@@ -93,12 +120,60 @@ internal fun parseArgs(args: Array<String>): WebOptions {
         when (args[i]) {
             "--port" -> o = o.copy(port = value().toIntOrNull()?.takeIf { it in 0..65535 } ?: throw IllegalArgumentException("--port must be 0-65535"))
             "--host" -> o = o.copy(host = value())
+            "--allowed-host" -> o = o.copy(allowedHosts = o.allowedHosts + allowedHost(value()))
             "--data" -> o = o.copy(dataDir = Path.of(value()))
             else -> throw IllegalArgumentException("unknown option ${args[i]}")
         }
         i++
     }
     return o
+}
+
+private fun minorUnits(amount: Long) = amount.toString()
+private fun minorUnits(amount: BigInteger) = amount.toString()
+private fun time(micros: Long) = Instant.ofEpochMilli(micros / 1000).toString()
+
+/** Reconcile each immutable engine account snapshot with its own posting prefix. */
+internal fun replayPlayerAudit(
+    ledger: Ledger,
+    id: String,
+    cashState: AccountState?,
+    escrowState: AccountState?,
+    committedSize: Long,
+): Map<String, Any?> {
+    val cashAccount = Accounts.cash(id, "EUR")
+    val escrowAccount = Accounts.openBets(id, "EUR")
+    val cashLastSeq = cashState?.lastSeq ?: (committedSize - 1)
+    val escrowLastSeq = escrowState?.lastSeq ?: (committedSize - 1)
+    var cash = 0L
+    var escrow = 0L
+    var neverNegative = true
+    // Entries precede account states. A missing state must still reconcile with the
+    // previously captured committed prefix, not silently discard that account's history.
+    val rows = (0L..maxOf(cashLastSeq, escrowLastSeq)).mapNotNull { seq ->
+        val s = ledger.entry(seq)
+        val cashPostings = s.entry.postings.filter { seq <= cashLastSeq && it.account == cashAccount }
+        val escrowPostings = s.entry.postings.filter { seq <= escrowLastSeq && it.account == escrowAccount }
+        if (cashPostings.isEmpty() && escrowPostings.isEmpty()) return@mapNotNull null
+        val dc = cashPostings.fold(0L) { total, posting -> Math.addExact(total, posting.amount) }
+        val de = escrowPostings.fold(0L) { total, posting -> Math.addExact(total, posting.amount) }
+        cash = Math.addExact(cash, dc)
+        escrow = Math.addExact(escrow, de)
+        neverNegative = neverNegative && cash >= 0 && escrow >= 0
+        mapOf("seq" to seq, "kind" to s.entry.kind, "time" to time(s.entry.timestampMicros), "key" to s.entry.idempotencyKey,
+            "cashDelta" to minorUnits(dc), "cash" to minorUnits(cash), "escrowDelta" to minorUnits(de),
+            "escrow" to minorUnits(escrow), "chainHash" to s.chainHash)
+    }
+    val ledgerCash = cashState?.balance ?: 0L
+    val ledgerEscrow = escrowState?.balance ?: 0L
+    return mapOf(
+        "id" to id, "rows" to rows.asReversed().take(200), "entries" to rows.size,
+        "replayedCash" to minorUnits(cash), "replayedEscrow" to minorUnits(escrow),
+        "ledgerCash" to minorUnits(ledgerCash), "ledgerEscrow" to minorUnits(ledgerEscrow),
+        "cashLastSeq" to cashLastSeq, "escrowLastSeq" to escrowLastSeq,
+        "reconciles" to (cash == ledgerCash && escrow == ledgerEscrow),
+        "neverNegative" to neverNegative,
+    )
 }
 
 class LedgerWebApp private constructor(
@@ -111,7 +186,7 @@ class LedgerWebApp private constructor(
     private val simulator: Simulator,
     private val stats: Stats,
     private val audit: Audit,
-    private val configuredHost: String,
+    private val allowedHosts: Set<String>,
     private val resources: List<AutoCloseable>,
 ) : AutoCloseable {
     private lateinit var server: HttpServer
@@ -123,6 +198,7 @@ class LedgerWebApp private constructor(
         private val signingKeyBootstrapLock = Any()
 
         fun start(opts: WebOptions): LedgerWebApp {
+            val allowedHosts = opts.allowedRequestHosts()
             val dir = opts.dataDir ?: Files.createTempDirectory("pam-ledger-web")
             Files.createDirectories(dir)
             val signer = Ed25519TreeHeadSigner(demoKeyPair(dir))
@@ -138,7 +214,7 @@ class LedgerWebApp private constructor(
                 val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
                 val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
                 resources.add(AutoCloseable { server.stop(0) })
-                val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, stats, audit, opts.host, resources)
+                val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, stats, audit, allowedHosts, resources)
                 app.server = server
                 server.executor = executor
                 server.createContext("/") { ex -> app.handle(ex) }
@@ -253,11 +329,6 @@ class LedgerWebApp private constructor(
         val port = server.address.port
         val hostUri = ex.requestHeaders.getFirst("Host")?.let { runCatching { URI("http://$it") }.getOrNull() }
         val host = hostUri?.host?.removeSurrounding("[", "]")?.lowercase()
-        val configured = configuredHost.removeSurrounding("[", "]").lowercase()
-        val loopbacks = setOf("localhost", "127.0.0.1", "::1")
-        val allowedHosts = if (configured in loopbacks || configured == "0.0.0.0" || configured == "::") {
-            loopbacks + configured
-        } else setOf(configured)
         val hostPort = hostUri?.port?.takeIf { it >= 0 } ?: 80
         if (hostUri == null || hostUri.rawUserInfo != null || hostUri.rawPath.isNotEmpty() ||
             hostUri.rawQuery != null || hostUri.rawFragment != null || hostPort != port || host !in allowedHosts) {
@@ -389,13 +460,9 @@ class LedgerWebApp private constructor(
 
     private fun receipt(r: Receipt) = mapOf("seq" to r.seq, "chainHash" to r.chainHash, "leafHash" to r.leafHash, "replayed" to r.replayed)
 
-    private fun minorUnits(amount: Long) = amount.toString()
-    private fun minorUnits(amount: BigInteger) = amount.toString()
     private fun sumMinorUnits(amounts: Iterable<Long>) = amounts.fold(BigInteger.ZERO) { total, amount ->
         total.add(BigInteger.valueOf(amount))
     }
-
-    private fun time(micros: Long) = Instant.ofEpochMilli(micros / 1000).toString()
 
     private fun entryView(s: SealedEntry) = mapOf(
         "seq" to s.entry.seq,
@@ -533,40 +600,10 @@ class LedgerWebApp private constructor(
 
     /** Every entry for one player, with balances recomputed entry by entry from the postings themselves. */
     private fun playerAudit(id: String): Any {
-        val snapshotSize = ledger.head().size
-        readModel.catchUp()
-        var cash = 0L
-        var escrow = 0L
-        var neverNegative = true
-        val seqs = readModel.seqsForPlayer(id).filter { it < snapshotSize }
-        val rows = seqs.map { seq ->
-            val s = ledger.entry(seq)
-            val dc = s.entry.postings.filter { it.account == Accounts.cash(id, "EUR") }.sumOf { it.amount }
-            val de = s.entry.postings.filter { it.account == Accounts.openBets(id, "EUR") }.sumOf { it.amount }
-            cash = Math.addExact(cash, dc)
-            escrow = Math.addExact(escrow, de)
-            neverNegative = neverNegative && cash >= 0 && escrow >= 0
-            mapOf("seq" to seq, "kind" to s.entry.kind, "time" to time(s.entry.timestampMicros), "key" to s.entry.idempotencyKey,
-                "cashDelta" to minorUnits(dc), "cash" to minorUnits(cash), "escrowDelta" to minorUnits(de),
-                "escrow" to minorUnits(escrow), "chainHash" to s.chainHash)
-        }
-        var ledgerCash = 0L
-        var ledgerEscrow = 0L
-        for (seq in 0L until snapshotSize) {
-            for (posting in ledger.entry(seq).entry.postings) {
-                when (posting.account) {
-                    Accounts.cash(id, "EUR") -> ledgerCash = Math.addExact(ledgerCash, posting.amount)
-                    Accounts.openBets(id, "EUR") -> ledgerEscrow = Math.addExact(ledgerEscrow, posting.amount)
-                }
-            }
-        }
-        return mapOf(
-            "id" to id, "rows" to rows.asReversed().take(200), "entries" to rows.size,
-            "replayedCash" to minorUnits(cash), "replayedEscrow" to minorUnits(escrow),
-            "ledgerCash" to minorUnits(ledgerCash), "ledgerEscrow" to minorUnits(ledgerEscrow),
-            "reconciles" to (cash == ledgerCash && escrow == ledgerEscrow),
-            "neverNegative" to neverNegative,
-        )
+        val committedSize = ledger.head().size
+        val cashState = ledger.account(Accounts.cash(id, "EUR"))
+        val escrowState = ledger.account(Accounts.openBets(id, "EUR"))
+        return replayPlayerAudit(ledger, id, cashState, escrowState, committedSize)
     }
 
     /** Everything a browser needs to verify, by itself, that entry [seq] is in a signed checkpoint. */

@@ -68,16 +68,20 @@ class Audit(
     // ---- Snapshot and independent audit ----
 
     /** Copy one signed prefix so no concurrent append can escape its checkpoint. */
-    private fun snapshot(treeSize: Long): Path {
+    private fun snapshot(anchor: SignedTreeHead): Path {
         val copy = Files.createTempDirectory("pam-ledger-snapshot")
         try {
             val checkpoints = ArrayList<ByteArray>()
+            val anchorBytes = anchor.encode()
+            var prefixEnd = -1
             Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE)) { record ->
-                val checkpoint = SignedTreeHead.decode(record)
-                if (checkpoint.head.treeSize <= treeSize) checkpoints += record
+                checkpoints += record
+                if (record.contentEquals(anchorBytes)) prefixEnd = checkpoints.size
             }
-            writeRecords(copy.resolve(Ledger.CHECKPOINTS_FILE), checkpoints)
-            copyEntryPrefix(copy.resolve(Ledger.ENTRIES_FILE), treeSize)
+            check(prefixEnd >= 0) { "ledger snapshot is missing its signed checkpoint" }
+            // Bound by the anchor's position, never by an unverified record's claimed size.
+            writeRecords(copy.resolve(Ledger.CHECKPOINTS_FILE), checkpoints.take(prefixEnd))
+            copyEntryPrefix(copy.resolve(Ledger.ENTRIES_FILE), anchor.head.treeSize)
             return copy
         } catch (t: Throwable) {
             copy.toFile().deleteRecursively()
@@ -119,7 +123,7 @@ class Audit(
         val started = System.nanoTime()
         // Anchor everything committed so far: unsigned history would (rightly) fail the audit.
         val checkpoint = checkpointNow()
-        val dir = snapshot(checkpoint.head.treeSize)
+        val dir = snapshot(checkpoint)
         try {
             val report = LedgerVerifier.verify(dir, ledgerId, trustedKeys)
             return AuditResult(report, (System.nanoTime() - started) / 1_000_000, "Independent audit of a snapshot of the live ledger.")
@@ -140,7 +144,7 @@ class Audit(
     fun tamper(mode: String): AuditResult {
         require(mode in setOf("edit", "rewrite", "truncate")) { "mode must be edit, rewrite or truncate" }
         val checkpoint = checkpointNow() // the tamper must alter history covered by this signed head
-        val dir = snapshot(checkpoint.head.treeSize)
+        val dir = snapshot(checkpoint)
         try {
             val path = dir.resolve(Ledger.ENTRIES_FILE)
             val records = ArrayList<ByteArray>()

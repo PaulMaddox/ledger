@@ -67,6 +67,7 @@ ledger, so anything done in one view shows up in the others.
   starting duplicate settlement tasks.
   Select a tile to open that customer.
   Seed deposits are stable across retries and restarts; existing seed references are not funded again.
+  Betting selects from a current-open fixture index rather than sorting completed fixture history.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
   Customer IDs always use ASCII digits, independent of the host locale.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
@@ -93,7 +94,10 @@ ledger, so anything done in one view shows up in the others.
   consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
   corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
   catching each, even while the simulator appends new entries. Audit snapshots reread
-  checkpoint records from disk instead of trusting the history poller's cache.
+  checkpoint records from disk through the captured checkpoint's position instead of
+  trusting cached copies or unverified tree sizes. Player audits compare posting replays
+  with immutable engine account states at each account's own last sequence.
+  Signing times are decoded from the signed bytes.
 
 | Operator | Customer |
 |---|---|
@@ -111,6 +115,13 @@ are restricted to same-origin requests and valid Host names; by default it liste
 localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so the project
 still has no runtime dependencies beyond the JDK.
 Failed startup closes all acquired services and releases the writer lock, allowing a retry on the same data directory.
+
+To listen on the LAN, explicitly allow the hostname or IP address users will access:
+`./gradlew web --args="--host 0.0.0.0 --allowed-host ledger.example --allowed-host 192.0.2.10"`.
+`--host` selects the bind address; repeat `--allowed-host` for additional exact hostnames or
+IP addresses (without schemes, ports or wildcards). IPv6 wildcard binding uses `--host ::`.
+Loopback access stays available with wildcard binding; other hosts and cross-origin
+mutations remain blocked. Exposing this unauthenticated demo lets reachable users move money.
 
 ## Running
 
