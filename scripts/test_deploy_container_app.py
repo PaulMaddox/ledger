@@ -68,7 +68,8 @@ class DeploymentTest(unittest.TestCase):
         response.__enter__.return_value.status = 200
         response.__enter__.return_value.read.return_value = b"<!doctype html><html></html>"
         with patch.object(sys, "argv", [
-            "deploy", "--registry", "registry", "--tag", "image", "--revision", "new"
+            "deploy", "--app", "ledger-web", "--registry", "registry",
+            "--tag", "image", "--revision", "new"
         ]), patch.object(deploy.shutil, "which", return_value="az"), \
                 patch.object(deploy.subprocess, "run", side_effect=self.command), \
                 patch.object(deploy.urllib.request, "urlopen", return_value=response), \
@@ -85,6 +86,7 @@ class DeploymentTest(unittest.TestCase):
                       if command[1:3] == ["containerapp", "update"])
         self.assertLess(stop, drain)
         self.assertLess(drain, update)
+        self.assertTrue(all("--subscription" in command for command in self.calls))
 
     def test_remaining_replica_refuses_new_writer(self):
         self.replicas = [{"name": "old-replica"}]

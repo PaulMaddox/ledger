@@ -59,8 +59,8 @@ jobs:
       - name: Build, test twice, audit and push image
         run: |
           set -euo pipefail
-          LOGIN_SERVER=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
-          az acr login -n "$ACR_NAME"
+          LOGIN_SERVER=$(az acr show --subscription "$AZURE_SUBSCRIPTION_ID" -n "$ACR_NAME" --query loginServer -o tsv)
+          az acr login --subscription "$AZURE_SUBSCRIPTION_ID" -n "$ACR_NAME"
           docker build --tag "$LOGIN_SERVER/ledger-web:${GITHUB_SHA}" .
           docker push "$LOGIN_SERVER/ledger-web:${GITHUB_SHA}"
       - name: Drain old writer, deploy and verify HTTPS
@@ -71,7 +71,7 @@ jobs:
       - name: Deployment diagnostics
         if: failure()
         run: |
-          az containerapp show -g ledger -n ledger-web \
+          az containerapp show --subscription "$AZURE_SUBSCRIPTION_ID" -g ledger -n ledger-demo \
             --query '{state:properties.provisioningState,running:properties.runningStatus}'
-          az containerapp revision list -g ledger -n ledger-web -o table
-          az containerapp logs show -g ledger -n ledger-web --type system --tail 50
+          az containerapp revision list --subscription "$AZURE_SUBSCRIPTION_ID" -g ledger -n ledger-demo -o table
+          az containerapp logs show --subscription "$AZURE_SUBSCRIPTION_ID" -g ledger -n ledger-demo --type system --tail 50

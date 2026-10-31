@@ -17,8 +17,10 @@ import urllib.request
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--resource-group", default="ledger")
-    parser.add_argument("--app", default="ledger-web")
-    parser.add_argument("--environment", default="ledger-env")
+    parser.add_argument("--app", default="ledger-demo")
+    parser.add_argument("--environment", default="ledger-private-env")
+    parser.add_argument("--subscription", default=os.environ.get(
+        "AZURE_SUBSCRIPTION_ID", "9600a075-454a-4e6b-82d4-58bef3e21b4a"))
     parser.add_argument("--pull-identity", default="ledger-image-pull")
     parser.add_argument("--registry", required=True)
     parser.add_argument("--tag", required=True)
@@ -35,7 +37,8 @@ def main():
     def command(*parts):
         environment = {**os.environ, "PYTHONUTF8": "1"}
         result = subprocess.run(
-            [az, *parts, "--only-show-errors", "--output", "json"],
+            [az, *parts, "--subscription", args.subscription,
+             "--only-show-errors", "--output", "json"],
             check=True, capture_output=True, text=True, encoding="utf-8",
             env=environment,
         )
@@ -61,7 +64,7 @@ def main():
         raise RuntimeError("Revision already exists; use a new suffix")
     storage = command("containerapp", "env", "storage", "show",
                       "-g", args.resource_group, "-n", args.environment,
-                      "--storage-name", "ledger-data")
+                      "--storage-name", "ledger-demo-data")
     if storage["properties"]["azureFile"]["accessMode"] != "ReadWrite":
         raise RuntimeError("Persistent ledger-data storage must be writable")
     command("acr", "repository", "show", "--name", args.registry,

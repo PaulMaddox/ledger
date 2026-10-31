@@ -49,6 +49,6 @@ properties:
     volumes:
       - name: ledger-data
         storageType: AzureFile
-        storageName: ledger-data
+        storageName: ledger-demo-data
         # Keep SMB byte-range locks enabled: never add nobrl.
         mountOptions: "uid=10001,gid=10001,dir_mode=0700,file_mode=0600,cache=strict"

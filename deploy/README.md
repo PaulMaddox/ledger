@@ -1,7 +1,7 @@
 # Public Azure Container Apps demo
 
-Deploys the web console, not the CLI demo, as **ledger-web** in environment
-**ledger-env**, resource group **ledger**, **Sweden Central**. The subscription is
+Deploys the web console, not the CLI demo, as **ledger-demo** in environment
+**ledger-private-env**, resource group **ledger**, **Sweden Central**. The subscription is
 `9600a075-454a-4e6b-82d4-58bef3e21b4a`. No AKS cluster, ingress controller or Caddy
 sidecar is required. The existing AKS cluster is not modified or deleted.
 
@@ -26,20 +26,41 @@ az provider register -n Microsoft.App --wait
 az provider register -n Microsoft.Storage --wait
 
 az acr create -g ledger -n "$ACR_NAME" --sku Basic --location swedencentral
-az containerapp env create -g ledger -n ledger-env --location swedencentral \
-  --logs-destination none
 az storage account create -g ledger -n "$STORAGE_ACCOUNT" --location swedencentral \
   --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 \
-  --https-only true --allow-blob-public-access false
+  --https-only true --allow-blob-public-access false --public-network-access Disabled
 az storage share-rm create -g ledger --storage-account "$STORAGE_ACCOUNT" \
-  --name ledger-data --quota 32 --enabled-protocols SMB
+  --name ledger-demo-data --quota 32 --enabled-protocols SMB
+
+az network vnet create -g ledger -n ledger-app-vnet --location swedencentral \
+  --address-prefixes 10.80.0.0/16 --subnet-name container-apps --subnet-prefixes 10.80.0.0/23
+az network vnet subnet update -g ledger --vnet-name ledger-app-vnet \
+  -n container-apps --delegations Microsoft.App/environments
+VNET_ID=$(az network vnet show -g ledger -n ledger-app-vnet --query id -o tsv)
+SUBNET_ID=$(az network vnet subnet show -g ledger --vnet-name ledger-app-vnet \
+  -n container-apps --query id -o tsv)
+az network vnet subnet create -g ledger --vnet-name ledger-app-vnet \
+  -n private-endpoints --address-prefixes 10.80.2.0/27 --private-endpoint-network-policies Disabled
+STORAGE_ID=$(az storage account show -g ledger -n "$STORAGE_ACCOUNT" --query id -o tsv)
+az network private-endpoint create -g ledger -n ledger-files-pe --location swedencentral \
+  --vnet-name ledger-app-vnet --subnet private-endpoints \
+  --private-connection-resource-id "$STORAGE_ID" --group-id file --connection-name ledger-files
+DNS_ID=$(az network private-dns zone create -g ledger \
+  -n privatelink.file.core.windows.net --query id -o tsv)
+az network private-dns link vnet create -g ledger \
+  --zone-name privatelink.file.core.windows.net -n ledger-app-vnet \
+  --virtual-network "$VNET_ID" --registration-enabled false
+az network private-endpoint dns-zone-group create -g ledger \
+  --endpoint-name ledger-files-pe -n default --private-dns-zone "$DNS_ID" --zone-name files
+az containerapp env create -g ledger -n ledger-private-env --location swedencentral \
+  --infrastructure-subnet-resource-id "$SUBNET_ID" --logs-destination none
 
 # Keep the key in the environment's storage definition, never GitHub or a file.
 # Do not enable shell tracing around these commands.
 STORAGE_KEY=$(az storage account keys list -g ledger -n "$STORAGE_ACCOUNT" \
   --query '[0].value' -o tsv)
-az containerapp env storage set -g ledger -n ledger-env --storage-name ledger-data \
-  --account-name "$STORAGE_ACCOUNT" --azure-file-share-name ledger-data \
+az containerapp env storage set -g ledger -n ledger-private-env --storage-name ledger-demo-data \
+  --account-name "$STORAGE_ACCOUNT" --azure-file-share-name ledger-demo-data \
   --azure-file-account-key "$STORAGE_KEY" --access-mode ReadWrite -o none
 unset STORAGE_KEY
 
@@ -55,6 +76,23 @@ az role assignment create --assignee-object-id "$PULL_PRINCIPAL" \
 Registry roles assume the default `LegacyRegistryPermissions` mode, not ABAC
 repository roles. The registry administrator password stays disabled. Allow time
 for role propagation before starting the application.
+
+Storage public networking stays disabled. The private endpoint must be approved,
+and the VNet DNS link must be complete before mounting SMB. Choose non-overlapping
+subnet ranges when integrating with another network. A Container Apps environment's
+VNet cannot be added after creation; use a new environment rather than trying to
+modify a non-VNet environment in place.
+
+In this subscription, Azure reported that VNet environment creation also required
+the `Microsoft.Network/AllowBringYourOwnPublicIpAddress` feature. Register it only
+if Azure returns that specific provisioning error, wait for `Registered`, and
+retry the same environment operation. This deployment does not supply a public IP:
+
+```bash
+az feature register --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress
+az feature show --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress \
+  --query properties.state -o tsv
+```
 
 Build the image locally with Docker or remotely with ACR Tasks:
 
@@ -76,7 +114,7 @@ persistent volume and allows only localhost requests; it is not the public demo.
 Create a temporary YAML file using the values resolved above:
 
 ```bash
-ENVIRONMENT_ID=$(az containerapp env show -g ledger -n ledger-env --query id -o tsv)
+ENVIRONMENT_ID=$(az containerapp env show -g ledger -n ledger-private-env --query id -o tsv)
 LOGIN_SERVER=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
 cat > bootstrap.yaml <<EOF
 location: swedencentral
@@ -108,7 +146,7 @@ properties:
       minReplicas: 1
       maxReplicas: 1
 EOF
-az containerapp create -g ledger -n ledger-web --yaml bootstrap.yaml -o none
+az containerapp create -g ledger -n ledger-demo --yaml bootstrap.yaml -o none
 rm bootstrap.yaml
 python3 scripts/deploy-container-app.py --registry "$ACR_NAME" \
   --tag "$TAG" --revision "initial-$(date +%s)"
@@ -116,9 +154,12 @@ python3 scripts/deploy-container-app.py --registry "$ACR_NAME" \
 
 On Windows, use `python` in place of `python3` and create the bootstrap YAML with an
 editor or a PowerShell here-string. The deployment script supports Windows and
-Linux. Set `$env:PYTHONUTF8 = '1'` before streaming ACR build logs in PowerShell:
+Linux. The script pins every Azure request to `--subscription`, using
+`AZURE_SUBSCRIPTION_ID` or the documented subscription by default, so another
+CLI session changing the default subscription cannot redirect deployment.
+Set `$env:PYTHONUTF8 = '1'` before streaming ACR build logs in PowerShell:
 the demo's Unicode audit output otherwise breaks Azure CLI's legacy Windows
-encoding. It resolves Azure resource IDs and the actual app hostname, verifies the
+encoding. The script resolves Azure resource IDs and the actual app hostname, verifies the
 region and persistent storage, drains old revisions, applies
 `deploy/container-app.yaml`, and requires verified public HTTPS before success.
 
@@ -132,7 +173,7 @@ CLIENT_ID=$(az identity create -g ledger -n ledger-github-deploy \
   --location swedencentral --query clientId -o tsv)
 PRINCIPAL=$(az identity show -g ledger -n ledger-github-deploy --query principalId -o tsv)
 TENANT_ID=$(az account show --query tenantId -o tsv)
-APP_ID=$(az containerapp show -g ledger -n ledger-web --query id -o tsv)
+APP_ID=$(az containerapp show -g ledger -n ledger-demo --query id -o tsv)
 az identity federated-credential create -g ledger \
   --identity-name ledger-github-deploy --name github-azure-demo \
   --issuer https://token.actions.githubusercontent.com \
@@ -190,7 +231,7 @@ automatically. No Azure DNS label, certificate email or certificate state volume
 is needed. Query the actual URL:
 
 ```bash
-az containerapp show -g ledger -n ledger-web \
+az containerapp show -g ledger -n ledger-demo \
   --query properties.configuration.ingress.fqdn -o tsv
 ```
 
@@ -201,6 +242,8 @@ at `/data` with matching ownership and restrictive file permissions. Ledger
 journals, fixture state and the **demo** signing key live under `/data/ledger`.
 Storage uses local redundancy and Azure-managed encryption at rest in Sweden
 Central; SMB is encrypted in transit. No out-of-country replication is configured.
+The environment's `ledger-demo-data` storage definition points to a fresh
+`ledger-demo-data` share, not the failed old app's `ledger-data` share.
 Account-key mounts require administrator rotation in the environment definition;
 no key is stored in source, workflow variables or the container image.
 
@@ -226,10 +269,10 @@ Administrator reset remains an explicitly destructive demo action.
 For diagnostics without exporting files or private keys:
 
 ```bash
-az containerapp revision list -g ledger -n ledger-web -o table
-az containerapp replica list -g ledger -n ledger-web --revision <revision>
-az containerapp logs show -g ledger -n ledger-web --type system --tail 50
-az containerapp logs show -g ledger -n ledger-web --container ledger --tail 50
+az containerapp revision list -g ledger -n ledger-demo -o table
+az containerapp replica list -g ledger -n ledger-demo --revision <revision>
+az containerapp logs show -g ledger -n ledger-demo --type system --tail 50
+az containerapp logs show -g ledger -n ledger-demo --container ledger --tail 50
 ```
 
 Log Analytics is disabled for this demo environment; streaming logs are available.

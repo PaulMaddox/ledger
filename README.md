@@ -157,11 +157,13 @@ requires a secure context with WebCrypto (HTTPS or localhost).
 
 ### Deploying the web console to Azure Container Apps
 
-The [Container Apps deployment instructions](deploy/README.md) configure `ledger-web`
+The [Container Apps deployment instructions](deploy/README.md) configure `ledger-demo`
 in resource group `ledger`, Sweden Central, using GitHub Actions and Azure
 OIDC (no stored Azure password). After the one-time setup, pushes to `main` build and
 test a container, deploy it with persistent Azure Files storage, and publish an
-address with Azure-managed HTTPS. The workflow reports the public URL. ACR Tasks can
+address with Azure-managed HTTPS. Storage remains private: a VNet-connected
+`ledger-private-env` reaches Azure Files through a private endpoint and private DNS.
+The workflow reports the public URL. ACR Tasks can
 build the image without local Docker, including from a Windows checkout.
 
 This is still an **unauthenticated synthetic-money demo**, not a production wallet.
