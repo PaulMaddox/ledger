@@ -520,7 +520,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="web-console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
-  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code> for customer wallets, operator dashboards, browser-verified proofs, simulation, Administrator performance graphs and Chaos Monkey attacks on the main demo store, or see <a href="https://github.com/PaulMaddox/ledger/blob/main/deploy/README.md">the single-instance AKS deployment guide</a> for public HTTPS. This unauthenticated demo leaves damaged storage for inspection until you use Administrator reset to start again, an explicit demo-only exception to the production ledger's append-only rule.</p>
+  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code> for customer wallets, operator dashboards, browser-verified proofs, simulation, Administrator performance graphs and Chaos Monkey experiments on the main demo store. Transaction races run live alongside the simulator; file and signer faults drain services first, and detected corruption fail-stops the ledger until reset. See <a href="https://github.com/PaulMaddox/ledger/blob/main/deploy/README.md">the single-instance AKS deployment guide</a> for public HTTPS. This unauthenticated demo leaves damaged storage for inspection until you use Administrator reset to start again, an explicit demo-only exception to the production ledger's append-only rule.</p>
   <figure class="shot wide">
     <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>
     <figcaption><b>Simulator.</b> Automated customers and their live activity.</figcaption>
@@ -553,8 +553,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
       <figcaption><b>Administrator.</b> Live server performance and a protected demo reset.</figcaption>
     </figure>
     <figure class="shot">
-      <a href="screenshots/chaos.png"><img src="screenshots/chaos.png" alt="Chaos Monkey view: authorized main-store failures, recovery results and manual reset" loading="lazy"></a>
-      <figcaption><b>Chaos Monkey.</b> Main-store failures; reset to start again.</figcaption>
+      <a href="screenshots/chaos.png"><img src="screenshots/chaos.png" alt="Chaos Monkey view: live transaction races, main-store faults and recovery results" loading="lazy"></a>
+      <figcaption><b>Chaos Monkey.</b> Live transaction races and main-store faults; reset after unrecoverable corruption.</figcaption>
     </figure>
   </div>
 </section>

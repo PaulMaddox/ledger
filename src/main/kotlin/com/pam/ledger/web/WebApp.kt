@@ -364,14 +364,21 @@ class LedgerWebApp private constructor(
             }
             val result = if (request.method == "POST" && segments in listOf(
                     listOf("administrator", "clear"), listOf("chaos"), listOf("regulator", "tamper"))) {
-                lifecycle.write {
-                    checkGeneration()
-                    when (segments) {
-                        listOf("administrator", "clear") -> clearStorage(request)
-                        listOf("regulator", "tamper") -> runChaos(request.str("mode"), request.str("confirmation")).let {
-                            it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                if (segments == listOf("chaos") && ChaosLab.isLiveScenario(params["scenario"] ?: "")) {
+                    lifecycle.read {
+                        checkGeneration()
+                        runLiveChaos(request.str("scenario"))
+                    }
+                } else {
+                    lifecycle.write {
+                        checkGeneration()
+                        when (segments) {
+                            listOf("administrator", "clear") -> clearStorage(request)
+                            listOf("regulator", "tamper") -> runChaos(request.str("mode")).let {
+                                it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                            }
+                            else -> runChaos(request.str("scenario"))
                         }
-                        else -> runChaos(request.str("scenario"), request.str("confirmation"))
                     }
                 }
             } else lifecycle.read { checkGeneration(); route(request) }
@@ -572,11 +579,23 @@ class LedgerWebApp private constructor(
         return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
     }
 
-    private fun runChaos(scenario: String, confirmation: String): Map<String, Any?> {
-        ChaosLab.validate(scenario, confirmation)
+    private fun runLiveChaos(scenario: String): Map<String, Any?> {
+        ChaosLab.validate(scenario)
+        val current = services ?: throw HttpError(503, "ledger_unavailable",
+            "Main store is stopped. Use Administrator reset before another experiment.")
+        return chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+    }
+
+    private fun runChaos(scenario: String): Map<String, Any?> {
+        ChaosLab.validate(scenario)
         val previous = services ?: throw HttpError(503, "ledger_unavailable",
             "Main store is stopped. Use Administrator reset before another experiment.")
-        // Anchor the exact stopped prefix. The simulator is drained before this final checkpoint.
+        val simulator = previous.simulator
+        val simulatorState = simulator.state
+        val simulatorCustomers = simulator.customers
+        val simulatorOpsPerMinute = simulator.opsPerMinute
+        val simulatorAutoFixtures = simulator.autoFixtures
+        // Anchor the exact stopped prefix before any main-store file mutation.
         services = null
         offlineReason = "Main-store chaos in progress or interrupted. Use Administrator reset if needed."
         previous.close()
@@ -584,7 +603,17 @@ class LedgerWebApp private constructor(
         Ledger.open(LedgerConfig(directory = directory, ledgerId = ledgerId, signer = signer)).use { it.checkpoint() }
         val result = chaos.run(scenario, directory, signer)
         if (result["available"] == true) {
-            services = openServices(directory, signer)
+            val recovered = openServices(directory, signer)
+            recovered.simulator.configure(simulatorCustomers, simulatorOpsPerMinute, simulatorAutoFixtures)
+            when (simulatorState) {
+                Simulator.State.RUNNING -> recovered.simulator.start()
+                Simulator.State.PAUSED -> {
+                    recovered.simulator.start()
+                    recovered.simulator.pause()
+                }
+                Simulator.State.STOPPED -> Unit
+            }
+            services = recovered
             offlineReason = null
         } else {
             offlineReason = result["evidence"].toString()
