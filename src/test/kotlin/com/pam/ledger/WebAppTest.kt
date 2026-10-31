@@ -13,9 +13,18 @@ import java.net.http.HttpClient
 import java.net.http.HttpRequest
 import java.net.http.HttpResponse
 import java.util.UUID
+import java.time.Clock
+import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
+import java.time.ZoneOffset
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -226,6 +235,71 @@ class WebAppTest {
                     assertEquals(placements, settlements, "round $round")
                     assertEquals(results.sumOf { it.getOrThrow() }, placements, "round $round")
                 }
+            }
+
+        }
+    }
+
+    /** A pending placement must retain the fixture lock past the normal 30-second timeout. */
+    @Test
+    fun `queue overload cannot release a pending placement before settlement`() {
+        val blocked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val settling = CountDownLatch(1)
+        val armed = AtomicBoolean(false)
+        val clock = object : Clock() {
+            override fun getZone(): ZoneId = ZoneOffset.UTC
+            override fun withZone(zone: ZoneId): Clock = this
+            override fun instant(): Instant {
+                if (armed.compareAndSet(true, false)) {
+                    blocked.countDown()
+                    check(release.await(45, TimeUnit.SECONDS)) { "test did not release the writer" }
+                }
+                return Instant.now()
+            }
+        }
+        val cfg = config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(
+            clock = clock, queueCapacity = 1, maxBatchSize = 1, submitTimeout = Duration.ofMillis(100),
+        )
+        Ledger.open(cfg).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1000, "EUR", "fund")
+            ReadModel(ledger).use { model ->
+                val book = Book(ledger, wallet, model)
+                val fixture = book.addFixture(Random(0))
+                armed.set(true)
+                val results = race(3) { t ->
+                    when (t) {
+                        0 -> book.placeBet("p", fixture.id, "HOME", 100, "pending")
+                        1 -> {
+                            check(blocked.await(5, TimeUnit.SECONDS))
+                            // Fill the only queue slot while the original bet is still uncommitted.
+                            val queued = ledger.submit(TransactionRequest("queued", "DEPOSIT", listOf(
+                                Posting(SportsbookWallet.Accounts.pspClearing("EUR"), "EUR", -1),
+                                Posting(SportsbookWallet.Accounts.cash("p", "EUR"), "EUR", 1),
+                            )))
+                            assertFailsWith<OverloadedException> {
+                                book.placeBet("p", fixture.id, "HOME", 100, "refused")
+                            }
+                            settling.countDown()
+                            val result = book.settle(fixture.id, "HOME")
+                            queued.join()
+                            assertTrue(result.complete)
+                        }
+                        else -> try {
+                            check(settling.await(5, TimeUnit.SECONDS))
+                            Thread.sleep(31_000)
+                            assertTrue(fixture.isOpen, "settlement closed betting underneath a pending placement")
+                            assertTrue(ledger.findByIdempotencyKey("bet:pending:place") == null)
+                        } finally {
+                            release.countDown()
+                        }
+                    }
+                }
+                results.forEach { it.getOrThrow() }
+                model.catchUp()
+                assertTrue(model.openBetsOn(fixture.id).isEmpty())
+                assertTrue(wallet.isSettled("pending"))
             }
         }
     }

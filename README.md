@@ -71,7 +71,8 @@ ledger, so anything done in one view shows up in the others.
   walks the Merkle proof, and checks the Ed25519 signature with
   WebCrypto, rather than trusting the server.
 - **Operator.** Revenue, exposure, throughput and open-bet charts, per-fixture liability,
-  settlement buttons, and a live transaction feed.
+  settlement buttons, and a live transaction feed. Settlement waits for each original
+  in-flight placement's definitive result, including during queue overload.
 - **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
   consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
   corrupts a *copy* of the signed journal prefix three different ways and shows the verifier

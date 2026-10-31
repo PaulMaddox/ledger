@@ -3,7 +3,6 @@ package com.pam.ledger.web
 import com.pam.ledger.IdempotencyConflictException
 import com.pam.ledger.Ledger
 import com.pam.ledger.NotFoundException
-import com.pam.ledger.OutcomeUnknownException
 import com.pam.ledger.Receipt
 import com.pam.ledger.SportsbookWallet
 import java.nio.file.Files
@@ -112,23 +111,7 @@ class Book(
         }
         return f.lock.read {
             require(f.isOpen) { "fixture $fixtureId has already been settled" }
-            placeUntilDefinitive(playerId, betId, stake, label)
-        }
-    }
-
-    /**
-     * Called while holding the fixture's read lock. If waiting for the ledger times out, the
-     * placement may still commit later, so the lock must not be released yet: retrying the same
-     * idempotent request returns its eventual outcome (committed or refused). Settlement can
-     * therefore never close the fixture underneath a pending bet.
-     */
-    private fun placeUntilDefinitive(playerId: String, betId: String, stake: Long, label: String): Receipt {
-        while (true) {
-            try {
-                return wallet.placeBet(playerId, betId, stake, "EUR", selection = label)
-            } catch (e: OutcomeUnknownException) {
-                // not definitive yet: ask again with the same key
-            }
+            wallet.placeBetUntilDefinitive(playerId, betId, stake, "EUR", selection = label)
         }
     }
 
