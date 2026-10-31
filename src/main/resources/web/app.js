@@ -457,7 +457,8 @@ $("consForm").addEventListener("submit", async e => {
   try {
     const r = await api(`proof/consistency?from=${from}&to=${to}`);
     const a = parseTreeHead(b64(r.from.signingBytes)), b = parseTreeHead(b64(r.to.signingBytes));
-    const ok = await consistent(from, to, a.root, b.root, r.proof.map(fromHex));
+    const fieldsOk = a.treeSize === from && b.treeSize === to && a.tag === "PAM-LEDGER/tree-head/v1" && b.tag === a.tag && a.ledgerId === b.ledgerId;
+    const ok = fieldsOk && await consistent(from, to, a.root, b.root, r.proof.map(fromHex));
     const sa = await verifySignature(r.publicKey, r.from.signature, b64(r.from.signingBytes));
     const sb = await verifySignature(r.publicKey, r.to.signature, b64(r.to.signingBytes));
     const sigs = sa === null || sb === null ? null : sa && sb;
