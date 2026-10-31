@@ -115,6 +115,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                     bets[betId] = it.copy(settledSeq = e.seq, outcome = e.kind.removePrefix("BET_"), payout = payout)
                     openBetsByPlayer[it.playerId]?.remove(betId)
                     openBetsByFixture[it.fixtureId]?.remove(betId)
+                    if (openBetsByPlayer[it.playerId]?.isEmpty() == true) openBetsByPlayer.remove(it.playerId)
+                    if (openBetsByFixture[it.fixtureId]?.isEmpty() == true) openBetsByFixture.remove(it.fixtureId)
                 }
             }
         }
@@ -135,7 +137,10 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         openBetsByPlayer[player].orEmpty().mapNotNull(bets::get)
     }
     fun bet(betId: String): BetView? = synchronized(lock) { bets[betId] }
-    fun openBets(): List<BetView> = synchronized(lock) { bets.values.filter { it.isOpen } }
+    fun openBets(): List<BetView> = synchronized(lock) {
+        openBetsByFixture.values.asSequence().flatMap { it.asSequence() }
+            .map(bets::getValue).sortedBy { it.placedSeq }.toList()
+    }
     fun openBetsOn(fixtureId: String): List<BetView> = synchronized(lock) {
         openBetsByFixture[fixtureId].orEmpty().mapNotNull(bets::get)
     }

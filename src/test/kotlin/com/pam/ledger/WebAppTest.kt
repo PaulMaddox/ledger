@@ -395,6 +395,34 @@ class WebAppTest {
         }
     }
 
+    /** Settled history must leave the current-open indexes, including empty fixture buckets. */
+    @Test
+    fun `global open bets match current indexes after settlements and replay`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1000, "EUR", "open-fund")
+            repeat(100) { i ->
+                wallet.placeBet("p", "historical-$i", 1, "EUR", "F$i|HOME|200")
+                wallet.settleLoss("historical-$i")
+            }
+            repeat(4) { i -> wallet.placeBet("p", "open-$i", 1, "EUR", "F${i % 2}|HOME|200") }
+            wallet.voidBet("open-1")
+            ReadModel(ledger).use { model ->
+                model.catchUp()
+                assertEquals(listOf("open-0", "open-2", "open-3"), model.openBets().map { it.betId })
+                assertEquals(model.allBets().filter { it.isOpen }, model.openBets())
+            }
+        }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                model.catchUp()
+                assertEquals(listOf("open-0", "open-2", "open-3"), model.openBets().map { it.betId })
+            }
+        }
+    }
+
     /** Customer queries use only that customer's index and stop at the requested limit. */
     @Test
     fun `customer bet history returns the newest forty with current settlements`() {
