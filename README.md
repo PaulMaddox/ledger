@@ -152,7 +152,7 @@ The demo exits with a non-zero status if the audit fails, which is how CI uses i
 ### Rebuilding the interactive guide
 
 ```
-python3 scripts/build-readme.py   # rebuild docs/index.html (on Windows: python instead of python3)
+python3 scripts/build-readme.py   # rebuild docs/index.html (on Windows: use python -X utf8 instead of python3)
 node scripts/check-guide.mjs      # headless check of the guide
 ```
 
