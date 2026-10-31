@@ -30,36 +30,38 @@ class ChaosLab {
     private val history = ArrayDeque<Map<String, Any?>>()
 
     companion object {
-        const val CONFIRMATION = "CHAOS ON MAIN STORE"
+        val LIVE_SCENARIOS = setOf("retries", "double-spend", "settlement")
         val SCENARIOS = linkedMapOf(
-            "torn-write" to ("Torn journal write" to "Append an incomplete frame to the main journal; reopen and recover the durable prefix."),
-            "checksum" to ("Storage corruption" to "Flip a main journal byte; expect recovery to refuse the damaged store."),
-            "rollback" to ("Storage rollback" to "Remove five signed entries from the main journal; expect recovery to refuse it."),
-            "retries" to ("Retry storm" to "Send 16 concurrent deposits to the main ledger with one key; expect exactly one credit."),
-            "double-spend" to ("Multi-device double spend" to "Race 16 full-balance bets on the main ledger; expect one acceptance."),
-            "settlement" to ("Conflicting settlement" to "Race win and loss on a main-store bet; expect one durable outcome."),
-            "signer-outage" to ("Signing service outage" to "Fail the main ledger's signer; observe fail-stop and leave services stopped."),
+            "torn-write" to ("Torn journal write" to "Append an incomplete frame to the main journal; drain services, then reopen and recover the durable prefix."),
+            "checksum" to ("Storage corruption" to "Flip a main journal byte; drain services, then expect recovery to refuse the damaged store."),
+            "rollback" to ("Storage rollback" to "Remove five signed entries from the main journal; drain services, then expect recovery to refuse it."),
+            "retries" to ("Retry storm" to "Send 16 concurrent deposits for one player with one key; expect exactly one credit while the simulator keeps running."),
+            "double-spend" to ("Multi-device double spend" to "Race 16 full-balance bets for one player; expect one acceptance and 15 refusals while the simulator keeps running."),
+            "settlement" to ("Conflicting settlement" to "Race win and loss for one bet; expect one durable outcome while the simulator keeps running."),
+            "signer-outage" to ("Signing service outage" to "Fail a ledger instance's signer; observe fail-stop, then verify the main store recovers."),
             "edit" to ("Edit in place" to "Inflate a main-store deposit tenfold without updating hashes."),
             "rewrite" to ("Rewrite history" to "Inflate a main-store deposit and recompute the chain; expect signed checkpoints to reject it."),
             "truncate" to ("Roll back" to "Delete the newest five main-store entries covered by a signed checkpoint."),
         )
 
-        fun validate(scenario: String, confirmation: String) {
+        fun validate(scenario: String) {
             require(scenario in SCENARIOS) { "unknown chaos scenario" }
-            require(confirmation == CONFIRMATION) { "type $CONFIRMATION to authorize a main-store experiment" }
         }
+
+        fun isLiveScenario(scenario: String) = scenario in LIVE_SCENARIOS
     }
 
     fun view(available: Boolean, reason: String?): Map<String, Any?> = mapOf(
         "available" to available, "reason" to reason,
         "scenarios" to SCENARIOS.filterKeys { it !in setOf("edit", "rewrite", "truncate") }
-            .map { (id, text) -> mapOf("id" to id, "name" to text.first, "description" to text.second) },
+            .map { (id, text) -> mapOf("id" to id, "name" to text.first, "description" to text.second,
+                "live" to isLiveScenario(id)) },
         "history" to synchronized(history) { history.toList().asReversed() },
     )
 
     fun clearHistory() = synchronized(history) { history.clear() }
 
-    /** Caller has stopped and drained every service. Corrupted files remain for inspection and reset. */
+    /** Caller has stopped and drained every service before any main-store file mutation. */
     fun run(scenario: String, directory: Path, signer: TreeHeadSigner): Map<String, Any?> {
         require(scenario in SCENARIOS) { "unknown chaos scenario" }
         val started = System.nanoTime()
@@ -101,7 +103,16 @@ class ChaosLab {
         var available = false
         var passed = observed.first
         val recovery = if (scenario == "signer-outage") {
-            "Main ledger is fail-stopped. Files retained; use Administrator reset to start again."
+            try {
+                Ledger.open(config).use { it.checkpoint() }
+                check(LedgerVerifier.verify(directory, config.ledgerId, listOf(signer.publicKey)).ok) {
+                    "main-store verification failed after signer outage"
+                }
+                available = true
+                "The injected signer failed and its ledger refused a later write; the main store reopened and verified."
+            } catch (e: TamperDetectedException) {
+                "Main-store recovery refused the ledger: ${e.message}. Files retained; use Administrator reset."
+            }
         } else {
             try {
                 Ledger.open(config).use { recovered ->
@@ -123,16 +134,82 @@ class ChaosLab {
                 "Recovery refused the main store: ${e.message}. Files retained; use Administrator reset."
             }
         }
-        val result = mapOf("scenario" to scenario, "name" to SCENARIOS.getValue(scenario).first,
+        return remember(mapOf("scenario" to scenario, "name" to SCENARIOS.getValue(scenario).first,
             "passed" to passed, "evidence" to "${observed.second} $recovery",
             "t" to System.currentTimeMillis(), "millis" to (System.nanoTime() - started) / 1_000_000,
             "available" to available, "scope" to "MAIN DATA STORE",
-            "problems" to if (available) emptyList<String>() else listOf(recovery))
+            "problems" to if (available) emptyList<String>() else listOf(recovery)))
+    }
+
+    /** Run business-operation races on the live ledger without interrupting simulator traffic. */
+    @Synchronized
+    fun runLive(scenario: String, ledger: Ledger, wallet: SportsbookWallet, book: Book): Map<String, Any?> {
+        require(isLiveScenario(scenario)) { "scenario is not a live transaction experiment" }
+        val started = System.nanoTime()
+        val (passed, evidence) = liveMoneyExperiment(scenario, wallet, book)
+        val headSize = ledger.head().size
+        return remember(mapOf(
+            "scenario" to scenario,
+            "name" to SCENARIOS.getValue(scenario).first,
+            "passed" to passed,
+            "evidence" to "$evidence Ledger head: $headSize entries.",
+            "t" to System.currentTimeMillis(),
+            "millis" to (System.nanoTime() - started) / 1_000_000,
+            "available" to true,
+            "scope" to "MAIN DATA STORE · LIVE",
+            "problems" to emptyList<String>(),
+        ))
+    }
+
+    private fun remember(result: Map<String, Any?>): Map<String, Any?> {
         synchronized(history) {
             history.addLast(result)
             if (history.size > 30) history.removeFirst()
         }
         return result
+    }
+
+    private fun liveMoneyExperiment(
+        scenario: String,
+        wallet: SportsbookWallet,
+        book: Book,
+    ): Pair<Boolean, String> {
+        val player = "chaos-${UUID.randomUUID()}"
+        wallet.deposit(player, 10_000, "EUR", "$player-seed")
+        return when (scenario) {
+            "retries" -> {
+                val receipts = race(16) { wallet.deposit(player, 100, "EUR", "$player-duplicate") }
+                (receipts.map { it.seq }.distinct().size == 1 &&
+                    receipts.count { !it.replayed } == 1 &&
+                    wallet.cashBalance(player, "EUR") == 10_100L) to
+                    "${receipts.size} replies, ${receipts.count { it.replayed }} replays; $player credited once, cash 10100 minor units."
+            }
+            "double-spend" -> {
+                val fixture = book.addFixture()
+                val accepted = race(16) { i ->
+                    try {
+                        book.placeBet(player, fixture.id, "HOME", 10_000, "$player-device-$i")
+                        true
+                    } catch (e: InsufficientFundsException) { false }
+                }.count { it }
+                (accepted == 1 && wallet.cashBalance(player, "EUR") == 0L &&
+                    wallet.openBetsBalance(player, "EUR") == 10_000L) to
+                    "$accepted accepted, ${16 - accepted} refused for $player; cash 0, escrow 10000 minor units."
+            }
+            else -> {
+                val fixture = book.addFixture()
+                val bet = "$player-bet"
+                book.placeBet(player, fixture.id, "HOME", 100, bet)
+                val accepted = race(2) { i ->
+                    try {
+                        if (i == 0) wallet.settleWin(bet, 200) else wallet.settleLoss(bet)
+                        true
+                    } catch (e: IdempotencyConflictException) { false }
+                }.count { it }
+                (accepted == 1 && wallet.openBetsBalance(player, "EUR") == 0L) to
+                    "$accepted settlement accepted, ${2 - accepted} conflicting outcome refused for $player; escrow released once."
+            }
+        }
     }
 
     private fun moneyExperiment(scenario: String, config: LedgerConfig): Pair<Boolean, String> {

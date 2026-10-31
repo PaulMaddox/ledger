@@ -112,18 +112,20 @@ ledger, so anything done in one view shows up in the others.
   reset is an explicit exception to append-only storage, never a production ledger operation.
 - **Chaos Monkey.** Seven bounded experiments against the **main data store**: torn writes, CRC corruption,
   signed-history rollback, duplicate retry storms, multi-device double spending, conflicting
-  settlement and signing-service outage/fail-stop. Type `CHAOS ON MAIN STORE` before
-  each run. Every run stops and drains the simulator and ledger services; money races
-  create real, visible customers and bets, while storage attacks mutate the main journals
-  under their directory lock. The tamper lab edits deposits, rewrites the chain or rolls
-  back signed entries in that same store. Recovery genuinely attempts to reopen and
-  verify storage, except after the signer outage, which intentionally leaves services stopped.
-  Torn-write recovery preserves committed history; corruption and rollback should refuse
-  to reopen. Damaged files and results remain for inspection, without automatic restore.
-  Administrator reset is available even when the ledger is stopped or the app restarts
-  on corrupt storage. Use it to start again. History retains the last 30 experiments
-  in memory until reset or app restart. These are demo-only, owner-approved exceptions
-  to append-only storage, never production operations.
+  settlement and signing-service outage/fail-stop. Clicking **Run experiment** authorizes
+  that run; no typed phrase is required. Retry, double-spend and settlement races run live
+  on the ledger alongside the simulator, demonstrating committed outcomes and rejected
+  transactions without interrupting simulator traffic. File and signer faults drain services
+  before running; the simulator resumes with a fresh run if the store recovers. Corruption
+  correctly fail-stops the ledger, so services remain stopped until reset rather than
+  accepting writes against damaged history. Storage attacks mutate the main journal under
+  its directory lock; the tamper lab edits deposits, rewrites the chain or rolls back signed
+  entries in that same store. Torn-write recovery preserves committed history; detected
+  corruption remains for inspection, without automatic restore. Administrator reset is
+  available even when the ledger is stopped or the app restarts on corrupt storage. Use it
+  to start again. History retains the last 30 experiments in memory until reset or app
+  restart. These are demo-only, owner-approved exceptions to append-only storage, never
+  production operations.
 
 | Operator | Customer |
 |---|---|

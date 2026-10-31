@@ -247,9 +247,9 @@
   <div class="panel-head"><h1>Chaos Monkey</h1><span class="pill bad">Main data store</span></div>
   <div class="panel danger-zone">
     <h2>Break the real demo ledger</h2>
-    <p>Every experiment targets the main data store. The simulator and ledger services stop first; races persist real transactions, and corruption can leave the ledger unable to reopen.</p>
+    <p>Every experiment targets the main data store. Transaction races run live alongside the simulator. Journal and signing-service faults drain services first; the simulator resumes if the main store recovers, but detected corruption leaves the ledger stopped.</p>
     <p>Damaged files remain for inspection. Use <a href="#administrator">Administrator → Clear storage</a> to start again. No automatic restore or disposable copy.</p>
-    <div class="field"><label for="chaosConfirmation">Type CHAOS ON MAIN STORE to enable one experiment</label><input id="chaosConfirmation" autocomplete="off" spellcheck="false"></div>
+    <p class="hint">Clicking Run experiment authorizes that one run against the demo store.</p>
     <div class="result" id="chaosStoreStatus" role="status"></div>
   </div>
   <div class="panel">
