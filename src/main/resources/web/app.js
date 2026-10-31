@@ -732,10 +732,10 @@ async function simAction(action, withSettings) {
   try {
     await api("simulator", { method: "POST", params: { ...(withSettings ? simSettings() : {}), ...(action ? { action } : {}) } });
     delete $("simForm").dataset.dirty;
-  } catch (e) { alertInline(errText(e)); }
+    say($("simResult"), null, "");
+  } catch (e) { say($("simResult"), false, errText(e)); }
   refreshSim();
 }
-function alertInline(msg) { $("wallNote").innerHTML = `<span style="color:var(--c-bad)">${msg}</span>`; }
 $("simForm").addEventListener("input", () => { $("simForm").dataset.dirty = "1"; });
 $("simForm").addEventListener("submit", e => { e.preventDefault(); simAction(null, true); });
 $("simStart").addEventListener("click", () => simAction("start", true));

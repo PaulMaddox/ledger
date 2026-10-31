@@ -71,6 +71,7 @@ ledger, so anything done in one view shows up in the others.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
   Customer IDs always use ASCII digits, independent of the host locale.
   Resizing the simulator wall preserves retained customers' activity, balances and refusal state.
+  Action errors appear beside the controls, survive refreshes, and clear after a successful action.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
   API monetary values are decimal strings in minor units, and browser inputs are parsed
