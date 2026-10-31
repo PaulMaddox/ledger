@@ -61,3 +61,68 @@ test("verified panel renders canonical bytes, not altered JSON entry fields", as
   assert.match(target.innerHTML, /\+100 EUR minor units/);
   assert.doesNotMatch(target.innerHTML, /forged/i);
 });
+
+function slipContext(fetch) {
+  const elements = new Map();
+  const element = id => {
+    if (!elements.has(id)) elements.set(id, {
+      handlers: {}, value: "10.00", className: "", innerHTML: "", hidden: true, disabled: false,
+      addEventListener(name, handler) { this.handlers[name] = handler; },
+      querySelector() { return element("submit"); },
+    });
+    return elements.get(id);
+  };
+  const c = context(fetch);
+  c.URLSearchParams = URLSearchParams;
+  c.document = { getElementById: element, querySelectorAll: () => [] };
+  const customer = source.slice(source.indexOf('let player = "alice"')).split("// Five devices at once:")[0];
+  vm.runInContext(customer, c);
+  vm.runInContext(`
+    loadPlayers = loadCustFixtures = refreshPlayer = async () => {};
+    fixturesCache = [{ id: "F1", home: "Home", away: "Away", odds: { HOME: 200, AWAY: 250 } }];
+  `, c);
+  const pick = sel => element("custFixtures").handlers.click({
+    target: { closest: () => ({ dataset: { fx: "F1", sel } }) },
+  });
+  const submit = () => element("slip").handlers.submit({ preventDefault() {} });
+  return { c, element, pick, submit };
+}
+
+test("double submission is blocked and a lost response retries the identical slip", async () => {
+  const calls = [];
+  let reject;
+  const s = slipContext((path, options) => {
+    calls.push({ path, body: options.body.toString() });
+    if (calls.length === 1) return new Promise((_, no) => { reject = no; });
+    return Promise.resolve({ ok: true, json: async () => ({ seq: 5 }) });
+  });
+  s.pick("HOME");
+  const first = s.submit();
+  assert.equal(s.element("submit").disabled, true);
+  assert.equal(s.element("slipStake").disabled, true);
+  await s.submit();
+  assert.equal(calls.length, 1);
+  reject(new Error("Response lost"));
+  await first;
+  assert.equal(s.element("submit").disabled, false);
+  s.element("slipStake").value = "99.00";
+  vm.runInContext('player = "bob"', s.c);
+  await s.submit();
+  assert.deepEqual(calls[1], calls[0]);
+  assert.equal(s.element("slip").hidden, true);
+});
+
+test("completion of an old slip preserves a newly selected slip", async () => {
+  let complete;
+  const s = slipContext(() => new Promise(yes => { complete = yes; }));
+  s.pick("HOME");
+  const pending = s.submit();
+  s.pick("AWAY");
+  assert.equal(s.element("submit").disabled, true);
+  complete({ ok: true, json: async () => ({ seq: 6 }) });
+  await pending;
+  assert.equal(s.element("slip").hidden, false);
+  assert.equal(s.element("submit").disabled, false);
+  assert.equal(s.element("slipStake").disabled, false);
+  assert.equal(vm.runInContext("selection.sel", s.c), "AWAY");
+});

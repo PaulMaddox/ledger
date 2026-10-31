@@ -64,7 +64,8 @@ ledger, so anything done in one view shows up in the others.
   latest bets, deposits, withdrawals and cash-outs, green when accepted and red when the
   ledger refuses; select a tile to open that customer.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
-  automated. "Bet everything from 5 devices" fires five simultaneous bets for the whole
+  automated. Each slip keeps one bet ID, blocks overlapping submissions, and retries an
+  uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance to show that exactly one gets through. Any entry can be **verified in the browser**:
   it decodes and displays the canonical bytes (amounts in exact minor units), hashes them,
   walks the Merkle proof, and checks the Ed25519 signature with

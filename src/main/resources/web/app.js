@@ -203,8 +203,14 @@ poll(async () => {
 
 // ============================== customer ==============================
 let player = "alice";
-let selection = null; // {fixture, sel, odds, label}
+let selection = null; // {fixture, sel, odds, label, betId, params}
+let slipSubmitting = false;
 let fixturesCache = [];
+
+function updateSlipControls() {
+  $("slip").querySelector('button[type="submit"]').disabled = slipSubmitting;
+  $("slipStake").disabled = !!selection?.params;
+}
 
 async function loadPlayers() {
   const q = $("playerSearch").value;
@@ -295,23 +301,40 @@ $("custFixtures").addEventListener("click", e => {
   const b = e.target.closest("[data-fx]");
   if (!b) return;
   const f = fixturesCache.find(x => x.id === b.dataset.fx);
-  selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: `${f.home} v ${f.away}` };
+  selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: `${f.home} v ${f.away}`, betId: uuid(), params: null };
   $("slipText").innerHTML = `<b>${esc(selection.sel)}</b> in ${esc(selection.label)} @ <b>${odds(selection.odds)}</b>`;
   $("slip").hidden = false;
+  updateSlipControls();
   loadCustFixtures();
 });
 $("slipCancel").addEventListener("click", () => { selection = null; $("slip").hidden = true; loadCustFixtures(); });
 $("slip").addEventListener("submit", async e => {
   e.preventDefault();
-  if (!selection) return;
+  if (!selection || slipSubmitting) return;
   const submittedSelection = selection;
-  const stake = toMinor($("slipStake").value);
+  // A lost response must retry the same player, stake and key, not silently create another bet.
+  if (!submittedSelection.params) {
+    const stake = toMinor($("slipStake").value);
+    if (!(stake > 0)) return say($("betResult"), false, "Enter a stake above zero.");
+    submittedSelection.player = player;
+    submittedSelection.params = { fixture: submittedSelection.fixture, selection: submittedSelection.sel, stake, betId: submittedSelection.betId };
+  }
+  const { stake } = submittedSelection.params;
+  slipSubmitting = true;
+  updateSlipControls();
   try {
-    const r = await api(`players/${encodeURIComponent(player)}/bets`, { method: "POST", params: { fixture: submittedSelection.fixture, selection: submittedSelection.sel, stake, betId: uuid() } });
+    const r = await api(`players/${encodeURIComponent(submittedSelection.player)}/bets`, { method: "POST", params: submittedSelection.params });
     say($("betResult"), true, `Bet placed: ${eur(stake)} on ${esc(submittedSelection.sel)} @ ${odds(submittedSelection.odds)}. Entry #${r.seq}.`);
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
+    if ([400, 403, 409].includes(err.status)) {
+      submittedSelection.params = null;
+      submittedSelection.betId = uuid();
+    }
+  } finally {
+    slipSubmitting = false;
+    updateSlipControls();
   }
   refreshPlayer(); loadCustFixtures(); loadPlayers();
 });
