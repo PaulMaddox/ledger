@@ -66,7 +66,7 @@ def extract_tests(path):
 
 
 test_dir = root / "src/test/kotlin/com/pam/ledger"
-test_order = ["MultiDeviceWalletTest.kt", "ConcurrencyTest.kt", "IntegrityTest.kt", "MerkleTest.kt", "TestSupport.kt"]
+test_order = ["MultiDeviceWalletTest.kt", "ConcurrencyTest.kt", "IntegrityTest.kt", "MerkleTest.kt", "WebAppTest.kt", "TestSupport.kt"]
 test_files = {name: (test_dir / name).read_text() for name in test_order}
 tests = {name: extract_tests(test_dir / name) for name in test_order if name != "TestSupport.kt"}
 

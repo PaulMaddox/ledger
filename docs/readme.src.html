@@ -220,6 +220,16 @@ table.bal{border-collapse:collapse;width:100%;font-size:.78rem}
 @keyframes flash{from{box-shadow:0 0 0 3px var(--accent)}to{box-shadow:0 0 0 0 transparent}}
 @media (prefers-reduced-motion:reduce){.tests details.flash{animation:none}.tests summary::before{transition:none}}
 
+/* ---------- console screenshots ---------- */
+.shots{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:20px}
+.shot{margin:0;display:grid;gap:8px;min-width:0}
+.shot a{display:block;border:1px solid var(--rule);border-radius:8px;overflow:hidden;background:var(--panel)}
+.shot a:hover{border-color:var(--accent)}
+.shot img{display:block;width:100%;height:auto}
+.shot figcaption{font-size:.88rem;color:var(--muted);max-width:80ch}
+.shot figcaption b{color:var(--ink)}
+@media (max-width:900px){.shots{grid-template-columns:1fr}}
+
 /* ---------- tables ---------- */
 .tblwrap{overflow-x:auto;border:1px solid var(--rule)}
 table.reg{border-collapse:collapse;width:100%;min-width:640px;font-size:.88rem;background:var(--panel)}
@@ -345,7 +355,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <nav class="topnav" aria-label="Contents">
   <a class="brand" href="#top">Ledger Internals</a>
   <div class="navlinks">
-    <a href="#requirements">Requirements</a><a href="#architecture">How it works</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Debugger</a><a href="#regulators">Tests</a><a href="#cloud">Cloud</a><a href="#files">Files</a>
+    <a href="#requirements">Requirements</a><a href="#architecture">How it works</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Debugger</a><a href="#console">Console</a><a href="#regulators">Tests</a><a href="#cloud">Cloud</a><a href="#files">Files</a>
   </div>
 </nav>
 
@@ -506,6 +516,39 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   </div>
 </section>
 
+<!-- ======================= CONSOLE ======================= -->
+<section id="console">
+  <div class="eyebrow">Try it live</div>
+  <h2>The web console</h2>
+  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code>. Four views share one live ledger, so anything done in one appears in the others. These screenshots are captured from the running console by <code>scripts/capture-screenshots.py</code>.</p>
+  <figure class="shot wide">
+    <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>
+    <figcaption><b>Simulator.</b> 500 automated customers by default, with start, pause, resume and stop. Each tile streams one customer's latest actions, green when accepted and red when the ledger refuses.</figcaption>
+  </figure>
+  <div class="shots">
+    <figure class="shot">
+      <a href="screenshots/operator.png"><img src="screenshots/operator.png" alt="Operator view: revenue, exposure and throughput tiles and charts, fixtures with liability and settle buttons, and a live feed" loading="lazy"></a>
+      <figcaption><b>Operator.</b> Revenue, exposure and throughput, per-fixture liability with settlement, and the live feed.</figcaption>
+    </figure>
+    <figure class="shot">
+      <a href="screenshots/customer.png"><img src="screenshots/customer.png" alt="Customer view: balances, wallet, five-devices test, fixtures to bet on, bets and history" loading="lazy"></a>
+      <figcaption><b>Customer.</b> Wallet, betting and cash-out for any customer, and a five-devices-at-once double-spend test.</figcaption>
+    </figure>
+    <figure class="shot">
+      <a href="screenshots/regulator.png"><img src="screenshots/regulator.png" alt="Regulator view: signed checkpoints verified in the browser, and a passed independent audit" loading="lazy"></a>
+      <figcaption><b>Regulator.</b> Checkpoint signatures checked in the browser, and a full independent audit.</figcaption>
+    </figure>
+    <figure class="shot">
+      <a href="screenshots/customer-verify.png"><img src="screenshots/customer-verify.png" alt="An entry verified in the browser: leaf hash, audit path, signed root and Ed25519 signature all checked" loading="lazy"></a>
+      <figcaption><b>Verified in the browser.</b> The browser hashes the entry, walks the Merkle proof and checks the signature itself.</figcaption>
+    </figure>
+  </div>
+  <figure class="shot wide">
+    <a href="screenshots/regulator-tamper.png"><img src="screenshots/regulator-tamper.png" alt="Tamper lab: a rewritten history caught by the signed checkpoint" loading="lazy"></a>
+    <figcaption><b>Tamper lab.</b> A copy of the journal is rewritten with every hash recomputed; the signed checkpoint still exposes it.</figcaption>
+  </figure>
+</section>
+
 <!-- ======================= REGULATORS ======================= -->
 <section id="regulators">
   <div class="eyebrow">Evidence</div>
@@ -613,9 +656,11 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <div><code>Signing.kt</code><span>Tree heads, Ed25519 signer interface (plug in an HSM or KMS).</span></div>
     <div><code>Hashes.kt · EntryCodec.kt</code><span>Domain-separated SHA-256 and the canonical byte format.</span></div>
     <div><code>LedgerVerifier.kt</code><span>Offline auditor that needs only the files and a public key.</span></div>
+    <div><code>web/</code><span>Web console: read model, fixtures and betting, simulator, regulator tools, HTTP API.</span></div>
   </div>
-  <pre class="cmd">./gradlew test       # 27 tests: Merkle, integrity, concurrency, multi-device regulatory suite
+  <pre class="cmd">./gradlew test       # 32 tests: Merkle, integrity, concurrency, multi-device regulatory suite, web console
 ./gradlew run        # demo: 16 threads of betting, then an independent audit and proofs
+./gradlew web        # web console at http://localhost:8080
                      # on Windows: gradlew.bat test, gradlew.bat run</pre>
   <div class="prose" style="display:grid;gap:10px">
     <h3>Before production</h3>
@@ -1389,6 +1434,7 @@ const TEST_GROUPS = {
   "ConcurrencyTest.kt": "Races, idempotent retries, optimistic locking and a heavy stress run.",
   "IntegrityTest.kt": "Tampering, rollback, untrusted keys, torn writes and corruption.",
   "MerkleTest.kt": "Exhaustive proof checks for every tree size up to 70.",
+  "WebAppTest.kt": "The web console's API end to end, the simulator lifecycle, and bets racing their fixture's settlement.",
 };
 const testSlug = name => "t-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 function codeLines(src, firstLine) {

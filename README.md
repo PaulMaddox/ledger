@@ -23,7 +23,7 @@ rewrite) over the real source code.
 ## Quick start
 
 You need [Git](https://git-scm.com) to get the code. Everything else is installed by one
-command. Then one more runs the demo.
+command. Then one more runs the demo, or the web console.
 
 **Ubuntu** (22.04 or newer):
 
@@ -31,6 +31,7 @@ command. Then one more runs the demo.
 git clone https://github.com/PaulMaddox/ledger.git && cd ledger
 ./scripts/setup.sh     # installs JDK 21 if needed, then does a first build
 ./gradlew run          # runs the demo
+./gradlew web          # or: the web console, at http://localhost:8080
 ```
 
 **Windows** (10 or 11), in PowerShell:
@@ -39,6 +40,7 @@ git clone https://github.com/PaulMaddox/ledger.git && cd ledger
 git clone https://github.com/PaulMaddox/ledger.git; cd ledger
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1   # installs JDK 21 with winget if needed, then does a first build
 .\gradlew.bat run                                             # runs the demo
+.\gradlew.bat web                                             # or: the web console, at http://localhost:8080
 ```
 
 `-ExecutionPolicy Bypass` applies to that one run only: Windows blocks unsigned scripts
@@ -49,11 +51,47 @@ libraries are downloaded by the Gradle wrapper (`gradlew`) into your user folder
 first build, which needs internet access and takes a few minutes. Both setup scripts are
 safe to run again, and CI runs these exact commands on fresh Ubuntu and Windows machines.
 
+## Web console
+
+`./gradlew web` (Windows: `.\gradlew.bat web`) starts the ledger with a browser dashboard at
+<http://localhost:8080>. It has a view for each persona, all working against the same live
+ledger, so anything done in one view shows up in the others.
+
+![Simulator: 500 automated customers, each tile streaming its latest actions](docs/screenshots/simulator.png)
+
+- **Simulator.** Choose how many automated customers to run (500 by default) and how active
+  they are, then start, pause, resume or stop them. Each customer gets a tile streaming its
+  latest bets, deposits, withdrawals and cash-outs, green when accepted and red when the
+  ledger refuses; select a tile to open that customer.
+- **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
+  automated. "Bet everything from 5 devices" fires five simultaneous bets for the whole
+  balance to show that exactly one gets through. Any entry can be **verified in the browser**:
+  it hashes the entry itself, walks the Merkle proof, and checks the Ed25519 signature with
+  WebCrypto, rather than trusting the server.
+- **Operator.** Revenue, exposure, throughput and open-bet charts, per-fixture liability,
+  settlement buttons, and a live transaction feed.
+- **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
+  consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
+  corrupts a *copy* of the journal three different ways and shows the verifier catching each.
+
+| Operator | Customer |
+|---|---|
+| ![Operator view](docs/screenshots/operator.png) | ![Customer view](docs/screenshots/customer.png) |
+| **Regulator** | **Verified in the browser** |
+| ![Regulator view](docs/screenshots/regulator.png) | ![An entry verified in the browser](docs/screenshots/customer-verify.png) |
+
+Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
+ledger lives in a fresh temporary folder each run; with it, the ledger survives restarts.
+The console is a **demonstration with no authentication**: the tabs are a view switch, not
+access control, so it listens on localhost only. It uses the JDK's built-in HTTP server and
+no front-end libraries, so the project still has no runtime dependencies beyond the JDK.
+
 ## Running
 
 | | Ubuntu | Windows |
 |---|---|---|
 | Run the demo | `./gradlew run` | `.\gradlew.bat run` |
+| Run the web console | `./gradlew web` | `.\gradlew.bat web` |
 | Run all tests | `./gradlew test` | `.\gradlew.bat test` |
 | Run one test class | `./gradlew test --tests "com.pam.ledger.MultiDeviceWalletTest"` | `.\gradlew.bat test --tests "com.pam.ledger.MultiDeviceWalletTest"` |
 
@@ -133,9 +171,12 @@ src/main/kotlin/com/pam/ledger/
   Signing.kt           signed tree heads, pluggable signer (HSM/KMS)
   Hashes.kt, EntryCodec.kt, Validation.kt, Model.kt, Errors.kt, AppendOnlyList.kt
   LedgerVerifier.kt    offline auditor
+  web/                 web console server: read model, book, simulator, regulator tools, HTTP API
+src/main/resources/web/  web console front end (index.html, app.js, app.css; no libraries)
 src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1–R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt
+  WebAppTest.kt              web console API, simulator, and bets racing settlement
 docs/
   readme.src.html      template for the interactive guide
   index.html           built guide, served by GitHub Pages (python3 scripts/build-readme.py)
@@ -143,6 +184,8 @@ scripts/
   setup.sh, setup.ps1  one-command developer setup for Ubuntu and Windows
   build-readme.py       builds docs/index.html from the template and real sources
   check-guide.mjs      headless check: debugger anchors, cloud data, test links
+  capture-screenshots.py  regenerates docs/screenshots/ from the running web console
+docs/screenshots/      web console screenshots used here and in the guide
 ```
 
 ## Before production
