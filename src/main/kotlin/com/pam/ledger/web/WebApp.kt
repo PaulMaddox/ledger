@@ -22,14 +22,17 @@ import com.pam.ledger.SportsbookWallet
 import com.pam.ledger.SportsbookWallet.Accounts
 import com.pam.ledger.TamperDetectedException
 import com.pam.ledger.VersionConflictException
+import com.pam.ledger.Validation
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.math.BigInteger
+import java.io.ByteArrayOutputStream
+import java.nio.ByteBuffer
+import java.nio.charset.CharacterCodingException
 import java.nio.channels.Channels
 import java.nio.channels.FileChannel
 import java.net.InetSocketAddress
 import java.net.URI
-import java.net.URLDecoder
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.AtomicMoveNotSupportedException
@@ -196,6 +199,9 @@ class LedgerWebApp private constructor(
         const val LEDGER_ID = "sportsbook-web"
         val CUSTOMERS = listOf("alice", "bob", "carol", "dave", "erin", "farid", "grace", "hiro", "ines", "jamal", "kofi", "lena")
         private val signingKeyBootstrapLock = Any()
+        private const val MAX_BODY_BYTES = 16_384
+        private const val MAX_URI_LENGTH = 8_192
+        private const val MAX_PARAMETERS = 32
 
         fun start(opts: WebOptions): LedgerWebApp {
             val allowedHosts = opts.allowedRequestHosts()
@@ -287,6 +293,9 @@ class LedgerWebApp private constructor(
         fun str(name: String) = params[name]?.takeIf { it.isNotBlank() } ?: throw IllegalArgumentException("missing '$name'")
         fun long(name: String) = str(name).toLongOrNull() ?: throw IllegalArgumentException("'$name' must be a whole number")
         fun int(name: String) = str(name).toIntOrNull() ?: throw IllegalArgumentException("'$name' must be a whole number")
+        fun depositRef() = str("ref").also {
+            require(!it.startsWith("sim-seed-")) { "payment reference uses the reserved simulator seed namespace" }
+        }
     }
 
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
@@ -297,12 +306,13 @@ class LedgerWebApp private constructor(
             ex.responseHeaders.set("X-Frame-Options", "DENY")
             val uri = ex.requestURI
             validateRequestOrigin(ex)
+            if (uri.toString().length > MAX_URI_LENGTH) throw HttpError(414, "uri_too_long", "request URI is too long")
             if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
-            if (ex.requestMethod == "POST") parseForm(ex.requestBody.readAllBytes().toString(Charsets.UTF_8), params)
+            if (ex.requestMethod == "POST") parseForm(readFormBody(ex), params)
             val segments = uri.rawPath.removePrefix("/api/").trimEnd('/').split('/').map {
-                URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8)
+                decodeComponent(it, form = false)
             }
             respond(ex, 200, route(Request(ex.requestMethod, segments, params)))
         } catch (e: Throwable) {
@@ -358,11 +368,64 @@ class LedgerWebApp private constructor(
 
     private fun parseForm(raw: String?, into: MutableMap<String, String>) {
         if (raw.isNullOrEmpty()) return
-        for (pair in raw.split('&')) {
+        for (pair in raw.split('&', limit = MAX_PARAMETERS + 1)) {
             val i = pair.indexOf('=')
-            if (i <= 0) continue
-            into[URLDecoder.decode(pair.substring(0, i), Charsets.UTF_8)] = URLDecoder.decode(pair.substring(i + 1), Charsets.UTF_8)
+            require(i > 0) { "form fields must have a name and '=' separator" }
+            val name = decodeComponent(pair.substring(0, i))
+            require(!into.containsKey(name)) { "duplicate form field '$name'" }
+            require(into.size < MAX_PARAMETERS) { "at most $MAX_PARAMETERS form fields" }
+            into[name] = decodeComponent(pair.substring(i + 1))
         }
+    }
+
+    private fun readFormBody(ex: HttpExchange): String {
+        val length = ex.requestHeaders.getFirst("Content-Length")?.let {
+            it.toLongOrNull()?.takeIf { n -> n >= 0 } ?: throw IllegalArgumentException("invalid Content-Length")
+        }
+        if (length != null && length > MAX_BODY_BYTES) throw HttpError(413, "body_too_large", "request body is too large")
+        val contentType = ex.requestHeaders.getFirst("Content-Type")
+        if (contentType != null) {
+            val parts = contentType.lowercase().split(';').map { it.trim() }
+            if (parts[0] != "application/x-www-form-urlencoded" ||
+                parts.drop(1).any { it != "charset=utf-8" && it != "charset=\"utf-8\"" }) {
+                throw HttpError(415, "unsupported_media_type", "expected a UTF-8 URL-encoded form")
+            }
+        }
+        // Content-Length alone cannot bound chunked requests or dishonest clients.
+        val bytes = ex.requestBody.readNBytes(MAX_BODY_BYTES + 1)
+        if (bytes.size > MAX_BODY_BYTES) throw HttpError(413, "body_too_large", "request body is too large")
+        if (bytes.isNotEmpty() && contentType == null) {
+            throw HttpError(415, "unsupported_media_type", "expected a UTF-8 URL-encoded form")
+        }
+        return decodeUtf8(bytes)
+    }
+
+    private fun decodeUtf8(bytes: ByteArray): String = try {
+        Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString()
+    } catch (e: CharacterCodingException) {
+        throw IllegalArgumentException("request is not valid UTF-8", e)
+    }
+
+    private fun decodeComponent(raw: String, form: Boolean = true): String {
+        require(Validation.isWellFormedUnicode(raw)) { "request is not well-formed unicode" }
+        val input = raw.toByteArray(Charsets.UTF_8)
+        val output = ByteArrayOutputStream(input.size)
+        var i = 0
+        while (i < input.size) {
+            val c = input[i].toInt() and 0xff
+            if (c == '%'.code) {
+                require(i + 2 < input.size) { "incomplete percent escape" }
+                val high = Character.digit(input[i + 1].toInt().toChar(), 16)
+                val low = Character.digit(input[i + 2].toInt().toChar(), 16)
+                require(high >= 0 && low >= 0) { "invalid percent escape" }
+                output.write(high * 16 + low)
+                i += 3
+            } else {
+                output.write(if (form && c == '+'.code) ' '.code else c)
+                i++
+            }
+        }
+        return decodeUtf8(output.toByteArray())
     }
 
     private fun respond(ex: HttpExchange, status: Int, body: Any?) {
@@ -401,7 +464,7 @@ class LedgerWebApp private constructor(
             // ---- Customer ----
             get("players") -> searchPlayers(r.params["q"] ?: "")
             get("players", "*") -> playerDetail(p[1])
-            post("players", "*", "deposit") -> receipt(wallet.deposit(p[1], r.long("amount"), "EUR", r.str("ref")))
+            post("players", "*", "deposit") -> receipt(wallet.deposit(p[1], r.long("amount"), "EUR", r.depositRef()))
             post("players", "*", "withdraw") -> receipt(wallet.withdraw(p[1], r.long("amount"), "EUR", r.str("ref")))
             post("players", "*", "bets") -> receipt(book.placeBet(p[1], r.str("fixture"), r.str("selection"), r.long("stake"), r.str("betId")))
             get("bets", "*", "cashout") -> mapOf("betId" to p[1], "offer" to minorUnits(book.cashOutOffer(p[1])))
@@ -418,23 +481,32 @@ class LedgerWebApp private constructor(
             // ---- Simulator ----
             get("simulator") -> simulatorView()
             get("simulator", "events") -> {
-                val after = r.params["after"]?.toLongOrNull() ?: 0L
+                val after = if (r.params.containsKey("after")) r.long("after") else 0L
+                require(after >= 0) { "'after' must be non-negative" }
                 val page = simulator.eventPage(after)
                 mapOf("lastId" to page.lastId, "events" to page.events.map {
                     mapOf("id" to it.id, "t" to it.time, "customer" to it.customer, "op" to it.op, "text" to it.text, "ok" to it.ok, "cash" to minorUnits(it.cash))
                 })
             }
             post("simulator") -> {
-                if (r.params.containsKey("customers")) {
-                    simulator.configure(r.int("customers"), r.int("opsPerMinute"), r.params["autoFixtures"] != "false")
+                val action = r.params["action"]
+                require(action in setOf(null, "", "start", "pause", "resume", "stop")) {
+                    "action must be start, pause, resume or stop"
                 }
-                when (r.params["action"]) {
+                if (listOf("customers", "opsPerMinute", "autoFixtures").any { r.params.containsKey(it) }) {
+                    val autoFixtures = when (r.params["autoFixtures"]) {
+                        null, "true" -> true
+                        "false" -> false
+                        else -> throw IllegalArgumentException("'autoFixtures' must be true or false")
+                    }
+                    simulator.configure(r.int("customers"), r.int("opsPerMinute"), autoFixtures)
+                }
+                when (action) {
                     "start" -> simulator.start()
                     "pause" -> simulator.pause()
                     "resume" -> simulator.resume()
                     "stop" -> simulator.stop()
                     null, "" -> Unit
-                    else -> throw IllegalArgumentException("action must be start, pause, resume or stop")
                 }
                 simulatorView()
             }

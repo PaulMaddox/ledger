@@ -122,6 +122,22 @@ localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so
 still has no runtime dependencies beyond the JDK.
 Failed startup closes all acquired services and releases the writer lock, allowing a retry on the same data directory.
 
+The server validates requests independently of the browser:
+- API POST bodies are limited to 16 KiB (including chunked requests), request URIs to
+  8,192 characters, and combined query/body forms to 32 fields.
+- Nonempty POST bodies must be UTF-8 `application/x-www-form-urlencoded` forms.
+  Malformed UTF-8/percent escapes, malformed fields and duplicate decoded parameter
+  names (including query/body collisions) are rejected.
+- New deposits and placements require nonempty player IDs that fit the escrow account name (at most 235
+  characters for a three-letter currency); new bet IDs must be nonblank and at most
+  245 characters, leaving room for both placement and settlement keys. These admission
+  checks do not change canonical byte formats or historical replay rules; older, longer
+  cash accounts can still withdraw.
+- Amounts must be positive whole minor units within the supported `Long` range; the
+  book supplies fixture odds and cash-out amounts, rather than accepting client prices.
+  Simulator settings, actions, booleans and event cursors are validated before mutation.
+  Web deposits cannot claim the internal `sim-seed-` reference namespace.
+
 To listen on the LAN, explicitly allow the hostname or IP address users will access:
 `./gradlew web --args="--host 0.0.0.0 --allowed-host ledger.example --allowed-host 192.0.2.10"`.
 `--host` selects the bind address; repeat `--allowed-host` for additional exact hostnames or

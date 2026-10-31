@@ -82,17 +82,25 @@ class WebAppTest {
         app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null,
         path: String = if (method == "POST") "/api/players/alice/deposit" else "/api/overview",
         fetchSite: String? = null,
+        body: ByteArray? = null,
+        contentType: String? = "application/x-www-form-urlencoded",
+        chunked: Boolean = false,
     ): String {
-        val body = if (method == "POST") "amount=1&ref=allowed-host-test" else ""
+        val bytes = body ?: (if (method == "POST") "amount=1&ref=allowed-host-test" else "").toByteArray(Charsets.UTF_8)
         return Socket("127.0.0.1", app.port).use { socket ->
             socket.soTimeout = 5_000
             val request = buildString {
                 append("$method $path HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n")
                 if (origin != null) append("Origin: $origin\r\n")
                 if (fetchSite != null) append("Sec-Fetch-Site: $fetchSite\r\n")
-                append("Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ${body.length}\r\n\r\n$body")
+                if (contentType != null) append("Content-Type: $contentType\r\n")
+                if (chunked) append("Transfer-Encoding: chunked\r\n\r\n")
+                else append("Content-Length: ${bytes.size}\r\n\r\n")
             }
             socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+            if (chunked) socket.getOutputStream().write("${bytes.size.toString(16)}\r\n".toByteArray())
+            socket.getOutputStream().write(bytes)
+            if (chunked) socket.getOutputStream().write("\r\n0\r\n\r\n".toByteArray())
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
     }
@@ -217,6 +225,155 @@ class WebAppTest {
             assertEquals("frame-ancestors 'none'", response.headers().firstValue("Content-Security-Policy").orElse(""))
             assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElse(""))
         }
+    }
+
+    @Test
+    fun `oversized bodies including chunked requests and oversized URIs are rejected`() = withApp { app ->
+        val host = "127.0.0.1:${app.port}"
+        for (chunked in listOf(false, true)) {
+            val response = rawRequest(app, host, "POST", "http://$host",
+                body = ("amount=1&ref=" + "x".repeat(16_384)).toByteArray(), chunked = chunked)
+            assertTrue(response.startsWith("HTTP/1.1 413"), response)
+        }
+        val response = rawRequest(app, host, path = "/api/players?q=" + "x".repeat(8_192))
+        assertTrue(response.startsWith("HTTP/1.1 414"), response)
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10000\""))
+        assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "after-large-request")).first)
+    }
+
+    @Test
+    fun `malformed ambiguous and unsupported forms cannot mutate the ledger`() = withApp { app ->
+        val host = "127.0.0.1:${app.port}"
+        val origin = "http://$host"
+        for (form in listOf(
+            "amount=1&ref=first&ref=second",
+            "amount=1&%61mount=2&ref=encoded-duplicate",
+            "amount=1&ref=bad%FF",
+            "amount=1&ref=bad%C0%AF",
+            "amount=1&ref=bad%E2%82",
+            "amount=1&ref=bad%XY",
+            "amount=1&ref=bad%",
+            "amount=1&ref=good&ignored",
+            "amount=1&ref=good&=empty-name",
+            "amount=1&ref=good&" + (1..31).joinToString("&") { "p$it=value" },
+        )) {
+            val response = rawRequest(app, host, "POST", origin, body = form.toByteArray())
+            assertTrue(response.startsWith("HTTP/1.1 400"), response)
+        }
+        val duplicate = rawRequest(app, host, "POST", origin,
+            path = "/api/players/alice/deposit?ref=query", body = "amount=1&ref=body".toByteArray())
+        assertTrue(duplicate.startsWith("HTTP/1.1 400"), duplicate)
+        val invalidBytes = rawRequest(app, host, "POST", origin,
+            body = "amount=1&ref=".toByteArray() + byteArrayOf(0xff.toByte()))
+        assertTrue(invalidBytes.startsWith("HTTP/1.1 400"), invalidBytes)
+        val invalidPath = rawRequest(app, host, "POST", origin, path = "/api/players/%FF/deposit")
+        assertTrue(invalidPath.startsWith("HTTP/1.1 400"), invalidPath)
+        for (type in listOf(null, "text/plain", "application/json", "application/x-www-form-urlencoded; charset=iso-8859-1")) {
+            val response = rawRequest(app, host, "POST", origin, contentType = type)
+            assertTrue(response.startsWith("HTTP/1.1 415"), response)
+        }
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10000\""))
+        val valid = rawRequest(app, host, "POST", origin, contentType = "application/x-www-form-urlencoded; charset=UTF-8",
+            body = "amount=1&ref=valid-%E2%82%AC%2B%2F".toByteArray())
+        assertTrue(valid.startsWith("HTTP/1.1 200"), valid)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
+    @Test
+    fun `invalid simulator requests leave all settings and state unchanged`() = withApp { app ->
+        val before = call(app, "GET", "simulator").second
+        for (params in listOf(
+            mapOf("customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "false", "action" to "invalid"),
+            mapOf("customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "False", "action" to "start"),
+            mapOf("customers" to "1", "opsPerMinute" to "601", "action" to "start"),
+            mapOf("customers" to "20001", "opsPerMinute" to "1", "action" to "start"),
+            mapOf("opsPerMinute" to "10"),
+            mapOf("autoFixtures" to "false"),
+        )) {
+            assertEquals(400, call(app, "POST", "simulator", params).first)
+            assertEquals(before, call(app, "GET", "simulator").second)
+        }
+        for (after in listOf("-1", "1.5", "9223372036854775808", "invalid")) {
+            assertEquals(400, call(app, "GET", "simulator/events", mapOf("after" to after)).first)
+        }
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "false",
+        )).first)
+    }
+
+    @Test
+    fun `wallet identifiers must fit their complete lifecycle before any write`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            val player = "p".repeat(235)
+            wallet.deposit(player, 1000, "EUR", "identifier-funds")
+            val before = ledger.head().size
+            for (id in listOf("", "p".repeat(236))) {
+                assertFailsWith<IllegalArgumentException> { wallet.deposit(id, 1, "EUR", "bad-player") }
+                assertFailsWith<IllegalArgumentException> { wallet.placeBetAsync(id, "bad-player", 1, "EUR") }
+            }
+            for (id in listOf("", "p".repeat(241))) {
+                assertFailsWith<IllegalArgumentException> { wallet.withdraw(id, 1, "EUR", "bad-player") }
+            }
+            for (id in listOf("", " ", "b".repeat(246))) {
+                assertFailsWith<IllegalArgumentException> { wallet.placeBetAsync(player, id, 100, "EUR") }
+                assertFailsWith<IllegalArgumentException> { wallet.placeBet(player, id, 100, "EUR") }
+            }
+            assertFailsWith<IllegalArgumentException> { wallet.deposit(player, 1, "EUR", "") }
+            assertFailsWith<IllegalArgumentException> { wallet.withdraw(player, 1, "EUR", "") }
+            assertEquals(before, ledger.head().size)
+            assertEquals(1000, wallet.cashBalance(player, "EUR"))
+            val betId = "b".repeat(245)
+            wallet.placeBet(player, betId, 100, "EUR")
+            wallet.voidBet(betId)
+            assertTrue(wallet.voidBet(betId).replayed)
+            assertEquals(1000, wallet.cashBalance(player, "EUR"))
+            assertEquals(0, wallet.openBetsBalance(player, "EUR"))
+        }
+    }
+
+    @Test
+    fun `legacy long player cash accounts still replay and permit withdrawals`() {
+        val directory = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val player = "p".repeat(240)
+        Ledger.open(config(directory, signer)).use { ledger ->
+            ledger.append(TransactionRequest(
+                idempotencyKey = "deposit:legacy-long-player", kind = "DEPOSIT",
+                postings = listOf(
+                    Posting(SportsbookWallet.Accounts.pspClearing("EUR"), "EUR", -100),
+                    Posting(SportsbookWallet.Accounts.cash(player, "EUR"), "EUR", 100),
+                ),
+                metadata = mapOf("playerId" to player, "paymentRef" to "legacy-long-player"),
+            ))
+        }
+        Ledger.open(config(directory, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            assertEquals(100, wallet.cashBalance(player, "EUR"))
+            wallet.withdraw(player, 100, "EUR", "legacy-long-withdrawal")
+            assertTrue(wallet.withdraw(player, 100, "EUR", "legacy-long-withdrawal").replayed)
+            assertEquals(0, wallet.cashBalance(player, "EUR"))
+        }
+        assertTrue(LedgerVerifier.verify(directory, TestSupport.LEDGER_ID, listOf(signer.publicKey)).ok)
+    }
+
+    @Test
+    fun `HTTP admission rejects empty players unresolvable bets and reserved seed references`() = withApp { app ->
+        assertEquals(400, call(app, "POST", "players//deposit", mapOf("amount" to 1, "ref" to "empty-player")).first)
+        assertEquals(400, call(app, "POST", "players/" + "p".repeat(236) + "/deposit", mapOf("amount" to 1, "ref" to "long-player")).first)
+        assertEquals(400, call(app, "POST", "players/alice/deposit", mapOf(
+            "amount" to 1, "ref" to "sim-seed-sim-00001",
+        )).first)
+        assertEquals(400, call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "b".repeat(246),
+        )).first)
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10000\""))
+        val betId = "b".repeat(245)
+        assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to betId,
+        )).first)
+        assertEquals(200, call(app, "POST", "fixtures/F1/settle", mapOf("result" to "AWAY")).first)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
     }
 
     @Test
