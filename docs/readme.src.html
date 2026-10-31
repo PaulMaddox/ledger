@@ -28,7 +28,7 @@
 *{box-sizing:border-box}
 body{background:var(--paper);color:var(--ink);font:16px/1.6 var(--f-body);
   padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px));padding-block:0 64px}
-.wrap{max-width:1180px;margin:0 auto}
+.wrap{max-width:1360px;margin:0 auto}
 .prose{max-width:68ch}
 h1,h2,h3{font-family:var(--f-display);line-height:1.15;text-wrap:balance;margin:0}
 h1{font-size:clamp(2rem,5vw,3.1rem);font-weight:700;letter-spacing:-.01em}
@@ -43,13 +43,35 @@ section{padding-block:56px 8px;border-top:1px solid var(--rule);display:grid;gap
 section:first-of-type{border-top:0}
 
 /* ---------- hero ---------- */
-header.hero{padding-block:48px 40px;display:grid;gap:22px}
+header.hero{padding-block:56px 48px;display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:24px 56px;align-items:center}
+.hero-text{display:grid;gap:20px;align-content:center}
 .hero .lede{font-size:1.14rem;color:var(--ink);max-width:62ch}
-.ledgerline{font-family:var(--f-mono);font-size:.82rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px}
-.ledgerline b{color:var(--ink);font-weight:600}
-.toc{display:flex;flex-wrap:wrap;gap:8px}
-.toc a{font-size:.88rem;text-decoration:none;border:1px solid var(--rule);padding:5px 11px;border-radius:999px;color:var(--ink);background:var(--panel)}
-.toc a:hover{border-color:var(--accent)}
+
+/* ---------- journal record card (hero) ---------- */
+.entrycard{margin:0;background:var(--panel);border:1px solid var(--rule);border-top:3px solid var(--accent);font-family:var(--f-mono);font-size:.8rem;display:grid}
+.entrycard figcaption{display:flex;justify-content:space-between;padding:10px 16px;border-bottom:1px solid var(--rule);color:var(--muted);font-size:.74rem;letter-spacing:.02em}
+.entrycard figcaption span:last-child{color:var(--ink);font-weight:600}
+.entrycard dl{margin:0;padding:10px 16px;display:grid;gap:3px}
+.entrycard dl div{display:grid;grid-template-columns:5.5em minmax(0,1fr);gap:10px}
+.entrycard dt{color:var(--muted)} .entrycard dd{margin:0;overflow-wrap:anywhere}
+.ec-meta{border-bottom:1px dashed var(--rule)}
+.ec-post{border-collapse:collapse;margin:6px 16px;width:calc(100% - 32px);font-variant-numeric:tabular-nums}
+.ec-post td{padding:4px 0;border-bottom:1px solid var(--rule)}
+.ec-post td:last-child{text-align:right;white-space:nowrap}
+.ec-post tr.sum td{border-bottom:0;border-top:2px solid var(--ink);font-weight:600}
+.ec-hash{border-top:1px dashed var(--rule)}
+.ec-hash dd{color:var(--accent)}
+.ec-note{padding:10px 16px;border-top:1px solid var(--rule);font:italic .78rem/1.5 var(--f-body);color:var(--muted)}
+
+/* ---------- sticky contents bar ---------- */
+.topnav{position:sticky;top:env(safe-area-inset-top,0px);z-index:20;display:flex;gap:8px 24px;align-items:center;flex-wrap:wrap;padding-block:10px;background:var(--paper);border-bottom:1px solid var(--rule);box-shadow:0 0 0 100vmax var(--paper);clip-path:inset(0 -100vmax)}
+.topnav .brand{font:700 .95rem var(--f-display);color:var(--ink);text-decoration:none;white-space:nowrap}
+.navlinks{display:flex;flex-wrap:wrap;gap:2px}
+.navlinks a{font-size:.86rem;color:var(--muted);text-decoration:none;padding:5px 10px;border-radius:6px}
+.navlinks a:hover{color:var(--ink);background:var(--panel)}
+.navlinks a[aria-current="true"]{color:var(--accent);background:var(--hl);font-weight:600}
+body::before{content:"";position:fixed;inset:0 0 auto;height:env(safe-area-inset-top,0px);z-index:21;background:var(--paper)}
+section{scroll-margin-top:72px}
 
 /* ---------- requirements ---------- */
 .reqgroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr));gap:28px 32px}
@@ -120,12 +142,12 @@ header.hero{padding-block:48px 40px;display:grid;gap:22px}
 .ctl button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
 .ctl button:disabled{opacity:.4;cursor:default}
 .ctl .count{font-family:var(--f-mono);font-size:.8rem;color:var(--muted);min-width:76px;text-align:right}
-.bench{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);min-height:640px}
+.bench{display:grid;grid-template-columns:minmax(0,1.35fr) minmax(0,1fr);min-height:720px}
 .codecol{border-right:1px solid var(--rule);display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;background:var(--code-bg)}
 .tabs{display:flex;overflow-x:auto;border-bottom:1px solid var(--rule)}
 .tabs button{font:500 .76rem var(--f-mono);border:0;border-right:1px solid var(--rule);background:transparent;color:var(--muted);padding:8px 12px;cursor:pointer;white-space:nowrap}
 .tabs button[aria-selected="true"]{color:var(--ink);background:var(--panel);box-shadow:inset 0 -2px 0 var(--accent)}
-.code{overflow:auto;height:640px;font:12.5px/1.6 var(--f-mono);position:relative}
+.code{overflow:auto;height:720px;font:12.5px/1.6 var(--f-mono);position:relative}
 .code .ln{display:grid;grid-template-columns:3.4em 1.4em max-content;white-space:pre;min-width:100%}
 .code .no{color:var(--com);text-align:right;padding-right:.4em;user-select:none}
 .code .mk{color:var(--hl-edge);user-select:none;text-align:center}
@@ -135,7 +157,8 @@ header.hero{padding-block:48px 40px;display:grid;gap:22px}
 .code .ln.seen .mk::before{content:"·";color:var(--com)}
 .k{color:var(--kw)} .s{color:var(--str)} .c{color:var(--com);font-style:italic} .n{color:var(--num)} .t{color:var(--typ)}
 .statecol{display:grid;align-content:start;min-width:0}
-.explain{padding:14px 16px;border-bottom:1px solid var(--rule);display:grid;gap:8px}
+.explain{padding:14px 16px;border-bottom:1px solid var(--rule);display:grid;grid-template-columns:minmax(150px,auto) minmax(0,1fr);gap:4px 24px;align-items:baseline;background:var(--hl)}
+.explain p{max-width:90ch}
 .explain h3{font-size:1.05rem}
 .explain .where{font-family:var(--f-mono);font-size:.74rem;color:var(--accent)}
 .explain p{font-size:.93rem}
@@ -275,6 +298,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 .roadmap ul{margin:0;padding-left:18px;display:grid;gap:6px;font-size:.9rem}
 
 @media (max-width:900px){
+  header.hero{grid-template-columns:1fr}
+  .explain{grid-template-columns:1fr}
   .cloud{grid-template-columns:1fr}
   .cdetail{position:static}
   .tier{grid-template-columns:1fr;gap:6px}
@@ -289,15 +314,40 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 </style>
 
 <div class="wrap">
-<header class="hero">
-  <div class="eyebrow">Kotlin · JDK 21 · zero runtime dependencies</div>
-  <h1>Sportsbook Ledger Internals</h1>
-  <p class="lede">An append-only, double-entry money ledger for a sportsbook player account platform. Every bet, deposit and payout is hash-chained, placed in a Merkle tree and periodically signed, so anyone holding the public key can prove nothing was altered, removed or invented. One writer thread orders every transaction, which makes double spends structurally impossible rather than merely unlikely.</p>
-  <div class="ledgerline"><span>seq <b>#1423</b></span><span>BET_PLACED</span><span>player:42:cash:EUR <b>−1000</b></span><span>player:42:open-bets:EUR <b>+1000</b></span><span>Σ <b>0</b></span><span>chain <b>740174cf…</b></span></div>
-  <nav class="toc" aria-label="Contents">
-    <a href="#requirements">Requirements</a><a href="#architecture">Architecture</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Step-through debugger</a><a href="#cloud">Cloud architecture</a><a href="#regulators">Regulatory tests</a><a href="#files">Files & running</a>
-  </nav>
+<header class="hero" id="top">
+  <div class="hero-text">
+    <div class="eyebrow">Kotlin · JDK 21 · zero runtime dependencies</div>
+    <h1>Sportsbook Ledger Internals</h1>
+    <p class="lede">An append-only, double-entry money ledger for a sportsbook player account platform. Every bet, deposit and payout is hash-chained, placed in a Merkle tree and periodically signed, so anyone holding the public key can prove nothing was altered, removed or invented. One writer thread orders every transaction, which makes double spends structurally impossible rather than merely unlikely.</p>
+  </div>
+  <figure class="entrycard" aria-label="An example ledger entry">
+    <figcaption><span>entries.journal</span><span>record 1423</span></figcaption>
+    <dl class="ec-meta">
+      <div><dt>kind</dt><dd>BET_PLACED</dd></div>
+      <div><dt>key</dt><dd>bet:8812:place</dd></div>
+      <div><dt>time</dt><dd>2026-10-31 19:45:02.118 UTC</dd></div>
+    </dl>
+    <table class="ec-post">
+      <tr><td>player:42:cash:EUR</td><td>−10.00</td></tr>
+      <tr><td>player:42:open-bets:EUR</td><td>+10.00</td></tr>
+      <tr class="sum"><td>Σ EUR</td><td>0.00</td></tr>
+    </table>
+    <dl class="ec-hash">
+      <div><dt>prev</dt><dd>9f3a51c0…</dd></div>
+      <div><dt>leaf</dt><dd>41c7e2b9…</dd></div>
+      <div><dt>chain</dt><dd>740174cf…</dd></div>
+      <div><dt>signed</dt><dd>checkpoint at 1500 · Ed25519</dd></div>
+    </dl>
+    <p class="ec-note">Illustrative record: every entry is balanced, linked to the one before it, and covered by a signed checkpoint.</p>
+  </figure>
 </header>
+
+<nav class="topnav" aria-label="Contents">
+  <a class="brand" href="#top">Ledger Internals</a>
+  <div class="navlinks">
+    <a href="#requirements">Requirements</a><a href="#architecture">How it works</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Debugger</a><a href="#regulators">Tests</a><a href="#cloud">Cloud</a><a href="#files">Files</a>
+  </div>
+</nav>
 
 <!-- ======================= REQUIREMENTS ======================= -->
 <section id="requirements">
@@ -334,8 +384,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 
 <!-- ======================= ARCHITECTURE ======================= -->
 <section id="architecture">
-  <div class="eyebrow">How the parts fit</div>
-  <h2>Architecture</h2>
+  <div class="eyebrow">Inside one ledger</div>
+  <h2>How it works</h2>
   <p class="prose">Select a component to see what it does, where it lives and what it guarantees. Solid arrows are the write path; dashed arrows are reads and audits.</p>
   <div class="arch">
     <div class="diagram">
@@ -434,13 +484,13 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
         <span class="count" id="count"></span>
       </div>
     </div>
+    <div class="explain" aria-live="polite"><div class="where" id="where"></div><div><h3 id="stepTitle"></h3><p id="stepNote"></p></div></div>
     <div class="bench">
       <div class="codecol">
         <div class="tabs" id="tabs" role="tablist" aria-label="Source files"></div>
         <div class="code" id="code" tabindex="0" aria-label="Source code"></div>
       </div>
       <div class="statecol">
-        <div class="explain" aria-live="polite"><div class="where" id="where"></div><h3 id="stepTitle"></h3><p id="stepNote"></p></div>
         <div id="banner"></div>
         <div class="pane"><h4>Threads</h4><div class="body"><div class="threads" id="threads"></div></div></div>
         <div class="pane"><h4>Call stack · variables</h4><div class="body"><ul class="stack" id="stack"></ul><dl class="vars" id="vars"></dl></div></div>
@@ -456,9 +506,32 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   </div>
 </section>
 
+<!-- ======================= REGULATORS ======================= -->
+<section id="regulators">
+  <div class="eyebrow">Evidence</div>
+  <h2>What the tests prove</h2>
+  <p class="prose"><code>MultiDeviceWalletTest</code> puts one player on six devices at once while a settlement feed redelivers results, three screens poll the balance and a regulator signs checkpoints. Every property is then checked against the ledger's own replayed history rather than the wallet's final numbers. In a typical run, about 13 million balance reads saw zero balances the ledger never held.</p>
+  <div class="tblwrap"><table class="reg">
+    <thead><tr><th>Property</th><th>Guarantee</th><th>How it is enforced</th><th>Tests</th></tr></thead>
+    <tbody>
+      <tr><td>R1</td><td>No double spend</td><td>One writer applies transactions in order; later requests in a batch see earlier ones through the overlay.</td><td><button type="button" class="tlink" data-test="R1 - withdrawal and bet racing for the same funds cannot both succeed">R1 - withdrawal and bet racing for the same funds cannot both succeed</button>, <button type="button" class="tlink" data-test="R1 - simultaneous full-balance withdrawals from many devices pay out once">R1 - simultaneous full-balance withdrawals from many devices pay out once</button>, <button type="button" class="tlink" data-test="R1 - cash-out racing settlement resolves the bet exactly once">R1 - cash-out racing settlement resolves the bet exactly once</button>, <button type="button" class="tlink" data-test="R1 - withdrawing winnings only succeeds against committed settlement">R1 - withdrawing winnings only succeeds against committed settlement</button>, <button type="button" class="tlink" data-test="no double spend when many bets race for the same funds">no double spend when many bets race for the same funds</button></td></tr>
+      <tr><td>R2</td><td>Never negative, at any instant</td><td><code>AccountPolicy</code> checked on every posting; replay re-checks every historic balance.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="stress - invariants hold under heavy concurrent load and survive restart">stress - invariants hold under heavy concurrent load and survive restart</button></td></tr>
+      <tr><td>R3</td><td>No phantom balances</td><td>Read structures are updated only after fsync; rejections wait for their batch to commit.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button></td></tr>
+      <tr><td>R4</td><td>Exactly-once</td><td>Idempotency keys with content fingerprints; one settlement key per bet for every outcome.</td><td><button type="button" class="tlink" data-test="R4 - double-tapped and retried bet placement debits once">R4 - double-tapped and retried bet placement debits once</button>, <button type="button" class="tlink" data-test="R4 - reusing a bet id with a different stake is refused">R4 - reusing a bet id with a different stake is refused</button>, <button type="button" class="tlink" data-test="R4 - settling an unknown bet moves no money">R4 - settling an unknown bet moves no money</button>, <button type="button" class="tlink" data-test="a bet settles exactly once even under conflicting concurrent settlements">a bet settles exactly once even under conflicting concurrent settlements</button>, <button type="button" class="tlink" data-test="concurrent duplicate deposits are recorded once">concurrent duplicate deposits are recorded once</button></td></tr>
+      <tr><td>R5</td><td>Full reconciliation</td><td>Independent model built from client receipts must equal the ledger to the cent.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="stress - invariants hold under heavy concurrent load and survive restart">stress - invariants hold under heavy concurrent load and survive restart</button></td></tr>
+      <tr><td>R6</td><td>Provability</td><td>Inclusion proof for every receipt; consistency proofs between checkpoints signed mid-storm.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="inclusion proofs verify for every leaf of every tree, and forgeries fail">inclusion proofs verify for every leaf of every tree, and forgeries fail</button>, <button type="button" class="tlink" data-test="consistency proofs verify for every pair of sizes, and rewritten history fails">consistency proofs verify for every pair of sizes, and rewritten history fails</button>, <button type="button" class="tlink" data-test="rewriting history with recomputed hashes is caught by the signed checkpoint">rewriting history with recomputed hashes is caught by the signed checkpoint</button></td></tr>
+    </tbody>
+  </table></div>
+  <div class="prose" style="display:grid;gap:8px">
+    <h3>Every test, with its source</h3>
+    <p>Select a test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
+  </div>
+  <div class="tests" id="testList"></div>
+</section>
+
 <!-- ======================= CLOUD ======================= -->
 <section id="cloud">
-  <div class="eyebrow">Deployment</div>
+  <div class="eyebrow">Running it in production</div>
   <h2>Cloud architecture</h2>
   <p class="prose">How the ledger runs in production when every bet must be exact, a zone outage must lose nothing, and a World Cup final can multiply traffic a hundredfold in seconds. Switch between AWS, Azure and a cloud-portable build, select any component for the reasoning behind it, run a failure drill, or drag the load slider to see where the pressure goes.</p>
   <div class="cloudbar">
@@ -525,29 +598,6 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
       <li>gRPC service wrapper and an HSM-backed signer</li>
     </ul></div>
   </div>
-</section>
-
-<!-- ======================= REGULATORS ======================= -->
-<section id="regulators">
-  <div class="eyebrow">Evidence</div>
-  <h2>What the tests prove</h2>
-  <p class="prose"><code>MultiDeviceWalletTest</code> puts one player on six devices at once while a settlement feed redelivers results, three screens poll the balance and a regulator signs checkpoints. Every property is then checked against the ledger's own replayed history rather than the wallet's final numbers. In a typical run, about 13 million balance reads saw zero balances the ledger never held.</p>
-  <div class="tblwrap"><table class="reg">
-    <thead><tr><th>Property</th><th>Guarantee</th><th>How it is enforced</th><th>Tests</th></tr></thead>
-    <tbody>
-      <tr><td>R1</td><td>No double spend</td><td>One writer applies transactions in order; later requests in a batch see earlier ones through the overlay.</td><td><button type="button" class="tlink" data-test="R1 - withdrawal and bet racing for the same funds cannot both succeed">R1 - withdrawal and bet racing for the same funds cannot both succeed</button>, <button type="button" class="tlink" data-test="R1 - simultaneous full-balance withdrawals from many devices pay out once">R1 - simultaneous full-balance withdrawals from many devices pay out once</button>, <button type="button" class="tlink" data-test="R1 - cash-out racing settlement resolves the bet exactly once">R1 - cash-out racing settlement resolves the bet exactly once</button>, <button type="button" class="tlink" data-test="R1 - withdrawing winnings only succeeds against committed settlement">R1 - withdrawing winnings only succeeds against committed settlement</button>, <button type="button" class="tlink" data-test="no double spend when many bets race for the same funds">no double spend when many bets race for the same funds</button></td></tr>
-      <tr><td>R2</td><td>Never negative, at any instant</td><td><code>AccountPolicy</code> checked on every posting; replay re-checks every historic balance.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="stress - invariants hold under heavy concurrent load and survive restart">stress - invariants hold under heavy concurrent load and survive restart</button></td></tr>
-      <tr><td>R3</td><td>No phantom balances</td><td>Read structures are updated only after fsync; rejections wait for their batch to commit.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button></td></tr>
-      <tr><td>R4</td><td>Exactly-once</td><td>Idempotency keys with content fingerprints; one settlement key per bet for every outcome.</td><td><button type="button" class="tlink" data-test="R4 - double-tapped and retried bet placement debits once">R4 - double-tapped and retried bet placement debits once</button>, <button type="button" class="tlink" data-test="R4 - reusing a bet id with a different stake is refused">R4 - reusing a bet id with a different stake is refused</button>, <button type="button" class="tlink" data-test="R4 - settling an unknown bet moves no money">R4 - settling an unknown bet moves no money</button>, <button type="button" class="tlink" data-test="a bet settles exactly once even under conflicting concurrent settlements">a bet settles exactly once even under conflicting concurrent settlements</button>, <button type="button" class="tlink" data-test="concurrent duplicate deposits are recorded once">concurrent duplicate deposits are recorded once</button></td></tr>
-      <tr><td>R5</td><td>Full reconciliation</td><td>Independent model built from client receipts must equal the ledger to the cent.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="stress - invariants hold under heavy concurrent load and survive restart">stress - invariants hold under heavy concurrent load and survive restart</button></td></tr>
-      <tr><td>R6</td><td>Provability</td><td>Inclusion proof for every receipt; consistency proofs between checkpoints signed mid-storm.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="inclusion proofs verify for every leaf of every tree, and forgeries fail">inclusion proofs verify for every leaf of every tree, and forgeries fail</button>, <button type="button" class="tlink" data-test="consistency proofs verify for every pair of sizes, and rewritten history fails">consistency proofs verify for every pair of sizes, and rewritten history fails</button>, <button type="button" class="tlink" data-test="rewriting history with recomputed hashes is caught by the signed checkpoint">rewriting history with recomputed hashes is caught by the signed checkpoint</button></td></tr>
-    </tbody>
-  </table></div>
-  <div class="prose" style="display:grid;gap:8px">
-    <h3>Every test, with its source</h3>
-    <p>Select a test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
-  </div>
-  <div class="tests" id="testList"></div>
 </section>
 
 <!-- ======================= FILES ======================= -->
@@ -1385,4 +1435,26 @@ function openTest(name) {
 }
 renderTests();
 document.querySelectorAll(".tlink").forEach(b => b.addEventListener("click", () => openTest(b.dataset.test)));
+</script>
+<script>
+"use strict";
+/* ============================== CONTENTS BAR ==============================
+   Highlights the section currently being read. The "current" section is the last
+   one whose top has scrolled past a line just below the sticky bar. */
+(() => {
+  const links = [...document.querySelectorAll(".navlinks a")];
+  const sections = links.map(a => document.querySelector(a.getAttribute("href"))).filter(Boolean);
+  let ticking = false;
+  function update() {
+    ticking = false;
+    const line = 96;
+    let current = null;
+    for (const sec of sections) if (sec.getBoundingClientRect().top <= line) current = sec;
+    // At the very bottom, the last section is current even if it is short.
+    if (window.innerHeight + window.scrollY >= document.documentElement.scrollHeight - 4) current = sections[sections.length - 1];
+    links.forEach(a => a.setAttribute("aria-current", String(current !== null && a.getAttribute("href") === "#" + current.id)));
+  }
+  window.addEventListener("scroll", () => { if (!ticking) { ticking = true; requestAnimationFrame(update); } }, { passive: true });
+  update();
+})();
 </script>
