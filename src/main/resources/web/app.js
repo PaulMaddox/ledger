@@ -347,13 +347,16 @@ $("slip").addEventListener("submit", async e => {
 
 // Five devices at once: genuinely concurrent requests from this browser.
 $("raceBtn").addEventListener("click", async () => {
-  const p = await api("players/" + encodeURIComponent(player));
+  const requestedPlayer = player;
+  const p = await api("players/" + encodeURIComponent(requestedPlayer));
+  if (player !== requestedPlayer) return;
   const f = fixturesCache.find(x => !x.result);
   if (!f) return ($("raceResult").innerHTML = `<p class="hint">No open fixture to bet on.</p>`);
-  if (p.cash <= 0) return ($("raceResult").innerHTML = `<p class="hint">${esc(player)} has no cash. Deposit first.</p>`);
+  if (p.cash <= 0) return ($("raceResult").innerHTML = `<p class="hint">${esc(requestedPlayer)} has no cash. Deposit first.</p>`);
   $("raceResult").innerHTML = "";
   const attempts = await Promise.allSettled([1, 2, 3, 4, 5].map(() =>
-    api(`players/${encodeURIComponent(player)}/bets`, { method: "POST", params: { fixture: f.id, selection: "HOME", stake: p.cash, betId: uuid() } })));
+    api(`players/${encodeURIComponent(requestedPlayer)}/bets`, { method: "POST", params: { fixture: f.id, selection: "HOME", stake: p.cash, betId: uuid() } })));
+  if (player !== requestedPlayer) return;
   $("raceResult").innerHTML = attempts.map((a, i) => a.status === "fulfilled"
     ? `<div class="dev ok"><b>Device ${i + 1}</b>accepted<span class="hint">entry #${a.value.seq}</span></div>`
     : `<div class="dev bad"><b>Device ${i + 1}</b>${a.reason.error === "insufficient_funds" ? "refused" : esc(a.reason.error)}<span class="hint">no funds left</span></div>`).join("");

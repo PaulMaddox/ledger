@@ -141,3 +141,39 @@ test("checkpoint cache binds signature, signed bytes, key and displayed commitme
   c.checkpoint = checkpoint;
   assert.notEqual(vm.runInContext('checkpointKey(checkpoint, "different-key")', c), original);
 });
+
+function raceContext(fetch) {
+  const s = slipContext(fetch);
+  vm.runInContext(source.slice(source.indexOf("// Five devices at once:")).split("let stopCustomer")[0], s.c);
+  s.run = () => s.element("raceBtn").handlers.click();
+  return s;
+}
+
+test("customer switch before balance lookup prevents all five bets", async () => {
+  const calls = [];
+  let complete;
+  const s = raceContext(path => { calls.push(path); return new Promise(yes => { complete = yes; }); });
+  const pending = s.run();
+  vm.runInContext('player = "bob"', s.c);
+  complete({ ok: true, json: async () => ({ cash: 100 }) });
+  await pending;
+  assert.deepEqual(calls, ["/api/players/alice"]);
+});
+
+test("five-device bets and late results stay bound to their original customer", async () => {
+  const calls = [];
+  const completions = [];
+  const s = raceContext(path => {
+    calls.push(path);
+    if (calls.length === 1) return Promise.resolve({ ok: true, json: async () => ({ cash: 100 }) });
+    return new Promise(yes => completions.push(yes));
+  });
+  const pending = s.run();
+  while (completions.length < 5) await new Promise(yes => setImmediate(yes));
+  vm.runInContext('player = "bob"', s.c);
+  s.element("raceResult").innerHTML = "Bob's view";
+  completions.forEach(yes => yes({ ok: true, json: async () => ({ seq: 1 }) }));
+  await pending;
+  assert.ok(calls.slice(1).every(path => path === "/api/players/alice/bets"));
+  assert.equal(s.element("raceResult").innerHTML, "Bob's view");
+});

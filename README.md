@@ -71,7 +71,8 @@ ledger, so anything done in one view shows up in the others.
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
   uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
-  balance to show that exactly one gets through. Any entry can be **verified in the browser**:
+  balance of the customer captured at launch, cancelling if the selection changes before betting,
+  to show that exactly one gets through. Any entry can be **verified in the browser**:
   it decodes and displays the canonical bytes (amounts in exact minor units), hashes them,
   walks the Merkle proof, and checks the Ed25519 signature with
   WebCrypto, rather than trusting the server.
