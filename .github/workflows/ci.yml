@@ -45,6 +45,25 @@ jobs:
       - name: Run the test suite again (catches intermittent races)
         run: gradle test --no-daemon --rerun-tasks
 
+      # Guard against a silent "pass" with nothing tested (for example a JUnit
+      # platform misconfiguration). Counts the JUnit XML results and fails if no
+      # tests ran or any failed; the count is shown as an annotation on the run.
+      - name: Confirm tests actually ran
+        run: |
+          python3 - <<'PY'
+          import glob, sys, xml.etree.ElementTree as ET
+          total = failed = skipped = 0
+          for f in glob.glob("build/test-results/test/*.xml"):
+              s = ET.parse(f).getroot()
+              total += int(s.get("tests", 0))
+              failed += int(s.get("failures", 0)) + int(s.get("errors", 0))
+              skipped += int(s.get("skipped", 0))
+          print(f"::notice title=Test results::{total} tests ran, {failed} failed, {skipped} skipped")
+          if total == 0 or failed or skipped:
+              print("::error title=Test results::expected every test to run and pass")
+              sys.exit(1)
+          PY
+
       - name: Build and run the demo, which ends with an independent audit
         run: gradle run --no-daemon
 
