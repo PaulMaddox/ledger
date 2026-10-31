@@ -293,6 +293,8 @@ class LedgerWebApp private constructor(
 
     private fun handle(ex: HttpExchange) {
         try {
+            ex.responseHeaders.set("Content-Security-Policy", "frame-ancestors 'none'")
+            ex.responseHeaders.set("X-Frame-Options", "DENY")
             val uri = ex.requestURI
             validateRequestOrigin(ex)
             if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)

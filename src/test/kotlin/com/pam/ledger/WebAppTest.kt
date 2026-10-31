@@ -27,6 +27,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
 import java.util.Locale
+import java.util.Properties
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -204,6 +205,18 @@ class WebAppTest {
         assertEquals(400, call(app, "POST", "regulator/tamper", mapOf("mode" to "explode")).first)
         assertEquals(404, call(app, "GET", "no/such/route").first)
         assertEquals(404, call(app, "POST", "fixtures/F999/settle", mapOf("result" to "HOME")).first)
+    }
+
+    @Test
+    fun `console pages forbid framing without blocking top-level navigation`() = withApp { app ->
+        for (path in listOf("/", "/index.html")) {
+            val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}$path"))
+                .header("Sec-Fetch-Site", "cross-site").GET().build()
+            val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, response.statusCode())
+            assertEquals("frame-ancestors 'none'", response.headers().firstValue("Content-Security-Policy").orElse(""))
+            assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElse(""))
+        }
     }
 
     @Test
@@ -486,6 +499,92 @@ class WebAppTest {
                 readModel.catchUp()
                 assertTrue(readModel.openBetsOn(fixture.id).isEmpty())
             }
+        }
+    }
+
+    /** A known result closes cash-out even while settlement is awaiting a placement callback. */
+    @Test
+    fun `cash-out refuses published results before loss settlement reaches the writer`() {
+        val delayed = AtomicBoolean(false)
+        val completions = ConcurrentLinkedQueue<Runnable>()
+        val executor = Executor { task -> if (delayed.get()) completions.add(task) else task.run() }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000, "EUR", "closed-cashout-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model).apply { placementTimeout = Duration.ofMillis(25) }
+                val fixture = book.addFixture(Random(0))
+                delayed.set(true)
+                assertFailsWith<OutcomeUnknownException> {
+                    book.placeBet("p", fixture.id, "HOME", 100, "closed-cashout")
+                }
+                val settlement = CompletableFuture.supplyAsync { book.settle(fixture.id, "AWAY") }
+                try {
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (fixture.result == null && System.nanoTime() < deadline) Thread.sleep(5)
+                    assertEquals("AWAY", fixture.result)
+                    assertFalse(settlement.isDone)
+                    assertFailsWith<IllegalArgumentException> { book.cashOut("closed-cashout") }
+                    assertFailsWith<IllegalArgumentException> { book.cashOutDefinitive("closed-cashout") }
+                    assertEquals(900, wallet.cashBalance("p", "EUR"))
+                } finally {
+                    delayed.set(false)
+                    while (true) (completions.poll() ?: break).run()
+                }
+                assertEquals(1, settlement.get(5, TimeUnit.SECONDS).lost)
+                assertEquals("BET_LOST", ledger.findByIdempotencyKey("bet:closed-cashout:settle")!!.entry.kind)
+            }
+        }
+    }
+
+    @Test
+    fun `cash-out racing fixture closure settles once and committed retries still replay`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 10_000, "EUR", "cashout-race-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                repeat(10) { round ->
+                    val fixture = book.addFixture(Random(round))
+                    val betId = "cashout-race-$round"
+                    book.placeBet("p", fixture.id, "HOME", 100, betId)
+                    val outcomes = race(2) { i ->
+                        if (i == 0) book.cashOut(betId) else book.settle(fixture.id, "AWAY")
+                    }
+                    outcomes[1].getOrThrow()
+                    outcomes[0].exceptionOrNull()?.let { assertTrue(it is IllegalArgumentException || it is IdempotencyConflictException) }
+                    val entry = ledger.findByIdempotencyKey("bet:$betId:settle")!!.entry
+                    assertTrue(entry.kind in setOf("BET_CASHED_OUT", "BET_LOST"))
+                    if (entry.kind == "BET_CASHED_OUT") assertTrue(book.cashOut(betId).replayed)
+                    assertEquals(1, (0L until ledger.head().size).count { ledger.entry(it).entry.idempotencyKey == "bet:$betId:settle" })
+                    assertEquals(0, wallet.openBetsBalance("p", "EUR"))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `restored known and unresolved results cannot cash out pending bets`() {
+        for (result in listOf("AWAY", "LEGACY_UNRESOLVED")) {
+            val directory = tempDir()
+            val app = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
+            try {
+                assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+                    "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "restored-cashout",
+                )).first)
+            } finally { app.close() }
+            val state = Properties().apply {
+                Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
+                setProperty("fixture.0.result", result)
+                setProperty("fixture.0.complete", "false")
+            }
+            Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { state.store(it, "pending result") }
+            val restarted = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
+            try {
+                assertEquals(400, call(restarted, "POST", "bets/restored-cashout/cashout").first)
+                assertTrue(call(restarted, "GET", "players/alice").second.contains("\"cash\":\"9900\""))
+                assertTrue(call(restarted, "POST", "regulator/audit").second.contains("\"ok\":true"))
+            } finally { restarted.close() }
         }
     }
 

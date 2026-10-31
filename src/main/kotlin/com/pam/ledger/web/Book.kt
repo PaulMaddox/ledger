@@ -50,7 +50,8 @@ internal fun payout(amount: Long, hundredths: Int): Long {
  *  placements hold the READ lock while they check the result and register their
  *  non-cancellable ledger future. Settlement takes the WRITE lock to close the
  *  fixture, then waits for every registered future before collecting bets. A
- *  timed-out request therefore cannot leave a late placement behind.
+ *  timed-out request therefore cannot leave a late placement behind. Cash-outs
+ *  also hold the READ lock so no new offer can be accepted after a known result.
  */
 class Book(private val wallet: SportsbookWallet, private val readModel: ReadModel, private val directory: Path? = null) {
 
@@ -179,7 +180,22 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         return payout(bet.stake, 85)
     }
 
-    fun cashOut(betId: String): Receipt = wallet.cashOut(betId, cashOutOffer(betId))
+    fun cashOut(betId: String): Receipt = cashOut(betId, definitive = false)
+
+    /** Simulator cash-outs use the same fixture guard and wait for a definitive wallet outcome. */
+    internal fun cashOutDefinitive(betId: String): Receipt = cashOut(betId, definitive = true)
+
+    private fun cashOut(betId: String, definitive: Boolean): Receipt {
+        val bet = readModel.bet(betId) ?: readModel.catchUp().let { readModel.bet(betId) }
+            ?: throw NotFoundException("bet $betId not found")
+        val f = fixture(bet.fixtureId)
+        return f.lock.read {
+            // Committed retries still reach the ledger's content fingerprint check.
+            require(f.isOpen || wallet.isSettled(betId)) { "fixture ${f.id} has already been settled" }
+            val offer = payout(bet.stake, 85)
+            if (definitive) wallet.cashOutDefinitive(betId, offer) else wallet.cashOut(betId, offer)
+        }
+    }
 
     /** Close the fixture with [result] (HOME, DRAW, AWAY or VOID) and settle every open bet on it. */
     fun settle(fixtureId: String, result: String): Settlement {

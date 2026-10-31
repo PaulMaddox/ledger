@@ -235,7 +235,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     val bet = book.openBetsForPlayer(customer).randomOrNull(rnd) ?: return
                     val offer = book.cashOutOffer(bet.betId)
                     text = "cashed out ${eur(offer)}"
-                    wallet.cashOutDefinitive(bet.betId, offer)
+                    book.cashOutDefinitive(bet.betId)
                     counters.cashOuts.incrementAndGet()
                 }
             }

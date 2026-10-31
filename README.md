@@ -77,6 +77,8 @@ ledger, so anything done in one view shows up in the others.
   without floating-point rounding. Wallet actions retain the original customer, amount
   and idempotency reference after an uncertain response, so retries cannot silently become
   different money movements.
+  Server-side cash-out checks use the fixture lock: a published result (including an
+  unresolved restored fixture) blocks new cash-outs, while committed retries still replay.
   Definitive bet rejections unlock the stake for correction, and late cash-out replies
   cannot overwrite another selected customer's result.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
@@ -125,7 +127,8 @@ To listen on the LAN, explicitly allow the hostname or IP address users will acc
 `--host` selects the bind address; repeat `--allowed-host` for additional exact hostnames or
 IP addresses (without schemes, ports or wildcards). IPv6 wildcard binding uses `--host ::`.
 Loopback access stays available with wildcard binding; other hosts and cross-origin
-mutations remain blocked. Exposing this unauthenticated demo lets reachable users move money.
+mutations remain blocked. Framing is forbidden by CSP and X-Frame-Options to prevent
+clickjacking. Exposing this unauthenticated demo lets reachable users move money.
 Following a link from the README or guide is allowed while Host validation remains enforced.
 Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
 requires a secure context with WebCrypto (HTTPS or localhost).
@@ -235,6 +238,8 @@ docs/screenshots/      web console screenshots used here and in the guide
 
 ## Before production
 
+- Add authenticated player/operator/regulator roles and authorization for every API action;
+  demo deposits are not evidence of confirmed payment. Add request-rate/concurrency limits.
 - Implement `TreeHeadSigner` against an HSM or cloud KMS.
 - Publish signed tree heads to a party you do not control (regulator, transparency log).
 - Move entry storage and Merkle nodes to an indexed store at large scale.
