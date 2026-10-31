@@ -595,7 +595,10 @@ class LedgerWebApp private constructor(
         ChaosLab.validate(scenario)
         val current = services ?: throw HttpError(503, "ledger_unavailable",
             "Main store is stopped. Use Administrator reset before another experiment.")
-        return chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+        val result = chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+        // Publish the experiment's committed customers before acknowledging it to the console.
+        current.readModel.catchUp()
+        return result
     }
 
     private fun runChaos(scenario: String): Map<String, Any?> {
