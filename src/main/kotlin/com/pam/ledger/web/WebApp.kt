@@ -104,6 +104,7 @@ class LedgerWebApp private constructor(
     private val audit: Audit,
 ) : AutoCloseable {
     private lateinit var server: HttpServer
+    private var allowedHost = "127.0.0.1"
     val port: Int get() = server.address.port
 
     companion object {
@@ -117,15 +118,17 @@ class LedgerWebApp private constructor(
             val ledger = Ledger.open(LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000))
             val wallet = SportsbookWallet(ledger)
             val readModel = ReadModel(ledger)
-            val book = Book(wallet, readModel)
-            val simulator = Simulator(book, wallet)
+            val book = Book(ledger, wallet, readModel, store = dir.resolve("fixtures.txt"))
+            val simulator = Simulator(book, wallet, readModel)
             val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, Stats(readModel),
                 Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)))
 
             // Demo data. Deposit keys are fixed, so restarting with --data replays them instead of paying twice.
             CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
-            repeat(6) { book.addFixture() }
+            // Fixtures persist beside the ledger, so a restart only tops up the open ones.
+            while (book.fixtures().count { it.isOpen } < 6) book.addFixture()
 
+            app.allowedHost = opts.host
             app.server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0).apply {
                 executor = Executors.newVirtualThreadPerTaskExecutor()
                 createContext("/") { ex -> app.handle(ex) }
@@ -256,15 +259,16 @@ class LedgerWebApp private constructor(
             get("fixtures") -> fixtures()
             post("fixtures") -> fixtureView(book.addFixture())
             post("fixtures", "*", "settle") -> book.settle(p[1], r.str("result")).let {
-                mapOf("fixture" to it.fixtureId, "result" to it.result, "won" to it.won, "lost" to it.lost, "voided" to it.voided, "alreadySettled" to it.alreadySettled)
+                mapOf("fixture" to it.fixtureId, "result" to it.result, "won" to it.won, "lost" to it.lost, "voided" to it.voided,
+                    "alreadySettled" to it.alreadySettled, "complete" to it.complete)
             }
             get("operator") -> operator()
 
             // ---- Simulator ----
             get("simulator") -> simulatorView()
             get("simulator", "events") -> {
-                val after = r.params["after"]?.toLongOrNull() ?: 0L
-                mapOf("lastId" to simulator.lastEventId, "events" to simulator.eventsAfter(after).map {
+                val (events, cursor) = simulator.eventsAfter(r.params["after"]?.toLongOrNull() ?: 0L)
+                mapOf("lastId" to cursor, "events" to events.map {
                     mapOf("id" to it.id, "t" to it.time, "customer" to it.customer, "op" to it.op, "text" to it.text, "ok" to it.ok, "cash" to it.cash)
                 })
             }
@@ -368,6 +372,7 @@ class LedgerWebApp private constructor(
         return mapOf(
             "id" to f.id, "home" to f.home, "away" to f.away, "odds" to f.odds, "result" to f.result,
             "openBets" to open.size, "staked" to open.sumOf { it.stake }, "liability" to liability,
+            "settled" to f.settled, "needsSettlement" to f.needsSettlement,
         )
     }
 

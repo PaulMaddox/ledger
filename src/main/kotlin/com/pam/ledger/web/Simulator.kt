@@ -36,7 +36,7 @@ import kotlin.random.Random
  *  At most 512 operations are in flight. Beyond that, operations are shed (and
  *  counted) rather than queued, so an excessive setting cannot exhaust memory.
  */
-class Simulator(private val book: Book, private val wallet: SportsbookWallet) : AutoCloseable {
+class Simulator(private val book: Book, private val wallet: SportsbookWallet, private val readModel: ReadModel) : AutoCloseable {
 
     enum class State { STOPPED, RUNNING, PAUSED }
 
@@ -64,25 +64,31 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
     data class Event(val id: Long, val time: Long, val customer: String, val op: String, val text: String, val ok: Boolean, val cash: Long)
 
     private val events = ArrayDeque<Event>()
-    private val eventIds = AtomicLong()
+    private var nextEventId = 0L // guarded by `events`
 
     private fun record(customer: String, op: String, text: String, ok: Boolean) {
-        val e = Event(eventIds.incrementAndGet(), System.currentTimeMillis(), customer, op, text, ok, wallet.cashBalance(customer, "EUR"))
+        val cash = wallet.cashBalance(customer, "EUR")
+        // The id is allocated and the event appended under one lock, so events are always
+        // published in id order: a reader's cursor can never skip past an event not yet added.
         synchronized(events) {
-            events.addLast(e)
+            events.addLast(Event(++nextEventId, System.currentTimeMillis(), customer, op, text, ok, cash))
             if (events.size > MAX_EVENTS) events.removeFirst()
         }
     }
 
-    /** Events newer than [afterId], oldest first, at most [limit] of the newest. */
-    fun eventsAfter(afterId: Long, limit: Int = 2_000): List<Event> = synchronized(events) {
-        events.filter { it.id > afterId }.takeLast(limit)
+    /**
+     * Events newer than [afterId], oldest first (at most [limit] of the newest), and the cursor
+     * to ask from next time. The cursor comes from the same snapshot as the events, so nothing
+     * returned is ever returned again.
+     */
+    fun eventsAfter(afterId: Long, limit: Int = 2_000): Pair<List<Event>, Long> = synchronized(events) {
+        val batch = events.filter { it.id > afterId }.takeLast(limit)
+        // With nothing new, keep the cursor, but never beyond the newest id: a browser left open
+        // across a server restart holds a cursor from the old run and must not wait forever.
+        batch to (batch.lastOrNull()?.id ?: minOf(afterId, nextEventId))
     }
 
-    val lastEventId get() = eventIds.get()
-
     private val funded = ConcurrentHashMap.newKeySet<String>()
-    private val openBets = ConcurrentHashMap.newKeySet<String>()
     private val inFlight = Semaphore(MAX_IN_FLIGHT)
     private val workers = Executors.newVirtualThreadPerTaskExecutor()
     private val ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "simulator").apply { isDaemon = true } }
@@ -126,13 +132,19 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
             if (!inFlight.tryAcquire()) { shed.incrementAndGet(); return@repeat }
             workers.submit { try { operation(Random) } finally { inFlight.release() } }
         }
-        // Keep the book moving: settle the oldest open fixture and open a new one every 15 s.
+        // Keep the book moving every 15 s: first finish any interrupted settlement, otherwise
+        // settle the oldest open fixture and open a new one.
         if (autoFixtures && System.nanoTime() - lastRoundNanos > 15_000_000_000L) {
             lastRoundNanos = System.nanoTime()
-            book.fixtures().firstOrNull { it.isOpen }?.let { f ->
-                workers.submit { runCatching { book.settle(f.id, weightedResult(f)); fixtureRounds.incrementAndGet() } }
+            val unfinished = book.fixtures().firstOrNull { it.needsSettlement }
+            if (unfinished != null) {
+                workers.submit { runCatching { book.settle(unfinished.id, unfinished.result!!) } }
+            } else {
+                book.fixtures().firstOrNull { it.isOpen }?.let { f ->
+                    workers.submit { runCatching { book.settle(f.id, weightedResult(f)); fixtureRounds.incrementAndGet() } }
+                }
+                book.addFixture()
             }
-            book.addFixture()
         }
     }
 
@@ -166,7 +178,6 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     text = "bet ${eur(stake)} on ${f.id} $selection @ ${"%.2f".format(Locale.ROOT, odds / 100.0)}"
                     val betId = "sim-" + UUID.randomUUID()
                     book.placeBet(customer, f.id, selection, stake, betId)
-                    openBets.add(betId)
                     bets.incrementAndGet()
                 }
                 in 65..79 -> {
@@ -186,8 +197,8 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                 }
                 else -> {
                     op = "CASH_OUT"
-                    val betId = openBets.randomOrNull(rnd) ?: return
-                    openBets.remove(betId)
+                    // Only this customer's own open bets, so the tile and the account describe the same action.
+                    val betId = readModel.openBetIdsFor(customer).randomOrNull(rnd) ?: return
                     val offer = book.cashOutOffer(betId)
                     text = "cashed out ${eur(offer)}"
                     book.cashOut(betId)

@@ -116,7 +116,7 @@ class WebAppTest {
             Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
                 val wallet = SportsbookWallet(ledger)
                 ReadModel(ledger).use { readModel ->
-                    val book = Book(wallet, readModel)
+                    val book = Book(ledger, wallet, readModel)
                     val fixture = book.addFixture(Random(round))
                     val players = (1..16).map { "p$it" }
                     players.forEach { wallet.deposit(it, 1_000_00, "EUR", "d-$it") }
