@@ -24,6 +24,9 @@ class DeploymentTest(unittest.TestCase):
         self.missing_image = False
         self.extra_active = False
         self.revision = "old"
+        self.host = "ledger.example.com"
+        self.share = "ledger-demo-data"
+        self.inactive_replica = False
 
     def command(self, command, **kwargs):
         self.calls.append(command)
@@ -32,7 +35,7 @@ class DeploymentTest(unittest.TestCase):
         if parts == ["containerapp", "show", "--resource-group"]:
             result = {**resource, "properties": {
                 "managedEnvironmentId": "/environment",
-                "configuration": {"ingress": {"fqdn": "ledger.example.com"}}}}
+                "configuration": {"ingress": {"fqdn": self.host}}}}
         elif parts == ["containerapp", "env", "show"]:
             result = resource
         elif command[1:3] == ["acr", "show"]:
@@ -40,19 +43,26 @@ class DeploymentTest(unittest.TestCase):
         elif command[1:3] == ["identity", "show"]:
             result = resource
         elif parts == ["containerapp", "env", "storage"]:
-            result = {"properties": {"azureFile": {"accessMode": "ReadWrite"}}}
+            result = {"properties": {"azureFile": {
+                "accessMode": "ReadWrite", "shareName": self.share}}}
         elif parts == ["containerapp", "revision", "list"]:
             result = [{"name": f"ledger-web--{self.revision}",
                        "properties": {"active": True}}]
             if self.updated and self.extra_active:
                 result.append({"name": "ledger-web--unexpected",
                                "properties": {"active": True}})
+            if self.inactive_replica and "--all" in command:
+                result.append({"name": "ledger-web--inactive",
+                               "properties": {"active": False}})
         elif parts == ["acr", "repository", "show"]:
             if self.missing_image:
                 raise subprocess.CalledProcessError(1, command, stderr="image not found")
             result = {}
         elif parts == ["containerapp", "replica", "list"]:
-            result = self.replicas
+            revision = command[command.index("--revision") + 1]
+            result = ([{"name": "inactive-replica"}]
+                      if self.inactive_replica and revision == "ledger-web--inactive"
+                      else self.replicas)
         elif command[1:3] == ["containerapp", "update"]:
             if self.fail_update:
                 raise subprocess.CalledProcessError(1, command, stderr="deployment failed")
@@ -95,6 +105,13 @@ class DeploymentTest(unittest.TestCase):
                 self.run_deploy()
         self.assertFalse(self.updated)
 
+    def test_inactive_revision_replica_also_blocks_new_writer(self):
+        self.inactive_replica = True
+        with patch.object(deploy.time, "monotonic", side_effect=[0, 301]):
+            with self.assertRaisesRegex(RuntimeError, "refusing to start another writer"):
+                self.run_deploy()
+        self.assertFalse(self.updated)
+
     def test_wrong_region_stops_before_deactivation(self):
         self.region = "eastus"
         with self.assertRaisesRegex(RuntimeError, "Sweden Central"):
@@ -128,6 +145,18 @@ class DeploymentTest(unittest.TestCase):
         self.extra_active = True
         with self.assertRaisesRegex(RuntimeError, "exactly the new revision"):
             self.run_deploy()
+
+    def test_unprovisioned_hostname_stops_before_deactivation(self):
+        self.host = None
+        with self.assertRaisesRegex(RuntimeError, "finish bootstrap provisioning"):
+            self.run_deploy()
+        self.assertFalse(any("deactivate" in command for command in self.calls))
+
+    def test_old_share_is_refused_before_deactivation(self):
+        self.share = "ledger-data"
+        with self.assertRaisesRegex(RuntimeError, "isolated ledger-demo-data share"):
+            self.run_deploy()
+        self.assertFalse(any("deactivate" in command for command in self.calls))
 
 
 if __name__ == "__main__":

@@ -56,17 +56,21 @@ def main():
         raise RuntimeError("Demo resources must remain in Sweden Central")
     if app["properties"]["managedEnvironmentId"].lower() != environment["id"].lower():
         raise RuntimeError("Application belongs to a different environment")
-    host = app["properties"]["configuration"]["ingress"]["fqdn"]
-    if not re.fullmatch(r"[a-z0-9.-]+", host):
-        raise RuntimeError("Azure returned an invalid application hostname")
+    host = app["properties"]["configuration"]["ingress"].get("fqdn")
+    if not isinstance(host, str) or not re.fullmatch(r"[a-z0-9.-]+", host):
+        raise RuntimeError("Azure has not allocated a valid application hostname; "
+                           "finish bootstrap provisioning before deploying")
     revisions = command("containerapp", "revision", "list", *common, "--all")
     if any(revision["name"] == f"{args.app}--{args.revision}" for revision in revisions):
         raise RuntimeError("Revision already exists; use a new suffix")
     storage = command("containerapp", "env", "storage", "show",
                       "-g", args.resource_group, "-n", args.environment,
                       "--storage-name", "ledger-demo-data")
-    if storage["properties"]["azureFile"]["accessMode"] != "ReadWrite":
-        raise RuntimeError("Persistent ledger-data storage must be writable")
+    azure_file = storage["properties"]["azureFile"]
+    if azure_file["accessMode"] != "ReadWrite":
+        raise RuntimeError("Persistent ledger-demo-data storage must be writable")
+    if azure_file["shareName"] != "ledger-demo-data":
+        raise RuntimeError("Storage must point to the isolated ledger-demo-data share")
     command("acr", "repository", "show", "--name", args.registry,
             "--image", f"ledger-web:{args.tag}")
 

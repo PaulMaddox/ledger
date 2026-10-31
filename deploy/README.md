@@ -1,7 +1,7 @@
 # Public Azure Container Apps demo
 
-Deploys the web console, not the CLI demo, as **ledger-demo** in environment
-**ledger-private-env**, resource group **ledger**, **Sweden Central**. The subscription is
+Deploys the web console as **ledger-demo** in **ledger-private-env**, in resource
+group **ledger**, **Sweden Central**, subscription
 `9600a075-454a-4e6b-82d4-58bef3e21b4a`. No AKS cluster, ingress controller or Caddy
 sidecar is required. The existing AKS cluster is not modified or deleted.
 
@@ -9,278 +9,245 @@ sidecar is required. The existing AKS cluster is not modified or deleted.
 simulator, damage the main store with Chaos Monkey, and permanently clear demo
 history with Administrator reset. Never put real accounts, private customer data
 or production keys here.** Managed HTTPS enables browser cryptographic verification,
-not authentication. Container Apps, storage and registry usage incur Azure charges.
+not authentication. Container Apps, Premium ACR, storage, NAT and its outbound IP
+incur Azure charges.
 
-## One-time Azure setup
+## One-time Azure setup with Bicep
 
-Run the following as an Azure administrator in Bash or Azure Cloud Shell. Choose
-globally unique registry and storage account names. Reuse existing resources rather
-than recreating them or moving persisted data.
+`infra.bicep` creates the registry, storage/share, VNet, private endpoints and DNS,
+NAT/NSG policy, workload-profile environment, storage mount, managed identities,
+scoped roles and GitHub OIDC federation. `bootstrap.bicep` creates the initial
+app and its app-scoped deployment permission after the image is built.
+
+These are **initial-setup templates, not rolling deployment commands**. Use a fresh
+resource group for a new installation, or retain the already provisioned `ledger`
+resources and skip setup. Do not apply `infra.bicep` to an operating environment:
+its VNet initialization precedes the subnet's NAT/NSG attachment. Existing
+CLI-created role assignments also have different identifiers and must be reconciled
+before adopting Bicep; do not delete permissions or infrastructure blindly.
+Never rerun `bootstrap.bicep` over a persistent app. All image updates, including
+the first persistent revision, use the drain script below.
+
+Run as an Azure administrator with permission to create resources and assign
+roles. The following commands are for Bash or Azure Cloud Shell:
 
 ```bash
 SUBSCRIPTION=9600a075-454a-4e6b-82d4-58bef3e21b4a
 ACR_NAME=paulmaddoxledger
 STORAGE_ACCOUNT=pmledgeraca9600
-az account set --subscription "$SUBSCRIPTION"
-az provider register -n Microsoft.App --wait
-az provider register -n Microsoft.Storage --wait
 
-az acr create -g ledger -n "$ACR_NAME" --sku Basic --location swedencentral
-az storage account create -g ledger -n "$STORAGE_ACCOUNT" --location swedencentral \
-  --sku Standard_LRS --kind StorageV2 --min-tls-version TLS1_2 \
-  --https-only true --allow-blob-public-access false --public-network-access Disabled
-az storage share-rm create -g ledger --storage-account "$STORAGE_ACCOUNT" \
-  --name ledger-demo-data --quota 32 --enabled-protocols SMB
+az provider register --subscription "$SUBSCRIPTION" -n Microsoft.App --wait
+az provider register --subscription "$SUBSCRIPTION" -n Microsoft.Network --wait
+az provider register --subscription "$SUBSCRIPTION" -n Microsoft.Storage --wait
+az provider register --subscription "$SUBSCRIPTION" -n Microsoft.ContainerRegistry --wait
+az provider register --subscription "$SUBSCRIPTION" -n Microsoft.ManagedIdentity --wait
+az group create --subscription "$SUBSCRIPTION" -n ledger --location swedencentral
+az deployment group create --subscription "$SUBSCRIPTION" -g ledger -n ledger-infra \
+  --template-file deploy/infra.bicep \
+  --parameters registryName="$ACR_NAME" storageAccountName="$STORAGE_ACCOUNT"
 
-az network vnet create -g ledger -n ledger-app-vnet --location swedencentral \
-  --address-prefixes 10.80.0.0/16 --subnet-name container-apps --subnet-prefixes 10.80.0.0/23
-az network vnet subnet update -g ledger --vnet-name ledger-app-vnet \
-  -n container-apps --delegations Microsoft.App/environments
-VNET_ID=$(az network vnet show -g ledger -n ledger-app-vnet --query id -o tsv)
-SUBNET_ID=$(az network vnet subnet show -g ledger --vnet-name ledger-app-vnet \
-  -n container-apps --query id -o tsv)
-az network vnet subnet create -g ledger --vnet-name ledger-app-vnet \
-  -n private-endpoints --address-prefixes 10.80.2.0/27 --private-endpoint-network-policies Disabled
-STORAGE_ID=$(az storage account show -g ledger -n "$STORAGE_ACCOUNT" --query id -o tsv)
-az network private-endpoint create -g ledger -n ledger-files-pe --location swedencentral \
-  --vnet-name ledger-app-vnet --subnet private-endpoints \
-  --private-connection-resource-id "$STORAGE_ID" --group-id file --connection-name ledger-files
-DNS_ID=$(az network private-dns zone create -g ledger \
-  -n privatelink.file.core.windows.net --query id -o tsv)
-az network private-dns link vnet create -g ledger \
-  --zone-name privatelink.file.core.windows.net -n ledger-app-vnet \
-  --virtual-network "$VNET_ID" --registration-enabled false
-az network private-endpoint dns-zone-group create -g ledger \
-  --endpoint-name ledger-files-pe -n default --private-dns-zone "$DNS_ID" --zone-name files
-az containerapp env create -g ledger -n ledger-private-env --location swedencentral \
-  --infrastructure-subnet-resource-id "$SUBNET_ID" --logs-destination none
-
-# Keep the key in the environment's storage definition, never GitHub or a file.
-# Do not enable shell tracing around these commands.
-STORAGE_KEY=$(az storage account keys list -g ledger -n "$STORAGE_ACCOUNT" \
-  --query '[0].value' -o tsv)
-az containerapp env storage set -g ledger -n ledger-private-env --storage-name ledger-demo-data \
-  --account-name "$STORAGE_ACCOUNT" --azure-file-share-name ledger-demo-data \
-  --azure-file-account-key "$STORAGE_KEY" --access-mode ReadWrite -o none
-unset STORAGE_KEY
-
-PULL_IDENTITY_ID=$(az identity create -g ledger -n ledger-image-pull \
-  --location swedencentral --query id -o tsv)
-PULL_PRINCIPAL=$(az identity show -g ledger -n ledger-image-pull \
-  --query principalId -o tsv)
-ACR_ID=$(az acr show -n "$ACR_NAME" --query id -o tsv)
-az role assignment create --assignee-object-id "$PULL_PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role AcrPull --scope "$ACR_ID"
-```
-
-Registry roles assume the default `LegacyRegistryPermissions` mode, not ABAC
-repository roles. The registry administrator password stays disabled. Allow time
-for role propagation before starting the application.
-
-Storage public networking stays disabled. The private endpoint must be approved,
-and the VNet DNS link must be complete before mounting SMB. Choose non-overlapping
-subnet ranges when integrating with another network. A Container Apps environment's
-VNet cannot be added after creation; use a new environment rather than trying to
-modify a non-VNet environment in place.
-
-In this subscription, Azure reported that VNet environment creation also required
-the `Microsoft.Network/AllowBringYourOwnPublicIpAddress` feature. Register it only
-if Azure returns that specific provisioning error, wait for `Registered`, and
-retry the same environment operation. This deployment does not supply a public IP:
-
-```bash
-az feature register --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress
-az feature show --namespace Microsoft.Network --name AllowBringYourOwnPublicIpAddress \
-  --query properties.state -o tsv
-```
-
-Build the image locally with Docker or remotely with ACR Tasks:
-
-```bash
 TAG=$(git rev-parse HEAD)
-az acr build -r "$ACR_NAME" -t "ledger-web:$TAG" --platform linux --timeout 3600 .
+az acr build --subscription "$SUBSCRIPTION" -r "$ACR_NAME" \
+  -t "ledger-web:$TAG" --platform linux --timeout 3600 .
+az deployment group create --subscription "$SUBSCRIPTION" -g ledger -n ledger-bootstrap \
+  --template-file deploy/bootstrap.bicep \
+  --parameters registryName="$ACR_NAME" imageTag="$TAG"
+python3 scripts/deploy-container-app.py --subscription "$SUBSCRIPTION" \
+  --registry "$ACR_NAME" --tag "$TAG" --revision "initial-$(date +%s)"
 ```
 
-This uploads only `.dockerignore`-allowed source files, never local journal data or
-signing keys. The Dockerfile sets the wrapper's executable permission inside Linux
-so Windows build contexts work. Use a distinct tag for an uncommitted build.
-The image build runs the Kotlin tests twice and the CLI audit before publishing.
-The regulatory storm retains every balance observation. Its test JVM has a 4 GiB
-heap so slower cloud builds do not exhaust memory while preserving all evidence;
-this is test-only and does not increase the web container's memory allocation.
+Choose globally unique registry and storage names for a fresh installation. The
+templates deliberately keep the region in Sweden Central and use the dedicated,
+non-overlapping `10.80.0.0/16` VNet, with app subnet `10.80.0.0/23` and endpoint
+subnet `10.80.2.0/27`. Endpoint addresses are fixed at `.4` (Files), `.5` (regional
+registry data), and `.6` (registry login), matching the narrow NSG rules. This
+network is not a template for an unrelated VNet with additional configuration.
+A non-VNet environment cannot be converted in place; create a new environment.
 
-Bootstrap the app to obtain Azure's assigned hostname. This first revision has no
-persistent volume and allows only localhost requests; it is not the public demo.
-Create a temporary YAML file using the values resolved above:
+Registry roles assume legacy registry permissions, not ABAC repository roles.
+The registry administrator password stays disabled. Allow time for role
+propagation before starting the app. Storage keys are resolved by ARM into the
+environment storage definition; no key is output, placed in source or given to
+GitHub. Only an administrator sets or rotates storage keys.
+
+In this subscription, Azure reported that environment creation also required the
+`Microsoft.Network/AllowBringYourOwnPublicIpAddress` feature. Register it **only
+if Azure returns that specific error**, wait for `Registered`, then refresh the
+provider before retrying the failed environment operation:
 
 ```bash
-ENVIRONMENT_ID=$(az containerapp env show -g ledger -n ledger-private-env --query id -o tsv)
-LOGIN_SERVER=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
-cat > bootstrap.yaml <<EOF
-location: swedencentral
-identity:
-  type: UserAssigned
-  userAssignedIdentities:
-    "$PULL_IDENTITY_ID": {}
-properties:
-  managedEnvironmentId: "$ENVIRONMENT_ID"
-  configuration:
-    activeRevisionsMode: Multiple
-    ingress:
-      external: true
-      allowInsecure: false
-      targetPort: 8080
-      transport: http
-    registries:
-      - server: "$LOGIN_SERVER"
-        identity: "$PULL_IDENTITY_ID"
-  template:
-    containers:
-      - name: ledger
-        image: "$LOGIN_SERVER/ledger-web:$TAG"
-        args: ["--host", "0.0.0.0", "--port", "8080"]
-        resources:
-          cpu: 1.0
-          memory: 2Gi
-    scale:
-      minReplicas: 1
-      maxReplicas: 1
-EOF
-az containerapp create -g ledger -n ledger-demo --yaml bootstrap.yaml -o none
-rm bootstrap.yaml
-python3 scripts/deploy-container-app.py --registry "$ACR_NAME" \
-  --tag "$TAG" --revision "initial-$(date +%s)"
+az feature register --subscription "$SUBSCRIPTION" --namespace Microsoft.Network \
+  --name AllowBringYourOwnPublicIpAddress
+az feature show --subscription "$SUBSCRIPTION" --namespace Microsoft.Network \
+  --name AllowBringYourOwnPublicIpAddress --query properties.state -o tsv
+# After the state above is Registered:
+az provider register --subscription "$SUBSCRIPTION" -n Microsoft.Network --wait
 ```
 
-On Windows, use `python` in place of `python3` and create the bootstrap YAML with an
-editor or a PowerShell here-string. The deployment script supports Windows and
-Linux. The script pins every Azure request to `--subscription`, using
-`AZURE_SUBSCRIPTION_ID` or the documented subscription by default, so another
-CLI session changing the default subscription cannot redirect deployment.
-Set `$env:PYTHONUTF8 = '1'` before streaming ACR build logs in PowerShell:
-the demo's Unicode audit output otherwise breaks Azure CLI's legacy Windows
-encoding. The script resolves Azure resource IDs and the actual app hostname, verifies the
-region and persistent storage, drains old revisions, applies
-`deploy/container-app.yaml`, and requires verified public HTTPS before success.
+Environment ingress does not use a user-supplied public IP. The separate
+outbound-only NAT does have a Standard public IP.
+
+ACR Tasks uploads only `.dockerignore`-allowed source, never local journals or
+signing keys. The Dockerfile fixes Linux wrapper permissions for Windows build
+contexts, runs the Kotlin tests twice and the CLI audit before publishing.
+Use a distinct tag for an uncommitted build. The regulatory storm retains all
+balance observations and uses a 4 GiB **test-only** heap; the web container still
+has 2 GiB.
+
+Bootstrap has no persistent volume and permits only localhost requests. It obtains
+Azure's real hostname, not a usable public demo. The script checks the environment,
+region, image, hostname and isolated `ledger-demo-data` share before stopping any
+writer, then drains revisions, applies `container-app.yaml`, and requires verified
+public HTTPS. A bootstrap without an allocated hostname is a failed setup.
+
+On Windows, use `python` instead of `python3`, Windows path separators, and an
+explicit tag/revision instead of Bash substitutions. The script supports both
+platforms and pins every Azure request to the given subscription, or
+`AZURE_SUBSCRIPTION_ID` / the documented subscription by default. Set
+`$env:PYTHONUTF8 = '1'` before streaming ACR logs in PowerShell; Unicode demo
+output otherwise breaks Azure CLI's legacy Windows encoding.
+
+## Public ingress, private dependencies, restricted egress
+
+Storage public networking is disabled. Both private endpoints must be approved,
+with private DNS zones linked to the app VNet before SMB mounts/image pulls.
+ACR needs Premium for Private Link. Its public endpoint remains authenticated and
+enabled for GitHub-hosted image builds, but is not allowed by the app NSG.
+Disabling ACR public access requires a trusted VNet-connected build runner.
+
+`ledger-platform-egress` provides explicit NAT through the outbound-only Standard
+IP `ledger-platform-egress-ip`. It accepts no unsolicited inbound traffic.
+Container Apps supplies public HTTPS separately. No custom route table is needed:
+system routes handle public destinations and private endpoints.
+
+`ledger-app-egress` allows these outbound connections only:
+
+| Destination | Ports | Purpose |
+|---|---|---|
+| App subnet `10.80.0.0/23` | Any | Required intra-environment communication |
+| Registry private IPs | TCP 443 | Registry login and regional image downloads |
+| Azure Files private IP | TCP 445 | Persistent SMB storage |
+| Azure DNS `168.63.129.16` | TCP/UDP 53 | DNS resolution |
+| `MicrosoftContainerRegistry` | TCP 443 | Microsoft system images |
+| `AzureFrontDoor.FirstParty` | TCP 443 | Microsoft system-image CDN dependency |
+| `AzureActiveDirectory` | TCP 443 | Managed identity authentication |
+
+A priority-4096 rule denies every other outbound destination and port, overriding
+default NSG allowances. There is no broad `Internet`, `AzureCloud`, public ACR
+or Azure Monitor exception; this environment does not use Azure Monitor.
+Never broaden egress just to make a failed deployment appear healthy.
+
+This is **deny-by-default egress, not absolute exfiltration prevention**. A
+compromised container can abuse permitted services or DNS. Service tags cover
+multiple endpoints, and the subnet policy cannot distinguish app traffic from
+platform traffic. The image-pull identity has `AcrPull`, not push/storage access.
+
+For the already provisioned network, `egress.bicep` updates only NAT, NSG and their
+app-subnet attachment; it does not recreate the VNet or update app revisions:
+
+```bash
+az deployment group create --subscription "$SUBSCRIPTION" -g ledger -n ledger-egress \
+  --template-file deploy/egress.bicep \
+  --parameters filesPrivateIp=10.80.2.4 'registryPrivateIps=["10.80.2.5","10.80.2.6"]'
+```
+
+Verify addresses against the actual private endpoints before applying it. For
+PowerShell, put the array in a standard ARM parameters JSON file and pass
+`--parameters @<file>` to avoid native-command JSON quoting differences.
 
 ## GitHub Actions and Azure OIDC
 
-Create a separate user-assigned managed identity for deployment. It authenticates
-with GitHub's short-lived OIDC token; there is no stored Azure client secret.
+Bicep creates `ledger-github-deploy` and a federated credential for
+`repo:PaulMaddox/ledger:environment:azure-demo`, issuer
+`https://token.actions.githubusercontent.com`, audience `api://AzureADTokenExchange`.
+There is no stored Azure client secret.
 
-```bash
-CLIENT_ID=$(az identity create -g ledger -n ledger-github-deploy \
-  --location swedencentral --query clientId -o tsv)
-PRINCIPAL=$(az identity show -g ledger -n ledger-github-deploy --query principalId -o tsv)
-TENANT_ID=$(az account show --query tenantId -o tsv)
-APP_ID=$(az containerapp show -g ledger -n ledger-demo --query id -o tsv)
-az identity federated-credential create -g ledger \
-  --identity-name ledger-github-deploy --name github-azure-demo \
-  --issuer https://token.actions.githubusercontent.com \
-  --subject repo:PaulMaddox/ledger:environment:azure-demo \
-  --audiences api://AzureADTokenExchange
-az role assignment create --assignee-object-id "$PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role Contributor --scope "$APP_ID"
-az role assignment create --assignee-object-id "$PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role "Container Apps Operator" \
-  --scope "$ENVIRONMENT_ID"
-az role assignment create --assignee-object-id "$PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role "Managed Identity Operator" \
-  --scope "$PULL_IDENTITY_ID"
-az role assignment create --assignee-object-id "$PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role Reader --scope "$PULL_IDENTITY_ID"
-az role assignment create --assignee-object-id "$PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role AcrPush --scope "$ACR_ID"
-az role assignment create --assignee-object-id "$PRINCIPAL" \
-  --assignee-principal-type ServicePrincipal --role Reader --scope "$ACR_ID"
-```
-
-The deployment identity cannot create storage, retrieve its account keys, assign
-roles or manage AKS. Contributor is scoped to this one app, not the resource group.
-Container Apps Operator is scoped only to the environment: it permits reading
-storage definitions and joining that environment, not changing its storage.
-Only the administrator sets or rotates storage keys.
+The deployment identity has Contributor on **this app only**, Container Apps
+Operator on **this environment only**, AcrPush/Reader on the registry, and Managed
+Identity Operator/Reader on the pull identity. It cannot create storage, retrieve
+account keys, assign roles or manage AKS. Environment Operator includes the
+required read/join permission without permission to change storage definitions.
 
 In GitHub **Settings > Environments**, create `azure-demo` and restrict deployment
-branches to **main**. This is essential because the federated credential trusts
-the environment rather than a branch. Set these non-secret environment variables:
+branches to **main**. This is essential: the federated credential trusts the
+environment, not the branch. Set these non-secret environment variables:
 
 | Variable | Value |
 |---|---|
-| `AZURE_CLIENT_ID` | Deployment identity client ID |
+| `AZURE_CLIENT_ID` | `ledger-github-deploy` client ID |
 | `AZURE_TENANT_ID` | Azure directory ID |
 | `AZURE_SUBSCRIPTION_ID` | Subscription above |
 | `ACR_NAME` | Registry name without `.azurecr.io` |
 
 ```bash
+CLIENT_ID=$(az identity show --subscription "$SUBSCRIPTION" -g ledger \
+  -n ledger-github-deploy --query clientId -o tsv)
+TENANT_ID=$(az account show --subscription "$SUBSCRIPTION" --query tenantId -o tsv)
 gh variable set AZURE_CLIENT_ID --repo PaulMaddox/ledger --env azure-demo --body "$CLIENT_ID"
 gh variable set AZURE_TENANT_ID --repo PaulMaddox/ledger --env azure-demo --body "$TENANT_ID"
 gh variable set AZURE_SUBSCRIPTION_ID --repo PaulMaddox/ledger --env azure-demo --body "$SUBSCRIPTION"
 gh variable set ACR_NAME --repo PaulMaddox/ledger --env azure-demo --body "$ACR_NAME"
 ```
 
-After merging, **Deploy web app to Container Apps** runs on pushes to main or with
-**Run workflow** on main. It checks the guide, browser regressions and deployment
-script tests, builds and tests the image, then deploys. Serialized runs are not
-cancelled midway through draining. A failure leaves the app stopped or the failed
-revision available for diagnosis; it never starts a competing writer or deletes
-history to manufacture success.
+After merging, **Deploy web app to Container Apps** runs on main pushes or manually
+on main. It compiles Bicep, checks the guide/browser/deployment tests, builds and
+tests the image, then runs the drain script. Infrastructure is not reapplied by
+image deployments. Serialized runs are not cancelled midway through draining.
+A failure leaves the app stopped or the failed revision available for diagnosis,
+never starts a competing writer, and never deletes history to manufacture success.
 
-Container Apps supplies an `azurecontainerapps.io` hostname and trusted TLS
-automatically. No Azure DNS label, certificate email or certificate state volume
-is needed. Query the actual URL:
+Container Apps supplies a trusted `azurecontainerapps.io` HTTPS hostname. No DNS
+label, certificate email or certificate state volume is needed:
 
 ```bash
-az containerapp show -g ledger -n ledger-demo \
+az containerapp show --subscription "$SUBSCRIPTION" -g ledger -n ledger-demo \
   --query properties.configuration.ingress.fqdn -o tsv
 ```
 
 ## Storage, updates and recovery
 
-The container runs as UID/GID 10001. `deploy/container-app.yaml` mounts the SMB share
-at `/data` with matching ownership and restrictive file permissions. Ledger
-journals, fixture state and the **demo** signing key live under `/data/ledger`.
-Storage uses local redundancy and Azure-managed encryption at rest in Sweden
-Central; SMB is encrypted in transit. No out-of-country replication is configured.
-The environment's `ledger-demo-data` storage definition points to a fresh
-`ledger-demo-data` share, not the failed old app's `ledger-data` share.
-Account-key mounts require administrator rotation in the environment definition;
-no key is stored in source, workflow variables or the container image.
+The container runs as UID/GID 10001. `container-app.yaml` mounts SMB at `/data`
+with matching ownership and restrictive permissions. Journals, fixture state and
+the **demo** signing key live under `/data/ledger`. Storage is locally redundant
+and Azure-encrypted at rest in Sweden Central; SMB is encrypted in transit.
+No out-of-country replication is configured. The fresh `ledger-demo-data` share
+is isolated from the old failed app's `ledger-data` share.
 
-Azure Files is networked shared storage, not the former AKS single-node Azure disk.
-Keep byte-range locking enabled: **never use `nobrl`**, never mount the same share
-in another writer app, and never scale beyond one replica. Journal fsync and the
-directory lock are unchanged. Successful startup and replay demonstrate the demo's
-filesystem compatibility, not certification of production durability or failover
+Azure Files is networked shared storage, not an AKS single-node disk. **Never use
+`nobrl`**, mount the share in another writer app, or scale beyond one replica.
+Journal fsync and directory locking remain unchanged. Successful startup/replay
+demonstrates demo compatibility, not production durability or failover certification
 under arbitrary SMB/network failures.
 
-Multiple revision mode is intentional: single revision mode starts the new revision
-before stopping the old one. `scripts/deploy-container-app.py` instead deactivates
-every active revision and waits until all old replicas disappear before applying
-the new manifest. Min/max replicas are both one. Updates have deliberate downtime;
-replay must finish before readiness. Do not use portal rolling updates, traffic
-splits, independent deployments or replica scaling to bypass this procedure.
+Multiple revision mode is intentional: single revision mode starts the replacement
+before stopping the old writer. The drain script deactivates every active revision,
+waits for **all** old replicas to disappear, then deploys the new revision.
+Min/max replicas are one. Updates have deliberate downtime, and replay must finish
+before readiness. Do not use portal rolling updates, traffic splits, independent
+deployments or scaling to bypass this procedure.
 
-The share survives app revisions and restarts. Deleting the share or storage
-account destroys retained data; no deployment command does that. Protect storage,
-monitor quota and design in-country backups before relying on retained history.
-Administrator reset remains an explicitly destructive demo action.
+The share survives revisions/restarts. Deleting it or its storage account destroys
+retained data; no deployment command does that. Protect storage, monitor quota and
+design in-country backups before relying on retained history. Administrator reset
+remains an explicitly destructive demo action.
 
-For diagnostics without exporting files or private keys:
+For diagnostics without exporting journals or private keys:
 
 ```bash
-az containerapp revision list -g ledger -n ledger-demo -o table
-az containerapp replica list -g ledger -n ledger-demo --revision <revision>
-az containerapp logs show -g ledger -n ledger-demo --type system --tail 50
-az containerapp logs show -g ledger -n ledger-demo --container ledger --tail 50
+az containerapp revision list --subscription "$SUBSCRIPTION" -g ledger -n ledger-demo -o table
+az containerapp replica list --subscription "$SUBSCRIPTION" -g ledger -n ledger-demo --revision <revision>
+az containerapp logs show --subscription "$SUBSCRIPTION" -g ledger -n ledger-demo --type system --tail 50
+az containerapp logs show --subscription "$SUBSCRIPTION" -g ledger -n ledger-demo --container ledger --tail 50
+az containerapp env logs show --subscription "$SUBSCRIPTION" -g ledger -n ledger-private-env --tail 50
 ```
 
-Log Analytics is disabled for this demo environment; streaming logs are available.
-A failed HTTPS or replay check is a failed deployment. Fix the reported issue;
-never weaken verification, clear storage or repeatedly restart until it looks green.
-Rollback means deploying a compatible earlier image through the same drain script,
-with a new revision suffix, never reverting journal history.
+Log Analytics is disabled; streaming logs are available, although app logs may not
+exist before Azure provisions a revision. Capture the ARM deployment's operation
+error in that case. A failed HTTPS/replay check is a failed deployment. Fix the
+cause, never weaken verification, clear storage or restart repeatedly until green.
+Rollback uses a compatible earlier image through the same drain script, with a
+new revision suffix; it does not revert journal history.
 
 Screenshots are unchanged because deployment does not change the rendered console.
-The previously created AKS cluster can still incur charges; deleting it is a
-separate owner decision, not part of this deployment.
+The old AKS cluster can still incur charges; its deletion is a separate owner
+decision, not part of this deployment.

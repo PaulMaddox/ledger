@@ -159,10 +159,15 @@ requires a secure context with WebCrypto (HTTPS or localhost).
 
 The [Container Apps deployment instructions](deploy/README.md) configure `ledger-demo`
 in resource group `ledger`, Sweden Central, using GitHub Actions and Azure
-OIDC (no stored Azure password). After the one-time setup, pushes to `main` build and
+OIDC (no stored Azure password). Bicep declares the one-time infrastructure and
+bootstrap app; normal releases use the single-writer drain script, not rolling
+infrastructure updates. After setup, pushes to `main` build and
 test a container, deploy it with persistent Azure Files storage, and publish an
 address with Azure-managed HTTPS. Storage remains private: a VNet-connected
 `ledger-private-env` reaches Azure Files through a private endpoint and private DNS.
+Image pulls also use registry Private Link. Default-deny subnet egress permits only
+private dependencies, DNS and required Azure platform HTTPS; an explicit NAT gateway
+provides the permitted outbound path without opening general internet access.
 The workflow reports the public URL. ACR Tasks can
 build the image without local Docker, including from a Windows checkout.
 

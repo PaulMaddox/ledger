@@ -122,6 +122,13 @@ jobs:
       - name: Check single-writer deployment handover
         run: python3 -m unittest discover -s scripts -p 'test_deploy_container_app.py'
 
+      - name: Compile Container Apps infrastructure
+        run: |
+          set -euo pipefail
+          for template in deploy/infra.bicep deploy/bootstrap.bicep deploy/egress.bicep; do
+            az bicep build --file "$template" --stdout > /dev/null
+          done
+
   setup:
     # Proves the README's one-command setup and one-command demo work, by running
     # them exactly as documented on fresh Ubuntu and Windows machines.
