@@ -5,8 +5,9 @@ Deploys the web console, not the CLI demo, to cluster **ledger**, resource group
 `9600a075-454a-4e6b-82d4-58bef3e21b4a`. Wait until cluster provisioning is `Succeeded`.
 The cluster uses Microsoft Entra authentication with Azure RBAC.
 
-**Anyone on the internet can use every persona, move synthetic money and run the
-simulator. Never put real accounts, private customer data or production keys here.**
+**Anyone on the internet can use every persona, move synthetic money, run the
+simulator, damage the main store with Chaos Monkey, and permanently clear its history
+with Administrator reset. Never put real accounts, private customer data or production keys here.**
 HTTPS makes browser verification work; it does not add authentication or make this
 a production wallet. Azure load balancer, disk, registry and compute incur charges.
 

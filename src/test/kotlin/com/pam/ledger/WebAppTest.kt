@@ -78,6 +78,15 @@ class WebAppTest {
         try { body(app) } finally { app.close() }
     }
 
+    private fun reset(app: LedgerWebApp) {
+        val result = call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
+        assertEquals(200, result.first, result.second)
+        assertTrue(call(app, "GET", "overview").second.contains("\"available\":true"))
+    }
+
+    private fun chaos(app: LedgerWebApp, scenario: String) =
+        call(app, "POST", "chaos", mapOf("scenario" to scenario, "confirmation" to "CHAOS ON MAIN STORE"))
+
     private fun rawRequest(
         app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null,
         path: String = if (method == "POST") "/api/players/alice/deposit" else "/api/overview",
@@ -94,6 +103,178 @@ class WebAppTest {
             }
             socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
+        }
+    }
+
+    @Test
+    fun `console keeps the tamper lab in chaos monkey instead of regulator`() = withApp { app ->
+        val page = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/")).GET().build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200, page.statusCode())
+        val html = page.body()
+        val regulator = html.substringAfter("id=\"view-regulator\"").substringBefore("</section>")
+        val chaos = html.substringAfter("id=\"view-chaos\"").substringBefore("</section>")
+        assertFalse(regulator.contains("data-tamper"), regulator)
+        for (mode in listOf("edit", "rewrite", "truncate")) {
+            assertTrue(chaos.contains("data-tamper=\"$mode\""), chaos)
+        }
+        assertTrue(chaos.contains("id=\"tamperResult\""), chaos)
+    }
+
+    @Test
+    fun `administrator exposes real host counters and committed throughput`() = withApp { app ->
+        repeat(20) { i ->
+            assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "metrics-$i")).first)
+        }
+        Thread.sleep(1_200)
+        val (status, body) = call(app, "GET", "administrator")
+        assertEquals(200, status, body)
+        listOf("processCpu", "systemCpu", "heapUsed", "heapMax", "storageTotal", "storageFree",
+            "journalBytes", "readBytesPerSec", "writeBytesPerSec", "threads", "gcMillis", "readModelLag").forEach {
+            assertTrue(body.contains("\"$it\":"), "missing $it: $body")
+        }
+        val heap = Regex("\"heapUsed\":(\\d+)").findAll(body).last().groupValues[1].toLong()
+        assertTrue(heap > 0)
+        val disk = Regex("\"journalBytes\":(\\d+)").findAll(body).last().groupValues[1].toLong()
+        assertEquals(Files.size(app.directory.resolve(Ledger.ENTRIES_FILE)) +
+            Files.size(app.directory.resolve(Ledger.CHECKPOINTS_FILE)), disk)
+        val rates = Regex("\"tps\":([0-9.E+-]+)").findAll(body).map { it.groupValues[1].toDouble() }.toList()
+        assertTrue(rates.any { it > 0 }, "committed writes must appear in throughput: $body")
+        assertFalse(body.contains("NaN") || body.contains("Infinity"), body)
+    }
+
+    @Test
+    fun `clearing demo storage requires confirmation and preserves unrelated files and signing key`() = withApp { app ->
+        val marker = app.directory.resolve("keep-me.txt")
+        Files.writeString(marker, "not ledger data")
+        val key = Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))
+        call(app, "POST", "players/alice/deposit", mapOf("amount" to 100, "ref" to "before-reset"))
+        call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "before-reset-bet"))
+        assertEquals(400, call(app, "POST", "administrator/clear", mapOf("confirmation" to "clear")).first)
+        assertTrue(call(app, "GET", "players/alice").second.contains("before-reset"))
+        assertEquals(403, call(app, "POST", "administrator/clear",
+            mapOf("confirmation" to "CLEAR DEMO STORAGE"), withOrigin = false).first)
+        assertEquals(404, call(app, "GET", "administrator/clear").first)
+        val reset = call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
+        assertEquals(200, reset.first, reset.second)
+        assertTrue(reset.second.contains("\"cleared\":true"), reset.second)
+        assertEquals("not ledger data", Files.readString(marker))
+        assertTrue(key.contentEquals(Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))))
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+        val player = call(app, "GET", "players/alice").second
+        assertTrue(player.contains("\"cash\":\"10000\""), player)
+        assertFalse(player.contains("before-reset"), player)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 100, "ref" to "after-reset")).first)
+    }
+
+    @Test
+    fun `reset drains a running simulator while requests race its lifecycle`() = withApp { app ->
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "action" to "start", "customers" to 16, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+        val outcomes = race(8) { i ->
+            if (i == 0) call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
+            else call(app, "GET", "operator")
+        }.map { it.getOrThrow() }
+        assertEquals(200, outcomes[0].first, outcomes[0].second)
+        outcomes.drop(1).forEach { (status, body) ->
+            assertTrue(status == 200 || (status == 409 && body.contains("storage_reset")) ||
+                (status == 503 && body.contains("ledger_unavailable")), "$status $body")
+        }
+        Thread.sleep(200)
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+        assertTrue(call(app, "GET", "simulator").second.contains("STOPPED"))
+        assertFalse(call(app, "GET", "players").second.contains("sim-"))
+        val audit = call(app, "POST", "regulator/audit")
+        assertEquals(200, audit.first, audit.second)
+        assertTrue(audit.second.contains("\"ok\":true"), audit.second)
+    }
+
+    @Test
+    fun `every chaos experiment targets the main store and reset recovers stopped services`() = withApp { app ->
+        val marker = app.directory.resolve("keep-through-chaos.txt")
+        Files.writeString(marker, "unrelated file")
+        val key = Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))
+        for (scenario in listOf("torn-write", "checksum", "rollback", "retries", "double-spend", "settlement", "signer-outage")) {
+            val beforeBytes = Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))
+            val result = chaos(app, scenario)
+            assertEquals(200, result.first, result.second)
+            assertTrue(result.second.contains("\"passed\":true"), result.second)
+            assertTrue(result.second.contains("\"scope\":\"MAIN DATA STORE\""), result.second)
+            val available = scenario in setOf("torn-write", "retries", "double-spend", "settlement")
+            assertTrue(result.second.contains("\"available\":$available"), result.second)
+            val overview = call(app, "GET", "overview")
+            assertEquals(200, overview.first, overview.second)
+            assertTrue(overview.second.contains("\"available\":$available"), overview.second)
+            assertEquals(200, call(app, "GET", "administrator").first)
+            assertEquals(200, call(app, "GET", "chaos").first)
+            if (scenario == "torn-write" || scenario == "signer-outage") {
+                assertTrue(beforeBytes.contentEquals(Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))))
+            } else assertFalse(beforeBytes.contentEquals(Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))),
+                "experiment $scenario must alter the main journal")
+            if (available) {
+                assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+                if (scenario != "torn-write") {
+                    assertTrue(call(app, "GET", "players").second.contains("chaos-"), "main-store chaos customers must be visible")
+                }
+            } else {
+                assertEquals(503, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "blocked")).first)
+                assertEquals(503, chaos(app, "retries").first)
+                assertFalse(call(app, "GET", "administrator").second.contains("\"heapUsed\""), "stopped telemetry must not claim to be live")
+            }
+            reset(app)
+            assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+            assertFalse(call(app, "GET", "chaos").second.contains("\"scope\":\"MAIN DATA STORE\""))
+            assertEquals("unrelated file", Files.readString(marker))
+            assertTrue(key.contentEquals(Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))))
+            Files.list(app.directory).use { files ->
+                assertFalse(files.anyMatch { it.fileName.toString().startsWith("${Ledger.ENTRIES_FILE}.torn-") })
+            }
+        }
+    }
+
+    @Test
+    fun `successive main-store races keep their new customers and history without idempotency collisions`() = withApp { app ->
+        for (scenario in listOf("retries", "retries", "double-spend", "settlement")) {
+            val result = chaos(app, scenario)
+            assertEquals(200, result.first, result.second)
+            assertTrue(result.second.contains("\"passed\":true"), result.second)
+            assertTrue(result.second.contains("\"available\":true"), result.second)
+        }
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":21"))
+        val players = call(app, "GET", "players").second
+        assertEquals(4, Regex("\"id\":\"chaos-").findAll(players).count(), players)
+        val history = call(app, "GET", "chaos").second
+        assertEquals(4, Regex("\"scope\":\"MAIN DATA STORE\"").findAll(history).count(), history)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
+    @Test
+    fun `main store chaos requires confirmation and same origin without stopping services`() = withApp { app ->
+        val before = Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))
+        assertEquals(400, call(app, "POST", "chaos", mapOf("scenario" to "checksum")).first)
+        assertEquals(400, call(app, "POST", "chaos", mapOf("scenario" to "checksum", "confirmation" to "wrong")).first)
+        assertEquals(403, call(app, "POST", "chaos", mapOf("scenario" to "checksum",
+            "confirmation" to "CHAOS ON MAIN STORE"), withOrigin = false).first)
+        assertEquals(400, chaos(app, "erase-host").first)
+        assertTrue(before.contentEquals(Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))))
+        assertTrue(call(app, "GET", "overview").second.contains("\"available\":true"))
+    }
+
+    @Test
+    fun `corrupted main store remains resettable after app restart without deleting the evidence`() {
+        val dir = tempDir()
+        val first = LedgerWebApp.start(WebOptions(port = 0, dataDir = dir))
+        try { assertTrue(chaos(first, "checksum").second.contains("\"available\":false")) }
+        finally { first.close() }
+        val damaged = Files.readAllBytes(dir.resolve(Ledger.ENTRIES_FILE))
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = dir)).use { app ->
+            assertTrue(call(app, "GET", "overview").second.contains("\"available\":false"))
+            assertTrue(damaged.contentEquals(Files.readAllBytes(dir.resolve(Ledger.ENTRIES_FILE))))
+            assertEquals(200, call(app, "GET", "administrator").first)
+            reset(app)
+            assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
         }
     }
 
@@ -176,17 +357,22 @@ class WebAppTest {
         val audit = call(app, "POST", "regulator/audit").second
         assertTrue(audit.contains("\"ok\":true"), audit)
         for (mode in listOf("edit", "rewrite", "truncate")) {
-            val r = call(app, "POST", "regulator/tamper", mapOf("mode" to mode)).second
+            val response = call(app, "POST", "regulator/tamper", mapOf("mode" to mode, "confirmation" to "CHAOS ON MAIN STORE"))
+            assertEquals(200, response.first, response.second)
+            val r = response.second
             assertTrue(r.contains("\"ok\":false"), "tamper mode '$mode' must be detected: $r")
+            assertTrue(r.contains("\"available\":false"), r)
+            assertEquals(503, call(app, "POST", "regulator/audit").first)
+            reset(app)
         }
-        // The live ledger was untouched by the tamper lab.
+        // Reset, not an invisible snapshot restore, creates a fresh verifiable ledger.
         assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
         val proof = call(app, "GET", "proof/inclusion", mapOf("seq" to 3))
         assertEquals(200, proof.first)
         assertTrue(proof.second.contains("\"verified\":true"), proof.second)
     }
 
-    /** Tamper demonstrations must attack signed history even as new unsigned entries arrive. */
+    /** Main-store tamper must drain concurrent simulation, anchor its prefix, and refuse recovery. */
     @Test
     fun `every tamper mode is caught while the simulator appends`() = withApp { app ->
         repeat(10) { call(app, "POST", "players/bob/deposit", mapOf("amount" to 100, "ref" to "signed-$it")) }
@@ -194,9 +380,19 @@ class WebAppTest {
         try {
             repeat(10) {
                 for (mode in listOf("edit", "rewrite", "truncate")) {
-                    val (status, body) = call(app, "POST", "regulator/tamper", mapOf("mode" to mode))
+                    assertEquals(200, call(app, "POST", "simulator", mapOf("customers" to 20, "opsPerMinute" to 600,
+                        "autoFixtures" to "false", "action" to "start")).first)
+                    val outcomes = race(2) { i ->
+                        if (i == 0) call(app, "POST", "regulator/tamper",
+                            mapOf("mode" to mode, "confirmation" to "CHAOS ON MAIN STORE"))
+                        else call(app, "GET", "operator")
+                    }.map { it.getOrThrow() }
+                    val (status, body) = outcomes[0]
                     assertEquals(200, status, body)
                     assertTrue(body.contains("\"ok\":false"), "concurrent '$mode' must change signed history: $body")
+                    assertTrue(body.contains("\"available\":false"), body)
+                    assertTrue(outcomes[1].first in setOf(200, 409, 503), outcomes[1].toString())
+                    reset(app)
                 }
             }
         } finally {

@@ -233,10 +233,13 @@ function poll(fn, ms) {
 poll(async () => {
   const o = await api("overview");
   $("ledgerId").textContent = o.ledgerId;
-  $("tipEntries").textContent = int.format(o.entries);
+  $("tipEntries").textContent = o.entries == null ? "–" : int.format(o.entries);
   $("tipChain").textContent = short(o.chainHead);
   $("tipSigned").textContent = o.latestCheckpoint == null ? "–" : int.format(o.latestCheckpoint);
   $("simDot").className = "simdot " + o.simulator;
+  $("storeStatus").textContent = o.available === false ?
+    "Main ledger stopped. Open Administrator to clear storage and start again; damaged files remain for inspection." :
+    "Demonstration only: no authentication. The tabs switch views, they do not control access.";
 }, 1000);
 
 // ============================== customer ==============================
@@ -425,7 +428,8 @@ $("raceBtn").addEventListener("click", async () => {
 let stopCustomer = [];
 views.customer = {
   enter() {
-    loadPlayers(); loadCustFixtures();
+    loadPlayers().catch(e => { $("playerCount").textContent = e.message || String(e); });
+    loadCustFixtures().catch(e => say($("betResult"), false, errText(e)));
     stopCustomer = [poll(refreshPlayer, 1500), poll(loadCustFixtures, 4000), poll(loadPlayers, 5000)];
   },
   leave() { stopCustomer.forEach(f => f()); },
@@ -433,7 +437,7 @@ views.customer = {
 
 // ============================== operator ==============================
 /** Draw a line chart sized to the SVG's real width (so text is never stretched). */
-function lineChart(svg, values, fmt) {
+function lineChart(svg, values, fmt, age = "3 min ago") {
   const W = Math.max(200, svg.clientWidth || 400), H = 160, padL = 64, padB = 18, padT = 10;
   svg.setAttribute("viewBox", `0 0 ${W} ${H}`);
   svg.setAttribute("preserveAspectRatio", "none");
@@ -451,7 +455,7 @@ function lineChart(svg, values, fmt) {
     `<polygon class="area" points="${x(0)},${y(Math.max(lo, 0))} ${pts} ${x(values.length - 1)},${y(Math.max(lo, 0))}"/>` +
     `<polyline class="line" points="${pts}"/>` +
     `<circle class="last" cx="${x(values.length - 1)}" cy="${y(values[values.length - 1])}" r="3.5"/>` +
-    `<text x="${padL}" y="${H - 2}">3 min ago</text><text x="${W - 8}" y="${H - 2}" text-anchor="end">now</text>`;
+    `<text x="${padL}" y="${H - 2}">${esc(age)}</text><text x="${W - 8}" y="${H - 2}" text-anchor="end">now</text>`;
 }
 
 async function refreshOperator() {
@@ -566,13 +570,8 @@ $("auditBtn").addEventListener("click", async () => {
   catch (e) { $("auditResult").innerHTML = `<div class="verdict bad">${errText(e)}</div>`; }
   $("auditBtn").disabled = false;
 });
-document.querySelectorAll("[data-tamper]").forEach(b => b.addEventListener("click", async () => {
-  $("tamperResult").innerHTML = `<p class="hint">Corrupting a copy and auditing it…</p>`;
-  try {
-    const r = await api("regulator/tamper", { method: "POST", params: { mode: b.dataset.tamper } });
-    $("tamperResult").innerHTML = (r.ok ? `<div class="verdict bad">The verifier did not notice. This would be a bug.</div>` : `<div class="verdict ok">Caught. ${esc(r.problems[0])}</div>`) + `<p>${esc(r.note)}</p>`;
-  } catch (e) { $("tamperResult").innerHTML = `<div class="verdict bad">${errText(e)}</div>`; }
-}));
+document.querySelectorAll("[data-tamper]").forEach(b =>
+  b.addEventListener("click", () => runMainChaos(b.dataset.tamper, $("tamperResult"))));
 
 $("consForm").addEventListener("submit", async e => {
   e.preventDefault();
@@ -760,7 +759,148 @@ views.simulator = {
   leave() { stopSim.forEach(f => f()); },
 };
 
+// ============================== administrator ==============================
+const bytesText = value => {
+  if (value == null) return "Unavailable";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let n = value, unit = 0;
+  while (Math.abs(n) >= 1024 && unit < units.length - 1) { n /= 1024; unit++; }
+  return `${n.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+};
+const percentText = value => value == null ? "Unavailable" : `${value.toFixed(1)}%`;
+let stopAdmin = null;
+async function refreshAdmin() {
+  try {
+    const data = await api("administrator");
+    if (current !== "administrator") return;
+    $("adminCharts").hidden = data.available === false;
+    $("adminReset").style.order = data.available === false ? "-1" : "";
+    $("adminMode").textContent = data.available === false ?
+      "Ledger stopped · reset remains available" : "Server-side samples every second · up to 3 minutes of history";
+    if (data.available === false) {
+      $("adminKpis").innerHTML = "";
+      $("adminDetails").innerHTML = `<dt>Data directory</dt><dd>${esc(data.directory)}</dd><dt>Journal files on disk</dt><dd>${esc(bytesText(data.journalBytes))}</dd><dt>Storage available</dt><dd>${esc(bytesText(data.storageFree))}</dd>`;
+      $("adminScope").textContent = data.ioScope;
+      say($("adminStatus"), false, `${esc(data.reason)} Use Clear demo storage below to start again.`);
+      return;
+    }
+    const s = data.series, last = s[s.length - 1];
+    if (!last) { say($("adminStatus"), null, "Collecting server measurements…"); return; }
+    const kpi = (name, value, note) => `<div class="kpi"><span>${esc(name)}</span><b>${esc(value)}</b><small>${esc(note)}</small></div>`;
+    $("adminKpis").innerHTML = [
+      kpi("Transactions / sec", last.tps.toFixed(1), "committed entries, not attempts"),
+      kpi("JVM CPU", percentText(last.processCpu), `Host CPU ${percentText(last.systemCpu)}`),
+      kpi("Heap used", bytesText(last.heapUsed), `Limit ${bytesText(last.heapMax)}`),
+      kpi("Storage available", bytesText(last.storageFree), `Filesystem ${bytesText(last.storageTotal)}`),
+      kpi("Journal size", bytesText(last.journalBytes), `${int.format(last.entries)} durable entries`),
+      kpi("Storage writes", last.writeBytesPerSec == null ? "Unavailable" : bytesText(last.writeBytesPerSec) + "/s", "JVM physical I/O, not just journal"),
+      kpi("Platform threads", int.format(last.threads), `Peak ${int.format(last.peakThreads)}; excludes virtual threads`),
+      kpi("Read-model lag", int.format(last.readModelLag), "entries not yet indexed"),
+    ].join("");
+    const chart = (id, key, fmt) => {
+      const svg = $(id);
+      if (last[key] == null) {
+        svg.innerHTML = `<text x="12" y="80">Counter unavailable for this interval</text>`;
+      } else {
+        let start = 0;
+        s.forEach((p, i) => { if (p[key] == null) start = i + 1; });
+        const available = s.slice(start);
+        lineChart(svg, available.map(p => p[key]), fmt, `${Math.round((last.t - available[0].t) / 1000)} sec ago`);
+      }
+    };
+    chart("adminCpu", "processCpu", percentText);
+    chart("adminHeap", "heapUsed", bytesText);
+    chart("adminTps", "tps", n => n.toFixed(1));
+    chart("adminStorage", "storageFree", bytesText);
+    chart("adminRead", "readBytesPerSec", n => bytesText(n) + "/s");
+    chart("adminWrite", "writeBytesPerSec", n => bytesText(n) + "/s");
+    const detail = (name, value) => `<dt>${esc(name)}</dt><dd>${esc(value)}</dd>`;
+    $("adminDetails").innerHTML = [
+      detail("Data directory", data.directory),
+      detail("JVM uptime", `${Math.floor(last.uptimeMillis / 1000)} seconds`),
+      detail("Available processors", last.processors),
+      detail("Host load average", last.loadAverage == null ? "Unavailable" : last.loadAverage.toFixed(2)),
+      detail("Host memory free / total", `${bytesText(last.systemMemoryFree)} / ${bytesText(last.systemMemoryTotal)}`),
+      detail("Heap committed", bytesText(last.heapCommitted)),
+      detail("Non-heap memory", bytesText(last.nonHeapUsed)),
+      detail("Garbage collections", `${last.gcCount ?? "Unavailable"} / ${last.gcMillis ?? "Unavailable"} ms cumulative collection time`),
+    ].join("");
+    $("adminScope").textContent = data.ioScope;
+    say($("adminStatus"), null, `Updated ${esc(timeOf(last.t))}. CPU is normalized across available processors; memory and filesystem totals reflect the host/container.`);
+  } catch (e) { say($("adminStatus"), false, `Telemetry unavailable: ${errText(e)}`); }
+}
+views.administrator = {
+  enter() { stopAdmin = poll(refreshAdmin, 1000); },
+  leave() { if (stopAdmin) stopAdmin(); },
+};
+$("clearReveal").addEventListener("click", () => {
+  $("clearForm").hidden = false; $("clearReveal").hidden = true; $("clearConfirmation").focus();
+});
+$("clearCancel").addEventListener("click", () => {
+  $("clearForm").hidden = true; $("clearReveal").hidden = false; $("clearConfirmation").value = ""; $("clearSubmit").disabled = true; $("clearReveal").focus();
+});
+$("clearConfirmation").addEventListener("input", () => { $("clearSubmit").disabled = $("clearConfirmation").value !== "CLEAR DEMO STORAGE"; });
+$("clearForm").addEventListener("submit", async e => {
+  e.preventDefault();
+  $("clearSubmit").disabled = true; $("clearCancel").disabled = true;
+  $("clearConfirmation").disabled = true;
+  say($("clearResult"), null, "Stopping services and clearing demo history…");
+  try {
+    await api("administrator/clear", { method: "POST", params: { confirmation: $("clearConfirmation").value } });
+    location.reload(); // Drop all customer, proof and simulator caches from the previous ledger.
+  } catch (error) {
+    say($("clearResult"), false, `Reset failed: ${errText(error)}. Refresh to check whether the ledger is available before taking further action.`);
+    $("clearCancel").disabled = false;
+    $("clearConfirmation").disabled = false;
+  }
+});
+
+// ============================== chaos monkey ==============================
+let stopChaos = null, chaosSubmitting = false, chaosAvailable = false;
+function updateChaosControls() {
+  const enabled = chaosAvailable && !chaosSubmitting && $("chaosConfirmation").value === "CHAOS ON MAIN STORE";
+  document.querySelectorAll("[data-chaos], [data-tamper]").forEach(b => { b.disabled = !enabled; });
+}
+$("chaosConfirmation").addEventListener("input", updateChaosControls);
+async function refreshChaos() {
+  try {
+    const data = await api("chaos");
+    if (current !== "chaos") return;
+    chaosAvailable = data.available;
+    say($("chaosStoreStatus"), data.available ? null : false, data.available ?
+      "Main store available. Each experiment stops the simulator; changes remain in the real ledger." :
+      `${esc(data.reason)} <a href="#administrator">Reset the main store</a> before running another experiment.`);
+    const enabled = chaosAvailable && !chaosSubmitting && $("chaosConfirmation").value === "CHAOS ON MAIN STORE";
+    renderControls($("chaosScenarios"), data.scenarios.map(s =>
+      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" ${enabled ? "" : "disabled"}>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join(""), ["chaos"]);
+    updateChaosControls();
+    $("chaosHistory").innerHTML = data.history.length ? data.history.map(r =>
+      `<article><div class="panel-head"><b>${esc(r.name)}</b><span class="pill ${r.passed ? "ok" : "bad"}">${r.passed ? "Expected protection observed" : "Protection failed"}</span></div><p>${esc(r.evidence)}</p><p class="hint">${esc(timeOf(r.t))} · ${r.millis} ms · ${esc(r.scope)} · ${r.available ? "reopened" : "STOPPED - reset required"}</p></article>`).join("") :
+      `<p class="hint">No experiments yet. Run a scenario to see its measured outcome here.</p>`;
+  } catch (e) { say($("chaosResult"), false, `Chaos lab unavailable: ${errText(e)}`); }
+}
+$("chaosScenarios").addEventListener("click", async e => {
+  const button = e.target.closest("[data-chaos]");
+  if (button) await runMainChaos(button.dataset.chaos, $("chaosResult"));
+});
+async function runMainChaos(scenario, target) {
+  if (chaosSubmitting || !chaosAvailable || $("chaosConfirmation").value !== "CHAOS ON MAIN STORE") return;
+  chaosSubmitting = true;
+  const confirmation = $("chaosConfirmation").value;
+  $("chaosConfirmation").value = "";
+  updateChaosControls();
+  say(target, null, "Stopping services and running against the MAIN DATA STORE…");
+  try {
+    const r = await api("chaos", { method: "POST", params: { scenario, confirmation } });
+    say(target, r.passed, `<div class="verdict ${r.passed ? "ok" : "bad"}">${esc(r.name)}: ${r.passed ? "expected protection observed" : "protection FAILED"}</div><p>${esc(r.evidence)}</p>${r.available ? "" : '<a href="#administrator">Clear storage to start again</a>'}`);
+  } catch (error) { say(target, false, `Experiment failed to complete: ${errText(error)}. Check Administrator for storage status and reset.`); }
+  finally { chaosSubmitting = false; await refreshChaos(); }
+}
+views.chaos = {
+  enter() { stopChaos = poll(refreshChaos, 1500); },
+  leave() { if (stopChaos) stopChaos(); },
+};
+
 // ============================== start ==============================
 const firstView = location.hash.slice(1);
-if (firstView === "customer" || !views[firstView]) loadPlayers();
 show(firstView || "customer");
