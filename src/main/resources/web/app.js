@@ -206,7 +206,9 @@ function selectPlayer(id) {
 }
 
 async function refreshPlayer() {
-  const p = await api("players/" + encodeURIComponent(player));
+  const requestedPlayer = player;
+  const p = await api("players/" + encodeURIComponent(requestedPlayer));
+  if (player !== requestedPlayer) return;
   $("accName").textContent = p.id;
   $("accAutomated").textContent = p.automated ? "Automated customer (simulator)" : "Customer";
   $("accCash").textContent = eur(p.cash);
