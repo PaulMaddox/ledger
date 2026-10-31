@@ -25,6 +25,141 @@ function context(fetch) {
   return c;
 }
 
+function pollingContext() {
+  const fixtures = ["F1", "F2"].map(id => ({
+    id, home: "Home", away: "Away", odds: { HOME: 200, DRAW: 300, AWAY: 250 },
+    openBets: 2, staked: "200", liability: { HOME: "400", DRAW: "600", AWAY: "500" },
+  }));
+  const customer = {
+    id: "alice", cash: "100", openBets: "200", entries: 2,
+    bets: ["B1", "B2"].map(betId => ({ betId, fixture: "F1", selection: "HOME", odds: 200, stake: "100", potentialPayout: "200", open: true })),
+    history: [1, 2].map(seq => ({ seq, kind: "DEPOSIT", time: "2026-01-01T00:00:00Z", postings: [] })),
+  };
+  const responses = {
+    "/api/players?q=": { players: [{ id: "alice", cash: "100" }, { id: 'bob"[]', cash: "200" }], total: 2 },
+    "/api/players/alice": customer, "/api/fixtures": fixtures,
+  };
+  const c = context(async path => ({ ok: true, json: async () => responses[path] }));
+  const elements = new Map();
+  const document = { body: {}, activeElement: null, getElementById: element, querySelectorAll: () => [] };
+  document.activeElement = document.body;
+  function element(id) {
+    if (!elements.has(id)) {
+      let html = "";
+      const el = {
+        value: "", controls: [], addEventListener() {},
+        contains(active) { return this.controls.includes(active); },
+        querySelectorAll(selector) { return this.controls.filter(b => b.matches(selector)); },
+        get innerHTML() { return html; },
+        set innerHTML(value) {
+          if (this.contains(document.activeElement)) document.activeElement = document.body;
+          html = value;
+          this.controls = [...value.matchAll(/<button\b([^>]*)>/g)].map(([, attributes]) => {
+            const data = Object.fromEntries([...attributes.matchAll(/data-([\w-]+)="([^"]*)"/g)].map(([, key, val]) =>
+              [key, val.replace(/&(amp|lt|gt|quot|#39);/g, (_, entity) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[entity]))]));
+            return {
+              getAttribute: name => data[name.slice(5)] ?? null,
+              matches: selector => [...selector.matchAll(/\[data-([\w-]+)\]/g)].every(([, key]) => key in data),
+              focus(options) { document.activeElement = this; this.focusOptions = options; },
+            };
+          });
+        },
+      };
+      elements.set(id, el);
+    }
+    return elements.get(id);
+  }
+  c.document = document;
+  vm.runInContext(source.slice(source.indexOf('let player = "alice"'), source.indexOf("// Five devices at once:")), c);
+  vm.runInContext(source.slice(source.indexOf("async function refreshFixtures()"), source.indexOf('$("fixtureTable").addEventListener')), c);
+  return { c, document, element, responses, customer, fixtures };
+}
+
+for (const [name, renderer, container, keys] of [
+  ["customer picker", "loadPlayers", "playerList", ["player"]],
+  ["cash-out", "refreshPlayer", "betTable", ["player", "cashout"]],
+  ["history verification", "refreshPlayer", "historyTable", ["player", "verify"]],
+  ["fixture price", "loadCustFixtures", "custFixtures", ["fx", "sel"]],
+  ["operator settlement", "refreshFixtures", "fixtureTable", ["settle", "result"]],
+]) {
+  test(`${name} polling retains focus by identity through unchanged and reordered updates`, async () => {
+    const s = pollingContext();
+    await s.c[renderer]();
+    const el = s.element(container);
+    const original = el.controls.at(-1);
+    const identity = keys.map(k => original.getAttribute(`data-${k}`));
+    original.focus();
+    await s.c[renderer]();
+    let active = s.document.activeElement;
+    assert.notEqual(active, original, "exercise real replacement rather than retaining the old mock");
+    assert.deepEqual(keys.map(k => active.getAttribute(`data-${k}`)), identity);
+    assert.equal(active.focusOptions.preventScroll, true);
+
+    s.responses["/api/players?q="].players.reverse();
+    s.responses["/api/players?q="].players[0].cash = "300";
+    s.customer.bets.reverse();
+    s.customer.history.reverse();
+    s.customer.history.unshift({ seq: 3, kind: "DEPOSIT", time: "2026-01-01T00:00:00Z", postings: [] });
+    s.fixtures.reverse();
+    s.fixtures[0].odds.AWAY = 400;
+    s.fixtures[0].openBets++;
+    await s.c[renderer]();
+    active = s.document.activeElement;
+    assert.deepEqual(keys.map(k => active.getAttribute(`data-${k}`)), identity);
+
+    s.responses["/api/players?q="].players = [];
+    s.customer.bets = [];
+    s.customer.history = [];
+    s.responses["/api/fixtures"] = [];
+    await s.c[renderer]();
+    assert.equal(s.document.activeElement, s.document.body, "removed controls must not focus a different identity");
+  });
+}
+
+test("operator focus follows the recorded result to Resume, but not a different result", async () => {
+  const s = pollingContext();
+  await s.c.refreshFixtures();
+  s.element("fixtureTable").controls.at(-1).focus();
+  s.fixtures[1].result = "VOID";
+  await s.c.refreshFixtures();
+  assert.equal(s.document.activeElement.getAttribute("data-result"), "VOID");
+  s.fixtures[1].result = "HOME";
+  await s.c.refreshFixtures();
+  assert.equal(s.document.activeElement, s.document.body);
+});
+
+test("customer refresh does not transfer focus to another customer's control", async () => {
+  for (const container of ["betTable", "historyTable"]) {
+    const s = pollingContext();
+    await s.c.refreshPlayer();
+    s.element(container).controls[0].focus();
+    s.responses["/api/players/bob"] = { ...s.customer, id: "bob" };
+    vm.runInContext('player = "bob"', s.c);
+    await s.c.refreshPlayer();
+    assert.equal(s.document.activeElement, s.document.body);
+  }
+});
+
+test("polling restores the current focus, not where it was before the response arrived", async () => {
+  const s = pollingContext();
+  await s.c.loadPlayers();
+  const controls = s.element("playerList").controls;
+  controls[0].focus();
+  let finish;
+  s.responses["/api/players?q="] = new Promise(resolve => { finish = resolve; });
+  const pending = s.c.loadPlayers();
+  controls[1].focus();
+  finish({ players: [{ id: "alice", cash: "100" }, { id: 'bob"[]', cash: "200" }], total: 2 });
+  await pending;
+  assert.equal(s.document.activeElement.getAttribute("data-player"), 'bob"[]');
+
+  const outside = { value: "typing" };
+  s.document.activeElement = outside;
+  await s.c.loadPlayers();
+  assert.equal(s.document.activeElement, outside);
+  assert.equal(outside.value, "typing");
+});
+
 test("entry decoder preserves Long precision and rejects malformed records", () => {
   const c = context();
   const bytes = entryBytes(9223372036854775807n);
@@ -167,6 +302,56 @@ test("resizing the simulator wall preserves retained customers' activity and fil
   c.buildWall(600);
   c.buildWall(700);
   assert.match(elements.get("wallNote").textContent, /of 700/);
+});
+
+test("simulator action errors survive refreshes and wall resizing until a successful action", async () => {
+  const c = context();
+  const elements = new Map();
+  c.document = {
+    getElementById: id => {
+      if (!elements.has(id)) elements.set(id, {
+        dataset: {}, value: "", className: "", innerHTML: "",
+        replaceChildren(frag) { this.children = frag.children; },
+      });
+      return elements.get(id);
+    },
+    createDocumentFragment: () => ({ children: [], appendChild(el) { this.children.push(el); } }),
+    createElement: () => ({ dataset: {}, querySelector: () => ({}) }),
+  };
+  c.performance = { now: () => 1000 };
+  const state = { customers: 2, state: "STOPPED", succeeded: 0, rejectedForFunds: 0, rejectedOther: 0 };
+  let error = "customers must be 1..20000";
+  c.api = async (path, options) => {
+    if (options && error) throw new Error(error);
+    return state;
+  };
+  vm.runInContext(source.slice(source.indexOf("const WALL_LIMIT"), source.indexOf('$("wallSearch").addEventListener')), c);
+  vm.runInContext(source.slice(source.indexOf("function simStat"), source.indexOf('$("simForm").addEventListener')), c);
+
+  await c.refreshSim();
+  const result = c.document.getElementById("simResult");
+  elements.get("simForm").dataset.dirty = "1";
+  await c.simAction("start", true);
+  assert.equal(result.innerHTML, error);
+  assert.match(result.className, /\bbad\b/);
+  assert.equal(elements.get("simForm").dataset.dirty, "1");
+  for (const customers of [2, 3, 501]) {
+    state.customers = customers;
+    await c.refreshSim();
+    assert.equal(result.innerHTML, error);
+    assert.match(elements.get("wallNote").textContent, /automated customer/);
+  }
+  error = "<invalid settings>";
+  await c.simAction(null, true);
+  assert.equal(result.innerHTML, "&lt;invalid settings&gt;");
+
+  error = null;
+  await c.simAction("start", true);
+  assert.equal(result.innerHTML, "");
+  assert.doesNotMatch(result.className, /\bbad\b/);
+  assert.equal(elements.get("simForm").dataset.dirty, undefined);
+  await c.refreshSim();
+  assert.equal(result.innerHTML, "");
 });
 
 test("simulator event polling waits for the customer wall to be built", async () => {
