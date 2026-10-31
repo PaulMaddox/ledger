@@ -520,6 +520,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
+  <p class="prose">Startup failures close acquired services and release the ledger's writer lock before reporting the original error.</p>
   <p class="prose">Automated customer IDs use locale-independent ASCII digits so browser tiles, events and ledger accounts refer to the same customers.</p>
   <p class="prose">Simulator money operations await their original ledger futures before recording acceptance or refusal. Delayed replies cannot appear as rejected transactions that later commit.</p>
   <p class="prose">Simulator seed deposits use stable customer-specific amounts. Restarting recognizes previously committed seed references, including older random seeds, without creating conflicts or duplicate funding.</p>

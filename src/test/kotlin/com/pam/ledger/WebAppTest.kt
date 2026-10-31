@@ -11,6 +11,8 @@ import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
 import java.net.URI
 import java.net.Socket
+import java.net.ServerSocket
+import java.net.BindException
 import java.net.URLEncoder
 import java.net.http.HttpClient
 import java.net.http.HttpRequest
@@ -394,6 +396,20 @@ class WebAppTest {
                 }
             }
 
+        }
+    }
+
+    /** Failed startup must release the writer lock and all services acquired before binding. */
+    @Test
+    fun `failed HTTP binding releases resources for retry on the same ledger`() {
+        val dir = tempDir()
+        ServerSocket(0).use { occupied ->
+            assertFailsWith<BindException> {
+                LedgerWebApp.start(WebOptions(port = occupied.localPort, dataDir = dir))
+            }
+            LedgerWebApp.start(WebOptions(port = 0, dataDir = dir)).use { app ->
+                assertEquals(200, call(app, "GET", "overview").first)
+            }
         }
     }
 

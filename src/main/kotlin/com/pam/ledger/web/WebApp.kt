@@ -104,6 +104,7 @@ class LedgerWebApp private constructor(
     private val stats: Stats,
     private val audit: Audit,
     private val configuredHost: String,
+    private val resources: List<AutoCloseable>,
 ) : AutoCloseable {
     private lateinit var server: HttpServer
     val port: Int get() = server.address.port
@@ -116,24 +117,32 @@ class LedgerWebApp private constructor(
             val dir = opts.dataDir ?: Files.createTempDirectory("pam-ledger-web")
             Files.createDirectories(dir)
             val signer = Ed25519TreeHeadSigner(demoKeyPair(dir))
-            val ledger = Ledger.open(LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000))
-            val wallet = SportsbookWallet(ledger)
-            val readModel = ReadModel(ledger)
-            val book = Book(wallet, readModel, dir)
-            val simulator = Simulator(book, wallet)
-            val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, Stats(readModel),
-                Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)), opts.host)
+            val resources = ArrayList<AutoCloseable>()
+            try {
+                val ledger = Ledger.open(LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000)).also(resources::add)
+                val wallet = SportsbookWallet(ledger)
+                val readModel = ReadModel(ledger).also(resources::add)
+                val book = Book(wallet, readModel, dir)
+                val simulator = Simulator(book, wallet).also(resources::add)
+                val stats = Stats(readModel).also(resources::add)
+                val audit = Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)).also(resources::add)
+                val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
+                val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
+                resources.add(AutoCloseable { server.stop(0) })
+                val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, stats, audit, opts.host, resources)
+                app.server = server
+                server.executor = executor
+                server.createContext("/") { ex -> app.handle(ex) }
 
-            // Demo data. Deposit keys are fixed, so restarting with --data replays them instead of paying twice.
-            CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
-            if (book.fixtures().isEmpty()) repeat(6) { book.addFixture() }
-
-            app.server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0).apply {
-                executor = Executors.newVirtualThreadPerTaskExecutor()
-                createContext("/") { ex -> app.handle(ex) }
-                start()
+                // Fixed deposit keys make restarting demo data exactly-once.
+                CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
+                if (book.fixtures().isEmpty()) repeat(6) { book.addFixture() }
+                server.start()
+                return app
+            } catch (failure: Throwable) {
+                closeResources(resources, failure)
+                throw failure
             }
-            return app
         }
 
         /**
@@ -539,11 +548,18 @@ class LedgerWebApp private constructor(
     }
 
     override fun close() {
-        runCatching { server.stop(0) }
-        simulator.close()
-        stats.close()
-        audit.close()
-        readModel.close()
-        ledger.close()
+        closeResources(resources)
     }
+}
+
+private fun closeResources(resources: List<AutoCloseable>, failure: Throwable? = null) {
+    var error = failure
+    for (resource in resources.asReversed()) {
+        try {
+            resource.close()
+        } catch (closing: Throwable) {
+            if (error == null) error = closing else if (closing !== error) error.addSuppressed(closing)
+        }
+    }
+    error?.let { throw it }
 }

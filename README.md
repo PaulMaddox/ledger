@@ -99,6 +99,7 @@ with no authentication**: the tabs are a view switch, not access control. Browse
 are restricted to same-origin requests and valid Host names; by default it listens on
 localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so the project
 still has no runtime dependencies beyond the JDK.
+Failed startup closes all acquired services and releases the writer lock, allowing a retry on the same data directory.
 
 ## Running
 
