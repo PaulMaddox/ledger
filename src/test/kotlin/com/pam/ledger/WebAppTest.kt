@@ -102,6 +102,25 @@ class WebAppTest {
         assertTrue(audit.contains("\"ok\":true"), audit)
     }
 
+    /** Checkpoints signed faster than any polling interval must all appear in the regulator's history. */
+    @Test
+    fun `checkpoint history contains every signed head`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(dir, signer, checkpointEvery = 10)).use { ledger ->
+            val audit = com.pam.ledger.web.Audit(ledger, dir, TestSupport.LEDGER_ID, listOf(signer.publicKey))
+            audit.use {
+                val wallet = SportsbookWallet(ledger)
+                repeat(200) { wallet.deposit("p", 1, "EUR", "burst-$it") } // 20 checkpoints in a burst
+                val persisted = ArrayList<Long>()
+                Journal.scanReadOnly(dir.resolve(Ledger.CHECKPOINTS_FILE)) { persisted += SignedTreeHead.decode(it).head.treeSize }
+                assertTrue(persisted.size >= 20, "expected at least 20 checkpoints, found ${persisted.size}")
+                assertEquals(persisted, audit.checkpoints().map { it.head.treeSize }, "history must hold every persisted head, in order")
+                for (size in persisted) assertTrue(audit.checkpointOfSize(size) != null, "no checkpoint found for size $size")
+            }
+        }
+    }
+
     /** The player audit must reconcile even while the customer is being changed concurrently. */
     @Test
     fun `player audit reconciles while the simulator is running`() = withApp { app ->

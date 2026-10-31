@@ -32,23 +32,27 @@ class Audit(
 
     // ---- Checkpoint history: every signed tree head, oldest first ----
 
+    // The history is the checkpoints journal itself, tailed: every signed head ever persisted
+    // is read exactly once, in order, however quickly they are signed. (Sampling only the
+    // latest checkpoint would miss heads signed between samples.)
     private val history = ArrayList<SignedTreeHead>()
+    private var tailOffset = 0L // guarded by `history`
     private val poller = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "sth-history").apply { isDaemon = true } }
 
     init {
-        // Checkpoints from before this process started are read from the journal file.
-        Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE)) { history += SignedTreeHead.decode(it) }
-        poller.scheduleAtFixedRate({ runCatching { record(ledger.latestCheckpoint()) } }, 0, 500, TimeUnit.MILLISECONDS)
+        refresh()
+        poller.scheduleAtFixedRate({ runCatching { refresh() } }, 500, 500, TimeUnit.MILLISECONDS)
     }
 
-    private fun record(sth: SignedTreeHead?) = synchronized(history) {
-        if (sth != null && history.none { it.head.treeSize == sth.head.treeSize && it.head.rootHash == sth.head.rootHash }) history += sth
+    /** Read any checkpoint records appended since the last read. */
+    private fun refresh() = synchronized(history) {
+        tailOffset = Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE), tailOffset) { history += SignedTreeHead.decode(it) }.validBytes
     }
 
-    fun checkpoints(): List<SignedTreeHead> = synchronized(history) { history.toList() }
+    fun checkpoints(): List<SignedTreeHead> = synchronized(history) { refresh(); history.toList() }
 
-    /** Sign a checkpoint now and record it. */
-    fun checkpointNow(): SignedTreeHead = ledger.checkpoint().also(::record)
+    /** Sign a checkpoint now. It is persisted before this returns, so the history includes it. */
+    fun checkpointNow(): SignedTreeHead = ledger.checkpoint().also { refresh() }
 
     /** A checkpoint covering entry [seq]: the latest one if it does, otherwise a fresh one. */
     fun checkpointCovering(seq: Long): SignedTreeHead {
@@ -56,7 +60,7 @@ class Audit(
         return if (latest != null && latest.head.treeSize > seq) latest else checkpointNow()
     }
 
-    fun checkpointOfSize(size: Long): SignedTreeHead? = synchronized(history) { history.lastOrNull { it.head.treeSize == size } }
+    fun checkpointOfSize(size: Long): SignedTreeHead? = synchronized(history) { refresh(); history.lastOrNull { it.head.treeSize == size } }
 
     // ---- Snapshot and independent audit ----
 
