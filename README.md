@@ -130,6 +130,21 @@ Following a link from the README or guide is allowed while Host validation remai
 Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
 requires a secure context with WebCrypto (HTTPS or localhost).
 
+### Deploying the web console to Azure AKS
+
+The [AKS deployment instructions](deploy/README.md) configure the existing `ledger`
+cluster in resource group `ledger`, Sweden Central, using GitHub Actions and Azure
+OIDC (no stored Azure password). After the one-time setup, pushes to `main` build and
+test a container, deploy it with a persistent Azure disk, and publish an Azure DNS
+address with automatic HTTPS. The workflow reports the public URL.
+
+This is still an **unauthenticated synthetic-money demo**, not a production wallet.
+It runs exactly one ledger instance; updates briefly interrupt service. Behind a TLS
+proxy, set `--public-origin https://<hostname>` and preserve the request Host, Origin
+and Referer headers. Only that exact HTTPS origin is accepted alongside normal local
+HTTP access; forwarding headers never grant trust. Screenshots are unchanged because
+deployment does not change the rendered UI.
+
 ## Running
 
 | | Ubuntu | Windows |
