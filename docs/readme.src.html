@@ -526,6 +526,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Simulator money operations await their original ledger futures before recording acceptance or refusal. Delayed replies cannot appear as rejected transactions that later commit.</p>
   <p class="prose">Simulator seed deposits use stable customer-specific amounts. Restarting recognizes previously committed seed references, including older random seeds, without creating conflicts or duplicate funding.</p>
   <p class="prose">Simulator counters and events are scoped to one run, so restarting never counts late work from the previous run.</p>
+  <p class="prose">Simulator action errors appear beside the controls, remain visible through refreshes and wall resizing, and clear after a successful action.</p>
   <p class="prose">Resizing the wall retains existing customers' activity, balances and refusal state. Late cash-out replies stay with their original customer, and definitive bet rejections unlock the stake for correction.</p>
   <p class="prose">Simulated betting reads a current-open fixture index, not a sorted copy of every historical fixture definition.</p>
   <p class="prose">Automatic fixture rounds resume an unfinished settlement with its already-persisted result and keep a per-fixture task guard, so overload retries safely without duplicating concurrent work.</p>

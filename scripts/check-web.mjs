@@ -304,6 +304,56 @@ test("resizing the simulator wall preserves retained customers' activity and fil
   assert.match(elements.get("wallNote").textContent, /of 700/);
 });
 
+test("simulator action errors survive refreshes and wall resizing until a successful action", async () => {
+  const c = context();
+  const elements = new Map();
+  c.document = {
+    getElementById: id => {
+      if (!elements.has(id)) elements.set(id, {
+        dataset: {}, value: "", className: "", innerHTML: "",
+        replaceChildren(frag) { this.children = frag.children; },
+      });
+      return elements.get(id);
+    },
+    createDocumentFragment: () => ({ children: [], appendChild(el) { this.children.push(el); } }),
+    createElement: () => ({ dataset: {}, querySelector: () => ({}) }),
+  };
+  c.performance = { now: () => 1000 };
+  const state = { customers: 2, state: "STOPPED", succeeded: 0, rejectedForFunds: 0, rejectedOther: 0 };
+  let error = "customers must be 1..20000";
+  c.api = async (path, options) => {
+    if (options && error) throw new Error(error);
+    return state;
+  };
+  vm.runInContext(source.slice(source.indexOf("const WALL_LIMIT"), source.indexOf('$("wallSearch").addEventListener')), c);
+  vm.runInContext(source.slice(source.indexOf("function simStat"), source.indexOf('$("simForm").addEventListener')), c);
+
+  await c.refreshSim();
+  const result = c.document.getElementById("simResult");
+  elements.get("simForm").dataset.dirty = "1";
+  await c.simAction("start", true);
+  assert.equal(result.innerHTML, error);
+  assert.match(result.className, /\bbad\b/);
+  assert.equal(elements.get("simForm").dataset.dirty, "1");
+  for (const customers of [2, 3, 501]) {
+    state.customers = customers;
+    await c.refreshSim();
+    assert.equal(result.innerHTML, error);
+    assert.match(elements.get("wallNote").textContent, /automated customer/);
+  }
+  error = "<invalid settings>";
+  await c.simAction(null, true);
+  assert.equal(result.innerHTML, "&lt;invalid settings&gt;");
+
+  error = null;
+  await c.simAction("start", true);
+  assert.equal(result.innerHTML, "");
+  assert.doesNotMatch(result.className, /\bbad\b/);
+  assert.equal(elements.get("simForm").dataset.dirty, undefined);
+  await c.refreshSim();
+  assert.equal(result.innerHTML, "");
+});
+
 test("simulator event polling waits for the customer wall to be built", async () => {
   let requests = 0;
   const c = context();
