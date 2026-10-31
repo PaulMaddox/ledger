@@ -127,3 +127,17 @@ test("completion of an old slip preserves a newly selected slip", async () => {
   assert.equal(s.element("slipStake").disabled, false);
   assert.equal(vm.runInContext("selection.sel", s.c), "AWAY");
 });
+
+test("checkpoint cache binds signature, signed bytes, key and displayed commitments", () => {
+  const c = context();
+  vm.runInContext(source.slice(source.indexOf("const sigCache =")).split("async function refreshCheckpoints")[0], c);
+  const checkpoint = { signingBytes: "bytes", signature: "signature", ledgerId: "ledger", treeSize: 1, rootHash: "root", chainHead: "chain" };
+  c.checkpoint = checkpoint;
+  const original = vm.runInContext('checkpointKey(checkpoint, "key")', c);
+  for (const field of Object.keys(checkpoint)) {
+    c.checkpoint = { ...checkpoint, [field]: "different" };
+    assert.notEqual(vm.runInContext('checkpointKey(checkpoint, "key")', c), original, field);
+  }
+  c.checkpoint = checkpoint;
+  assert.notEqual(vm.runInContext('checkpointKey(checkpoint, "different-key")', c), original);
+});

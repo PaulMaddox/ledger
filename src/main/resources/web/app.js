@@ -453,25 +453,25 @@ views.operator = {
 // ============================== regulator ==============================
 const sigCache = new Map(); // Exact signed bytes and key -> true/false/null, verified in this browser
 let publicKey = null;
-const checkpointKey = c => `${hex(b64(c.signingBytes))}:${c.signature}:${publicKey}`;
+const checkpointKey = (c, key) => JSON.stringify([c.signingBytes, c.signature, key, c.ledgerId, c.treeSize, c.rootHash, c.chainHead]);
 
 async function refreshCheckpoints() {
   const r = await api("regulator/checkpoints");
   publicKey = r.publicKey;
   for (const c of r.checkpoints) {
-    const k = checkpointKey(c);
+    const k = checkpointKey(c, r.publicKey);
     if (!sigCache.has(k)) {
       const head = parseTreeHead(b64(c.signingBytes));
       const consistentFields = head.tag === "PAM-LEDGER/tree-head/v1" && head.ledgerId === c.ledgerId &&
         head.ledgerId === WEB_LEDGER_ID && head.treeSize === c.treeSize &&
         hex(head.root) === c.rootHash && hex(head.chainHead) === c.chainHead;
-      const sig = await verifySignature(publicKey, c.signature, b64(c.signingBytes));
+      const sig = await verifySignature(r.publicKey, c.signature, b64(c.signingBytes));
       sigCache.set(k, sig === null ? null : sig && consistentFields);
     }
   }
   $("sthTable").innerHTML = `<tr><th class="num">Entries covered</th><th>Merkle root</th><th>Signed</th><th>Signature (checked here)</th></tr>` +
     r.checkpoints.slice(0, 50).map(c => {
-      const v = sigCache.get(checkpointKey(c));
+      const v = sigCache.get(checkpointKey(c, r.publicKey));
       return `<tr><td class="num">${int.format(c.treeSize)}</td><td><code>${short(c.rootHash)}</code></td><td>${timeOf(c.time)}</td>
         <td>${v === null ? `<span class="pill mut">no Ed25519 in browser</span>` : v ? `<span class="pill ok">valid</span>` : `<span class="pill bad">invalid</span>`}</td></tr>`;
     }).join("");
