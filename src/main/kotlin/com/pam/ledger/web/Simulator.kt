@@ -4,6 +4,7 @@ import com.pam.ledger.InsufficientFundsException
 import com.pam.ledger.LedgerException
 import com.pam.ledger.SportsbookWallet
 import com.pam.ledger.SportsbookWallet.Accounts
+import java.math.BigInteger
 import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -96,6 +97,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
     val lastEventId get() = eventIds.get()
 
     private val funded = ConcurrentHashMap.newKeySet<String>()
+    private val settlingFixtures = ConcurrentHashMap.newKeySet<String>()
     private val inFlight = Semaphore(MAX_IN_FLIGHT)
     private val workers = Executors.newVirtualThreadPerTaskExecutor()
     private val ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "simulator").apply { isDaemon = true } }
@@ -144,11 +146,36 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
         // Keep the book moving: settle the oldest open fixture and open a new one every 15 s.
         if (autoFixtures && System.nanoTime() - lastRoundNanos > 15_000_000_000L) {
             lastRoundNanos = System.nanoTime()
-            book.fixtures().firstOrNull { it.isOpen }?.let { f ->
-                workers.submit { runCatching { book.settle(f.id, weightedResult(f)); counters.fixtureRounds.incrementAndGet() } }
-            }
-            book.addFixture()
+            scheduleFixtureRound(counters)
         }
+    }
+
+    internal fun scheduleFixtureRound() = scheduleFixtureRound(run)
+
+    private fun scheduleFixtureRound(counters: Run) {
+        val fixtures = book.fixtures()
+        val fixture = fixtures.firstOrNull {
+            it.result != null && it.result != "LEGACY_UNRESOLVED" && !it.settlementComplete
+        } ?: fixtures.firstOrNull { it.isOpen }
+        if (fixture != null && settlingFixtures.add(fixture.id)) {
+            try {
+                workers.submit {
+                    try {
+                        runCatching {
+                            val result = fixture.result ?: weightedResult(fixture)
+                            book.settle(fixture.id, result)
+                            counters.fixtureRounds.incrementAndGet()
+                        }
+                    } finally {
+                        settlingFixtures.remove(fixture.id)
+                    }
+                }
+            } catch (failure: Throwable) {
+                settlingFixtures.remove(fixture.id)
+                throw failure
+            }
+        }
+        book.addFixture()
     }
 
     /** A result drawn with the probabilities the odds imply, so revenue behaves realistically. */
@@ -247,7 +274,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
 
 /** Samples headline numbers once a second for the operator's charts (last 3 minutes). */
 class Stats(private val readModel: ReadModel) : AutoCloseable {
-    data class Point(val t: Long, val entries: Long, val txPerSec: Long, val ggr: Long, val exposure: Long, val openBets: Int)
+    data class Point(val t: Long, val entries: Long, val txPerSec: Long, val ggr: Long, val exposure: BigInteger, val openBets: Int)
 
     private val points = ArrayDeque<Point>()
     private val sampler = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "stats").apply { isDaemon = true } }
@@ -265,7 +292,9 @@ class Stats(private val readModel: ReadModel) : AutoCloseable {
             entries = totals.entries,
             txPerSec = if (prev == null) 0 else totals.entries - prev.entries,
             ggr = readModel.balance(Accounts.revenue("EUR")),
-            exposure = open.sumOf { it.potentialPayout - it.stake },
+            exposure = open.fold(BigInteger.ZERO) { total, bet ->
+                total.add(BigInteger.valueOf(bet.potentialPayout).subtract(BigInteger.valueOf(bet.stake)))
+            },
             openBets = open.size,
         )
         synchronized(points) {

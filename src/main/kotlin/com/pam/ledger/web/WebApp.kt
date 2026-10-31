@@ -23,11 +23,19 @@ import com.pam.ledger.TamperDetectedException
 import com.pam.ledger.VersionConflictException
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
+import java.math.BigInteger
+import java.nio.channels.Channels
+import java.nio.channels.FileChannel
 import java.net.InetSocketAddress
 import java.net.URI
 import java.net.URLDecoder
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.AtomicMoveNotSupportedException
+import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption.CREATE
+import java.nio.file.StandardOpenOption.READ
+import java.nio.file.StandardOpenOption.WRITE
 import java.security.KeyFactory
 import java.security.KeyPair
 import java.security.KeyPairGenerator
@@ -112,6 +120,7 @@ class LedgerWebApp private constructor(
     companion object {
         const val LEDGER_ID = "sportsbook-web"
         val CUSTOMERS = listOf("alice", "bob", "carol", "dave", "erin", "farid", "grace", "hiro", "ines", "jamal", "kofi", "lena")
+        private val signingKeyBootstrapLock = Any()
 
         fun start(opts: WebOptions): LedgerWebApp {
             val dir = opts.dataDir ?: Files.createTempDirectory("pam-ledger-web")
@@ -149,7 +158,14 @@ class LedgerWebApp private constructor(
          * The checkpoint signing key, kept beside the demo ledger so a restarted app can still
          * verify its own earlier checkpoints. DEMO ONLY: production keys live in an HSM.
          */
-        private fun demoKeyPair(dir: Path): KeyPair {
+        private fun demoKeyPair(dir: Path): KeyPair = synchronized(signingKeyBootstrapLock) {
+            val lockFile = dir.resolve("demo-signing-key.lock")
+            FileChannel.open(lockFile, CREATE, WRITE).use { lockChannel ->
+                lockChannel.lock().use { loadOrCreateDemoKeyPair(dir) }
+            }
+        }
+
+        private fun loadOrCreateDemoKeyPair(dir: Path): KeyPair {
             val file = dir.resolve("demo-signing-key.properties")
             val kf = KeyFactory.getInstance("Ed25519")
             if (Files.exists(file)) {
@@ -160,10 +176,28 @@ class LedgerWebApp private constructor(
             }
             val kp = KeyPairGenerator.getInstance("Ed25519").generateKeyPair()
             val e = Base64.getEncoder()
-            Properties().apply {
+            val properties = Properties().apply {
                 setProperty("public", e.encodeToString(kp.public.encoded))
                 setProperty("private", e.encodeToString(kp.private.encoded))
-                Files.newOutputStream(file).use { store(it, "DEMO ONLY. Production signing keys must live in an HSM.") }
+            }
+            val temporary = Files.createTempFile(dir, "demo-signing-key-", ".tmp")
+            try {
+                FileChannel.open(temporary, WRITE).use { channel ->
+                    val output = Channels.newOutputStream(channel)
+                    properties.store(output, "DEMO ONLY. Production signing keys must live in an HSM.")
+                    output.flush()
+                    channel.force(true)
+                }
+                try {
+                    Files.move(temporary, file, StandardCopyOption.ATOMIC_MOVE)
+                } catch (e: AtomicMoveNotSupportedException) {
+                    Files.move(temporary, file)
+                }
+                if (!System.getProperty("os.name").startsWith("Windows")) {
+                    FileChannel.open(dir, READ).use { it.force(true) }
+                }
+            } finally {
+                Files.deleteIfExists(temporary)
             }
             return kp
         }
@@ -295,7 +329,7 @@ class LedgerWebApp private constructor(
             post("players", "*", "deposit") -> receipt(wallet.deposit(p[1], r.long("amount"), "EUR", r.str("ref")))
             post("players", "*", "withdraw") -> receipt(wallet.withdraw(p[1], r.long("amount"), "EUR", r.str("ref")))
             post("players", "*", "bets") -> receipt(book.placeBet(p[1], r.str("fixture"), r.str("selection"), r.long("stake"), r.str("betId")))
-            get("bets", "*", "cashout") -> mapOf("betId" to p[1], "offer" to book.cashOutOffer(p[1]))
+            get("bets", "*", "cashout") -> mapOf("betId" to p[1], "offer" to minorUnits(book.cashOutOffer(p[1])))
             post("bets", "*", "cashout") -> receipt(book.cashOut(p[1]))
 
             // ---- Operator ----
@@ -312,7 +346,7 @@ class LedgerWebApp private constructor(
                 val after = r.params["after"]?.toLongOrNull() ?: 0L
                 val page = simulator.eventPage(after)
                 mapOf("lastId" to page.lastId, "events" to page.events.map {
-                    mapOf("id" to it.id, "t" to it.time, "customer" to it.customer, "op" to it.op, "text" to it.text, "ok" to it.ok, "cash" to it.cash)
+                    mapOf("id" to it.id, "t" to it.time, "customer" to it.customer, "op" to it.op, "text" to it.text, "ok" to it.ok, "cash" to minorUnits(it.cash))
                 })
             }
             post("simulator") -> {
@@ -355,6 +389,12 @@ class LedgerWebApp private constructor(
 
     private fun receipt(r: Receipt) = mapOf("seq" to r.seq, "chainHash" to r.chainHash, "leafHash" to r.leafHash, "replayed" to r.replayed)
 
+    private fun minorUnits(amount: Long) = amount.toString()
+    private fun minorUnits(amount: BigInteger) = amount.toString()
+    private fun sumMinorUnits(amounts: Iterable<Long>) = amounts.fold(BigInteger.ZERO) { total, amount ->
+        total.add(BigInteger.valueOf(amount))
+    }
+
     private fun time(micros: Long) = Instant.ofEpochMilli(micros / 1000).toString()
 
     private fun entryView(s: SealedEntry) = mapOf(
@@ -362,7 +402,7 @@ class LedgerWebApp private constructor(
         "kind" to s.entry.kind,
         "key" to s.entry.idempotencyKey,
         "time" to time(s.entry.timestampMicros),
-        "postings" to s.entry.postings.map { mapOf("account" to it.account.value, "amount" to it.amount) },
+        "postings" to s.entry.postings.map { mapOf("account" to it.account.value, "amount" to minorUnits(it.amount)) },
         "metadata" to s.entry.metadata,
         "chainHash" to s.chainHash,
     )
@@ -381,8 +421,8 @@ class LedgerWebApp private constructor(
 
     private fun playerSummary(id: String) = mapOf(
         "id" to id,
-        "cash" to wallet.cashBalance(id, "EUR"),
-        "openBets" to wallet.openBetsBalance(id, "EUR"),
+        "cash" to minorUnits(wallet.cashBalance(id, "EUR")),
+        "openBets" to minorUnits(wallet.openBetsBalance(id, "EUR")),
         "automated" to Simulator.isAutomated(id),
     )
 
@@ -395,8 +435,8 @@ class LedgerWebApp private constructor(
 
     private fun betView(b: ReadModel.BetView) = mapOf(
         "betId" to b.betId, "fixture" to b.fixtureId, "selection" to b.selection, "odds" to b.oddsHundredths,
-        "stake" to b.stake, "potentialPayout" to b.potentialPayout, "placedSeq" to b.placedSeq,
-        "time" to time(b.placedAtMicros), "outcome" to b.outcome, "payout" to b.payout, "open" to b.isOpen,
+        "stake" to minorUnits(b.stake), "potentialPayout" to minorUnits(b.potentialPayout), "placedSeq" to b.placedSeq,
+        "time" to time(b.placedAtMicros), "outcome" to b.outcome, "payout" to b.payout?.let(::minorUnits), "open" to b.isOpen,
     )
 
     private fun playerDetail(id: String): Any {
@@ -411,15 +451,21 @@ class LedgerWebApp private constructor(
 
     private fun fixtureView(f: Book.Fixture): Map<String, Any?> {
         val open = readModel.openBetsOn(f.id)
-        val liability = f.odds.keys.associateWith { sel -> open.filter { it.selection == sel }.sumOf { it.potentialPayout } }
+        val liability = f.odds.keys.associateWith { sel ->
+            minorUnits(sumMinorUnits(open.filter { it.selection == sel }.map { it.potentialPayout }))
+        }
         return mapOf(
             "id" to f.id, "home" to f.home, "away" to f.away, "odds" to f.odds, "result" to f.result,
             "settlementComplete" to f.settlementComplete,
-            "openBets" to open.size, "staked" to open.sumOf { it.stake }, "liability" to liability,
+            "openBets" to open.size, "staked" to minorUnits(sumMinorUnits(open.map { it.stake })), "liability" to liability,
         )
     }
 
-    private fun fixtures() = book.fixtures().asReversed().take(30).map(::fixtureView)
+    private fun fixtures(): List<Map<String, Any?>> {
+        val ordered = book.fixtures().asReversed()
+        val recentCompleted = ordered.asSequence().filter { it.settlementComplete }.take(30).mapTo(HashSet<String>()) { it.id }
+        return ordered.filter { !it.settlementComplete || it.id in recentCompleted }.map(::fixtureView)
+    }
 
     private fun operator(): Map<String, Any?> {
         val totals = readModel.totals()
@@ -427,16 +473,20 @@ class LedgerWebApp private constructor(
         return mapOf(
             "players" to readModel.players().size,
             "entries" to totals.entries,
-            "deposits" to totals.deposits,
-            "withdrawals" to totals.withdrawals,
-            "staked" to totals.staked,
-            "returned" to totals.returned,
-            "ggr" to readModel.balance(Accounts.revenue("EUR")),
+            "deposits" to minorUnits(totals.deposits),
+            "withdrawals" to minorUnits(totals.withdrawals),
+            "staked" to minorUnits(totals.staked),
+            "returned" to minorUnits(totals.returned),
+            "ggr" to minorUnits(readModel.balance(Accounts.revenue("EUR"))),
             "openBets" to open.size,
-            "openStakes" to open.sumOf { it.stake },
-            "exposure" to open.sumOf { it.potentialPayout - it.stake },
+            "openStakes" to minorUnits(sumMinorUnits(open.map { it.stake })),
+            "exposure" to minorUnits(open.fold(BigInteger.ZERO) { total, bet ->
+                total.add(BigInteger.valueOf(bet.potentialPayout).subtract(BigInteger.valueOf(bet.stake)))
+            }),
             "kinds" to totals.kindCounts,
-            "series" to stats.series().map { mapOf("t" to it.t, "tps" to it.txPerSec, "ggr" to it.ggr, "exposure" to it.exposure, "openBets" to it.openBets) },
+            "series" to stats.series().map {
+                mapOf("t" to it.t, "tps" to it.txPerSec, "ggr" to minorUnits(it.ggr), "exposure" to minorUnits(it.exposure), "openBets" to it.openBets)
+            },
             "feed" to readModel.recentSeqs().take(25).map { entryView(ledger.entry(it)) },
         )
     }
@@ -476,7 +526,7 @@ class LedgerWebApp private constructor(
         val rep: LedgerVerifier.Report = a.report
         return mapOf(
             "ok" to rep.ok, "note" to a.note, "millis" to a.millis, "entries" to rep.entries,
-            "checkpointsVerified" to rep.checkpointsVerified, "totals" to rep.totalsByCurrency,
+            "checkpointsVerified" to rep.checkpointsVerified, "totals" to rep.totalsByCurrency.mapValues { it.value.toString() },
             "problems" to rep.problems, "merkleRoot" to rep.head?.merkleRoot, "chainHead" to rep.head?.chainHead,
         )
     }
@@ -487,6 +537,7 @@ class LedgerWebApp private constructor(
         readModel.catchUp()
         var cash = 0L
         var escrow = 0L
+        var neverNegative = true
         val seqs = readModel.seqsForPlayer(id).filter { it < snapshotSize }
         val rows = seqs.map { seq ->
             val s = ledger.entry(seq)
@@ -494,8 +545,10 @@ class LedgerWebApp private constructor(
             val de = s.entry.postings.filter { it.account == Accounts.openBets(id, "EUR") }.sumOf { it.amount }
             cash = Math.addExact(cash, dc)
             escrow = Math.addExact(escrow, de)
+            neverNegative = neverNegative && cash >= 0 && escrow >= 0
             mapOf("seq" to seq, "kind" to s.entry.kind, "time" to time(s.entry.timestampMicros), "key" to s.entry.idempotencyKey,
-                "cashDelta" to dc, "cash" to cash, "escrowDelta" to de, "escrow" to escrow, "chainHash" to s.chainHash)
+                "cashDelta" to minorUnits(dc), "cash" to minorUnits(cash), "escrowDelta" to minorUnits(de),
+                "escrow" to minorUnits(escrow), "chainHash" to s.chainHash)
         }
         var ledgerCash = 0L
         var ledgerEscrow = 0L
@@ -509,9 +562,10 @@ class LedgerWebApp private constructor(
         }
         return mapOf(
             "id" to id, "rows" to rows.asReversed().take(200), "entries" to rows.size,
-            "replayedCash" to cash, "replayedEscrow" to escrow, "ledgerCash" to ledgerCash, "ledgerEscrow" to ledgerEscrow,
+            "replayedCash" to minorUnits(cash), "replayedEscrow" to minorUnits(escrow),
+            "ledgerCash" to minorUnits(ledgerCash), "ledgerEscrow" to minorUnits(ledgerEscrow),
             "reconciles" to (cash == ledgerCash && escrow == ledgerEscrow),
-            "neverNegative" to rows.all { (it["cash"] as Long) >= 0 && (it["escrow"] as Long) >= 0 },
+            "neverNegative" to neverNegative,
         )
     }
 

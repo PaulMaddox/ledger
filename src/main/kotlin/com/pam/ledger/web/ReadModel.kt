@@ -4,6 +4,7 @@ import com.pam.ledger.AccountId
 import com.pam.ledger.Ledger
 import com.pam.ledger.SealedEntry
 import com.pam.ledger.SportsbookWallet.Accounts
+import java.math.BigInteger
 
 /*
  * ============================================================================
@@ -44,8 +45,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     }
 
     data class Totals(
-        val entries: Long, val deposits: Long, val withdrawals: Long,
-        val staked: Long, val returned: Long, val kindCounts: Map<String, Long>,
+        val entries: Long, val deposits: BigInteger, val withdrawals: BigInteger,
+        val staked: BigInteger, val returned: BigInteger, val kindCounts: Map<String, Long>,
     )
 
     private val lock = Any()
@@ -55,10 +56,10 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
     private val openBetsByFixture = HashMap<String, MutableSet<String>>()
     private val kindCounts = HashMap<String, Long>()
-    private var deposits = 0L
-    private var withdrawals = 0L
-    private var staked = 0L
-    private var returned = 0L
+    private var deposits = BigInteger.ZERO
+    private var withdrawals = BigInteger.ZERO
+    private var staked = BigInteger.ZERO
+    private var returned = BigInteger.ZERO
     private val recent = ArrayDeque<Long>()
 
     @Volatile private var running = true
@@ -88,12 +89,12 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         fun cashDelta(player: String) = e.postings.firstOrNull { it.account == Accounts.cash(player, it.currency) }?.amount ?: 0L
 
         when (e.kind) {
-            "DEPOSIT" -> deposits += e.postings.first { it.amount > 0 }.amount
-            "WITHDRAWAL" -> withdrawals += e.postings.first { it.amount > 0 }.amount
+            "DEPOSIT" -> deposits = deposits.add(BigInteger.valueOf(e.postings.first { it.amount > 0 }.amount))
+            "WITHDRAWAL" -> withdrawals = withdrawals.add(BigInteger.valueOf(e.postings.first { it.amount > 0 }.amount))
             "BET_PLACED" -> {
                 val player = e.metadata.getValue("playerId")
                 val stake = e.postings.first { it.amount > 0 }.amount
-                staked += stake
+                staked = staked.add(BigInteger.valueOf(stake))
                 // The web app stores "fixture|selection|odds" in the placement's selection metadata.
                 val parts = e.metadata["selection"]?.split("|")
                 if (parts != null && parts.size == 3) {
@@ -110,7 +111,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
             "BET_WON", "BET_LOST", "BET_VOIDED", "BET_CASHED_OUT" -> {
                 val betId = e.metadata.getValue("betId")
                 val payout = cashDelta(e.metadata.getValue("playerId"))
-                returned += payout
+                returned = returned.add(BigInteger.valueOf(payout))
                 bets[betId]?.let {
                     bets[betId] = it.copy(settledSeq = e.seq, outcome = e.kind.removePrefix("BET_"), payout = payout)
                     openBetsByPlayer[it.playerId]?.remove(betId)

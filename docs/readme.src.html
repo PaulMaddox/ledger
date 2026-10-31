@@ -526,8 +526,14 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Simulator money operations await their original ledger futures before recording acceptance or refusal. Delayed replies cannot appear as rejected transactions that later commit.</p>
   <p class="prose">Simulator seed deposits use stable customer-specific amounts. Restarting recognizes previously committed seed references, including older random seeds, without creating conflicts or duplicate funding.</p>
   <p class="prose">Simulator counters and events are scoped to one run, so restarting never counts late work from the previous run.</p>
+  <p class="prose">Automatic fixture rounds resume an unfinished settlement with its already-persisted result and keep a per-fixture task guard, so overload retries safely without duplicating concurrent work.</p>
+  <p class="prose">Fixture definitions and results are flushed before they become visible to bets or settlements. On restart, saved fixtures are reconciled with ledger placements and outcomes; missing or contradictory definitions are frozen rather than guessed.</p>
+  <p class="prose">Money crosses the web API as decimal strings of minor units. Browser input parsing and formatting use exact integer arithmetic, so large balances and decimal amounts do not pass through floating-point rounding.</p>
+  <p class="prose">An uncertain customer deposit or withdrawal retains its original player, amount and idempotency reference; retrying cannot silently turn it into a different money movement.</p>
+  <p class="prose">The operator fixture list keeps every unfinished fixture visible and limits only completed history to the latest 30 entries.</p>
   <p class="prose">Customer bet lists read the newest 40 placements from that customer's entry index, rather than scanning all customers' bets.</p>
   <p class="prose">Operator statistics read current-open indexes; settled history and empty fixture buckets do not accumulate in their refresh path.</p>
+  <p class="prose">Independent audit snapshots reread signed checkpoint records from byte zero, rather than substituting the history poller's cached copies.</p>
   <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code>. Four views share one live ledger, so anything done in one appears in the others. These screenshots are captured from the running console by <code>scripts/capture-screenshots.py</code>.</p>
   <p class="prose">Use <code>--data &lt;folder&gt;</code> to retain the ledger, signing key, fixture definitions and results across restarts. Legacy bets whose fixture result was never saved are frozen instead of being assigned a guessed outcome. The demo has no authentication; the server rejects cross-origin browser mutations and invalid hosts.</p>
   <figure class="shot wide">

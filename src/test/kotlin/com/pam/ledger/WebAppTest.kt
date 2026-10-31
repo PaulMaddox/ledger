@@ -30,6 +30,10 @@ import java.time.Instant
 import java.time.ZoneId
 import java.time.ZoneOffset
 import java.util.concurrent.CountDownLatch
+import java.nio.ByteBuffer
+import java.nio.file.Files
+import java.util.zip.CRC32C
+import java.math.BigInteger
 import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
@@ -87,6 +91,21 @@ class WebAppTest {
         val (_, offer) = call(app, "GET", "bets/slip-1/cashout")
         assertTrue(offer.contains("\"offer\":850"), "85% cash-out offer on a 10.00 stake: $offer")
         assertEquals(400, call(app, "POST", "players/alice/bets", bet + ("selection" to "PINK") + ("betId" to "slip-2")).first)
+    }
+
+    @Test
+    fun `money values in the API remain exact decimal strings`() = withApp { app ->
+        val amount = 9_007_199_254_740_995L
+        assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to amount, "ref" to "large-exact")).first)
+        val bet = call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to amount, "betId" to "large-exact-bet",
+        ))
+        assertEquals(200, bet.first, bet.second)
+        val detail = call(app, "GET", "players/alice").second
+        assertTrue(detail.contains("\"cash\":\"10000\""), detail)
+        assertTrue(detail.contains("\"stake\":\"$amount\""), detail)
+        assertTrue(detail.contains("\"potentialPayout\":\""), detail)
+        assertTrue(detail.contains("\"amount\":\"-$amount\""), detail)
     }
 
     @Test
@@ -223,6 +242,42 @@ class WebAppTest {
     }
 
     @Test
+    fun `old unfinished fixtures remain visible after many fixtures are added`() = withApp { app ->
+        assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "old-fixture-open-bet",
+        )).first)
+        repeat(31) { assertEquals(200, call(app, "POST", "fixtures").first) }
+
+        val fixtures = call(app, "GET", "fixtures").second
+        assertTrue(fixtures.contains("\"id\":\"F1\"") && fixtures.contains("\"settlementComplete\":false"), fixtures)
+        assertTrue(fixtures.contains("\"id\":\"F37\""), fixtures)
+    }
+
+    @Test
+    fun `concurrent first startups preserve one signing key`() {
+        val directory = tempDir()
+        val attempts = race(2) { LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)) }
+        val started = attempts.mapNotNull { it.getOrNull() }.toMutableList()
+        assertEquals(1, started.size, "the journal lock allows only one app to start")
+        try {
+            assertEquals(1, attempts.count { it.isFailure })
+            val app = started.single()
+            val firstKey = Regex("\"publicKey\":\"([^\"]+)\"")
+                .find(call(app, "GET", "regulator/checkpoints").second)!!.groupValues[1]
+            app.close()
+            started.remove(app)
+
+            LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)).use { restarted ->
+                val nextKey = Regex("\"publicKey\":\"([^\"]+)\"")
+                    .find(call(restarted, "GET", "regulator/checkpoints").second)!!.groupValues[1]
+                assertEquals(firstKey, nextKey)
+            }
+        } finally {
+            started.forEach { runCatching { it.close() } }
+        }
+    }
+
+    @Test
     fun `player audit compares balances from one captured ledger prefix`() = withApp { app ->
         val outcomes = race(2) { worker ->
             if (worker == 0) {
@@ -347,6 +402,129 @@ class WebAppTest {
                 }
                 assertEquals(listOf(1L, 2L, 3L), audit.checkpoints().map { it.head.treeSize })
                 assertTrue(audit.checkpointOfSize(2) != null)
+            }
+        }
+    }
+
+    @Test
+    fun `audit rereads checkpoint signatures instead of trusting cached history`() {
+        val directory = tempDir()
+        Ledger.open(config(directory, Ed25519TreeHeadSigner.generate())).use { ledger ->
+            SportsbookWallet(ledger).deposit("p", 1, "EUR", "signed")
+            ledger.checkpoint()
+            Audit(ledger, directory, "test-ledger", listOf(ledger.publicKey)).use { audit ->
+                val path = directory.resolve(Ledger.CHECKPOINTS_FILE)
+                val framed = Files.readAllBytes(path)
+                val payloadLength = ByteBuffer.wrap(framed).int
+                framed[Journal.HEADER + payloadLength - 1] = (framed[Journal.HEADER + payloadLength - 1].toInt() xor 1).toByte()
+                val crc = CRC32C().apply { update(framed, Journal.HEADER, payloadLength) }
+                ByteBuffer.wrap(framed).putInt(4, crc.value.toInt())
+                Files.write(path, framed)
+
+                assertFalse(audit.fullAudit().report.ok, "the fresh audit snapshot must include the modified signature")
+            }
+        }
+    }
+
+    @Test
+    fun `read model cumulative money totals do not overflow Long`() {
+        val amount = 4_000_000_000_000_000_000L
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                repeat(3) { index ->
+                    wallet.deposit("p", amount, "EUR", "totals-fund-$index")
+                    wallet.withdraw("p", amount, "EUR", "totals-withdraw-$index")
+                    wallet.deposit("p", amount, "EUR", "totals-bet-fund-$index")
+                    wallet.placeBet("p", "totals-bet-$index", amount, "EUR", "F1|HOME|100")
+                    wallet.voidBet("totals-bet-$index")
+                    wallet.withdraw("p", amount, "EUR", "totals-bet-withdraw-$index")
+                }
+                model.catchUp()
+                val totals = model.totals()
+                val oneAmount = BigInteger.valueOf(amount)
+                assertEquals(oneAmount.multiply(BigInteger.valueOf(6)), totals.deposits)
+                assertEquals(oneAmount.multiply(BigInteger.valueOf(6)), totals.withdrawals)
+                assertEquals(oneAmount.multiply(BigInteger.valueOf(3)), totals.staked)
+                assertEquals(oneAmount.multiply(BigInteger.valueOf(3)), totals.returned)
+            }
+        }
+    }
+
+    @Test
+    fun `restored fixture without its recorded result is frozen and its id stays reserved`() {
+        val directory = tempDir()
+        val first = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
+        assertEquals(200, call(first, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "reconcile-slip",
+        )).first)
+        assertEquals(200, call(first, "POST", "fixtures/F1/settle", mapOf("result" to "HOME")).first)
+        first.close()
+
+        val state = java.util.Properties().apply {
+            Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
+            setProperty("fixture.0.result", "")
+            setProperty("fixture.0.complete", "false")
+        }
+        Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { state.store(it, "simulated stale fixture state") }
+
+        val restarted = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
+        try {
+            val fixtures = call(restarted, "GET", "fixtures").second
+            assertTrue(fixtures.contains("\"id\":\"F1\"") && fixtures.contains("\"result\":\"LEGACY_UNRESOLVED\""), fixtures)
+            assertEquals(400, call(restarted, "POST", "fixtures/F1/settle", mapOf("result" to "HOME")).first)
+            assertTrue(call(restarted, "POST", "fixtures").second.contains("\"id\":\"F7\""))
+        } finally {
+            restarted.close()
+        }
+    }
+
+    @Test
+    fun `simulator resumes persisted settlement results without duplicate fixture work`() {
+        val directory = tempDir()
+        val delayed = AtomicBoolean(false)
+        val completions = ConcurrentLinkedQueue<Runnable>()
+        val executor = java.util.concurrent.Executor { task -> if (delayed.get()) completions.add(task) else task.run() }
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(directory, signer).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1000, "EUR", "sim-round-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model, directory)
+                val fixture = book.addFixture(Random(0))
+                book.placeBet("p", fixture.id, "HOME", 100, "sim-round-slip")
+                java.util.Properties().apply {
+                    Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
+                    setProperty("fixture.0.result", "HOME")
+                    setProperty("fixture.0.complete", "false")
+                    Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { store(it, "pending settlement") }
+                }
+            }
+        }
+        Ledger.open(config(directory, signer).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model, directory)
+                val fixture = book.fixture("F1")
+                assertEquals("HOME", fixture.result)
+                assertFalse(fixture.settlementComplete)
+                delayed.set(true)
+                Simulator(book, wallet).use { simulator ->
+                    simulator.scheduleFixtureRound()
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (completions.isEmpty() && System.nanoTime() < deadline) Thread.sleep(5)
+                    assertTrue(completions.isNotEmpty(), "first settlement should be waiting for its completion callback")
+                    simulator.scheduleFixtureRound()
+                    assertEquals(1, completions.size, "the same fixture must not have a second settlement task")
+                    delayed.set(false)
+                    while (true) (completions.poll() ?: break).run()
+                    val settledBy = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (!fixture.settlementComplete && System.nanoTime() < settledBy) Thread.sleep(5)
+                    assertTrue(fixture.settlementComplete)
+                    assertEquals(1L, simulator.fixtureRounds.get())
+                    model.catchUp()
+                    assertTrue(model.openBetsOn(fixture.id).isEmpty())
+                }
             }
         }
     }

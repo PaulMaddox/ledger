@@ -63,12 +63,18 @@ ledger, so anything done in one view shows up in the others.
   they are, then start, pause, resume or stop them. Each customer gets a tile streaming its
   latest bets, deposits, withdrawals and cash-outs, green when accepted and red when the
   ledger refuses. Counters and events belong to one run; late workers cannot pollute a restart.
+  Automatic rounds retry unfinished fixtures using their already-recorded result, without
+  starting duplicate settlement tasks.
   Select a tile to open that customer.
   Seed deposits are stable across retries and restarts; existing seed references are not funded again.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
   Customer IDs always use ASCII digits, independent of the host locale.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
+  API monetary values are decimal strings in minor units, and browser inputs are parsed
+  without floating-point rounding. Wallet actions retain the original customer, amount
+  and idempotency reference after an uncertain response, so retries cannot silently become
+  different money movements.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
   uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance of the customer captured at launch, cancelling if the selection changes before betting,
@@ -76,15 +82,18 @@ ledger, so anything done in one view shows up in the others.
   it decodes and displays the canonical bytes (amounts in exact minor units), hashes them,
   walks the Merkle proof, and checks the Ed25519 signature with
   WebCrypto, rather than trusting the server.
-- **Operator.** Revenue, exposure, throughput and open-bet charts, per-fixture liability,
+- **Operator.** Revenue, exposure, throughput and open-bet charts with exact cumulative
+  money totals, per-fixture liability,
   backed by current-open indexes that discard settled bets and empty fixture buckets,
-  settlement buttons, and a live transaction feed. Settlement waits for each original
+  settlement buttons (all unfinished fixtures remain visible), and a live transaction feed.
+  Settlement waits for each original
   in-flight placement's definitive result, including during queue overload.
 - **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
   with signature caching bound to the exact evidence, display commitments and public key,
   consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
   corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
-  catching each, even while the simulator appends new entries.
+  catching each, even while the simulator appends new entries. Audit snapshots reread
+  checkpoint records from disk instead of trusting the history poller's cache.
 
 | Operator | Customer |
 |---|---|
@@ -94,8 +103,9 @@ ledger, so anything done in one view shows up in the others.
 
 Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
 ledger lives in a fresh temporary folder each run; with it, the ledger, signing key, fixture
-definitions and results survive restarts. Old data without saved fixture state is kept
-unresolved rather than being assigned a guessed result. The console is a **demonstration
+definitions and results survive restarts. Fixture state is flushed before fixtures or
+settlements are published, and startup reconciles it with recorded bets; missing or
+contradictory results stay unresolved rather than being guessed. The console is a **demonstration
 with no authentication**: the tabs are a view switch, not access control. Browser mutations
 are restricted to same-origin requests and valid Host names; by default it listens on
 localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so the project

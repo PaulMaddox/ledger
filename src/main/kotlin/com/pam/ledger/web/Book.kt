@@ -5,10 +5,14 @@ import com.pam.ledger.NotFoundException
 import com.pam.ledger.OutcomeUnknownException
 import com.pam.ledger.Receipt
 import com.pam.ledger.SportsbookWallet
+import java.nio.channels.Channels
+import java.nio.channels.FileChannel
 import java.nio.file.AtomicMoveNotSupportedException
 import java.nio.file.Files
 import java.nio.file.Path
 import java.nio.file.StandardCopyOption
+import java.nio.file.StandardOpenOption.READ
+import java.nio.file.StandardOpenOption.WRITE
 import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.CompletableFuture
@@ -101,8 +105,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         val total = h + d + a
         fun price(p: Double) = (100 / (p / total * 1.06)).let { (it / 5).toInt() * 5 }.coerceAtLeast(105)
         val f = Fixture("F${counter.incrementAndGet()}", home, away, mapOf("HOME" to price(h), "DRAW" to price(d), "AWAY" to price(a)))
-        fixtures[f.id] = f
-        persistFixtures()
+        persistFixtures(additional = f) { fixtures[f.id] = f }
         return f
     }
 
@@ -180,10 +183,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         }
         val pending = f.lock.write {
             require(f.result == null || f.result == result) { "fixture $fixtureId was already settled as ${f.result}" }
-            if (f.result == null) {
-                f.result = result
-                persistFixtures()
-            }
+            persistFixtures(resultOverrides = mapOf(f.id to result)) { f.result = result }
             f.pendingPlacements.toList()
         }
         pending.forEach { runCatching { it.join() } }
@@ -203,33 +203,33 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         }
         readModel.catchUp()
         if (readModel.openBetsOn(fixtureId).isEmpty()) {
-            f.settlementComplete = true
-            persistFixtures()
+            if (!f.settlementComplete) {
+                persistFixtures(completionOverrides = mapOf(f.id to true)) { f.settlementComplete = true }
+            }
         }
         return Settlement(fixtureId, result, won, lost, voided, already)
     }
 
     private fun restoreFixtures() {
+        readModel.catchUp()
+        val betsByFixture = readModel.allBets().groupBy { it.fixtureId }
         val file = directory?.resolve(FIXTURES_FILE)?.takeIf { Files.exists(it) }
         if (file == null) {
-            readModel.catchUp()
-            val oldBets = readModel.allBets()
-            oldBets.groupBy { it.fixtureId }.forEach { (id, bets) ->
+            betsByFixture.forEach { (id, bets) ->
                 val odds = mutableMapOf("HOME" to 100, "DRAW" to 100, "AWAY" to 100)
                 bets.forEach { odds[it.selection] = it.oddsHundredths }
                 val fixture = Fixture(id, "Restored fixture", "result unavailable", odds)
                 fixture.result = LEGACY_UNRESOLVED
                 fixtures[id] = fixture
-                val number = id.removePrefix("F").toIntOrNull()
-                    ?: throw IllegalStateException("invalid fixture id '$id' in ledger")
-                counter.updateAndGet { maxOf(it, number) }
+                reserveFixtureId(id)
             }
-            if (oldBets.isNotEmpty()) persistFixtures()
+            if (betsByFixture.isNotEmpty()) persistFixtures()
             return
         }
         val properties = Properties().apply { Files.newInputStream(file).use(::load) }
         val count = properties.getProperty("count")?.toIntOrNull()
             ?: throw IllegalStateException("invalid fixture state in $file")
+        var changed = false
         repeat(count) { index ->
             val prefix = "fixture.$index."
             val id = properties.getProperty(prefix + "id") ?: throw IllegalStateException("missing fixture id in $file")
@@ -245,40 +245,111 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
             )
             fixture.result = properties.getProperty(prefix + "result")?.ifEmpty { null }
             fixture.settlementComplete = properties.getProperty(prefix + "complete") == "true"
+            if ((fixture.result == null && fixture.settlementComplete) ||
+                (fixture.result != null && fixture.result !in setOf("HOME", "DRAW", "AWAY", "VOID", LEGACY_UNRESOLVED))) {
+                fixture.result = LEGACY_UNRESOLVED
+                fixture.settlementComplete = false
+                changed = true
+            } else if (fixture.result == LEGACY_UNRESOLVED && fixture.settlementComplete) {
+                fixture.settlementComplete = false
+                changed = true
+            }
             fixtures[id] = fixture
-            val number = id.removePrefix("F").toIntOrNull()
-                ?: throw IllegalStateException("invalid fixture id '$id' in $file")
-            counter.updateAndGet { maxOf(it, number) }
+            reserveFixtureId(id)
         }
+        for ((id, bets) in betsByFixture) {
+            val fixture = fixtures[id]
+            if (fixture == null) {
+                val odds = mutableMapOf("HOME" to 100, "DRAW" to 100, "AWAY" to 100)
+                bets.forEach { odds[it.selection] = it.oddsHundredths }
+                fixtures[id] = Fixture(id, "Restored fixture", "result unavailable", odds).apply {
+                    result = LEGACY_UNRESOLVED
+                }
+                reserveFixtureId(id)
+                changed = true
+                continue
+            }
+            val oldResult = fixture.result
+            val oldComplete = fixture.settlementComplete
+            val hasSettledOutcome = bets.any { it.outcome != null && it.outcome != "CASHED_OUT" }
+            if (fixture.result == null && (hasSettledOutcome || fixture.settlementComplete)) {
+                fixture.result = LEGACY_UNRESOLVED
+                fixture.settlementComplete = false
+            } else if (fixture.result != null && fixture.result != LEGACY_UNRESOLVED) {
+                val knownResult = fixture.result in setOf("HOME", "DRAW", "AWAY", "VOID")
+                val consistent = knownResult && bets.all { bet ->
+                    val outcome = bet.outcome ?: return@all true
+                    outcome == "CASHED_OUT" || outcome == when {
+                        fixture.result == "VOID" -> "VOIDED"
+                        bet.selection == fixture.result -> "WON"
+                        else -> "LOST"
+                    }
+                }
+                if (!consistent) {
+                    fixture.result = LEGACY_UNRESOLVED
+                    fixture.settlementComplete = false
+                } else {
+                    val hasOpenBets = bets.any { it.isOpen }
+                    if (fixture.settlementComplete && hasOpenBets) fixture.settlementComplete = false
+                    if (!hasOpenBets) fixture.settlementComplete = true
+                }
+            }
+            changed = changed || oldResult != fixture.result || oldComplete != fixture.settlementComplete
+        }
+        if (changed) persistFixtures()
+        // IDs referenced by durable bets remain reserved even if fixture state was lost.
+        betsByFixture.keys.forEach(::reserveFixtureId)
     }
 
-    private fun persistFixtures() {
-        val dir = directory ?: return
+    private fun reserveFixtureId(id: String) {
+        val number = id.removePrefix("F").toIntOrNull()
+            ?: throw IllegalStateException("invalid fixture id '$id' in ledger or fixture state")
+        counter.updateAndGet { maxOf(it, number) }
+    }
+
+    private fun persistFixtures(
+        additional: Fixture? = null,
+        resultOverrides: Map<String, String?> = emptyMap(),
+        completionOverrides: Map<String, Boolean> = emptyMap(),
+        afterPersist: () -> Unit = {},
+    ) {
         synchronized(persistenceLock) {
-            val properties = Properties()
-            val ordered = fixtures().toList()
-            properties.setProperty("count", ordered.size.toString())
-            ordered.forEachIndexed { index, fixture ->
-                val prefix = "fixture.$index."
-                properties.setProperty(prefix + "id", fixture.id)
-                properties.setProperty(prefix + "home", fixture.home)
-                properties.setProperty(prefix + "away", fixture.away)
-                fixture.odds.forEach { (selection, price) -> properties.setProperty(prefix + "odds.$selection", price.toString()) }
-                properties.setProperty(prefix + "result", fixture.result.orEmpty())
-                properties.setProperty(prefix + "complete", fixture.settlementComplete.toString())
-            }
-            val target = dir.resolve(FIXTURES_FILE)
-            val temporary = Files.createTempFile(dir, "fixtures-", ".tmp")
-            try {
-                Files.newOutputStream(temporary).use { properties.store(it, "Demo fixture state") }
-                try {
-                    Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
-                } catch (e: AtomicMoveNotSupportedException) {
-                    Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
+            val dir = directory
+            if (dir != null) {
+                val properties = Properties()
+                val ordered = (fixtures.values + listOfNotNull(additional)).distinctBy { it.id }.sortedBy { it.id.removePrefix("F").toInt() }
+                properties.setProperty("count", ordered.size.toString())
+                ordered.forEachIndexed { index, fixture ->
+                    val prefix = "fixture.$index."
+                    properties.setProperty(prefix + "id", fixture.id)
+                    properties.setProperty(prefix + "home", fixture.home)
+                    properties.setProperty(prefix + "away", fixture.away)
+                    fixture.odds.forEach { (selection, price) -> properties.setProperty(prefix + "odds.$selection", price.toString()) }
+                    properties.setProperty(prefix + "result", (if (resultOverrides.containsKey(fixture.id)) resultOverrides[fixture.id] else fixture.result).orEmpty())
+                    properties.setProperty(prefix + "complete", (completionOverrides[fixture.id] ?: fixture.settlementComplete).toString())
                 }
-            } finally {
-                Files.deleteIfExists(temporary)
+                val target = dir.resolve(FIXTURES_FILE)
+                val temporary = Files.createTempFile(dir, "fixtures-", ".tmp")
+                try {
+                    FileChannel.open(temporary, WRITE).use { channel ->
+                        val output = Channels.newOutputStream(channel)
+                        properties.store(output, "Demo fixture state")
+                        output.flush()
+                        channel.force(true)
+                    }
+                    try {
+                        Files.move(temporary, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING)
+                    } catch (e: AtomicMoveNotSupportedException) {
+                        Files.move(temporary, target, StandardCopyOption.REPLACE_EXISTING)
+                    }
+                    if (!System.getProperty("os.name").startsWith("Windows")) {
+                        FileChannel.open(dir, READ).use { it.force(true) }
+                    }
+                } finally {
+                    Files.deleteIfExists(temporary)
+                }
             }
+            afterPersist()
         }
     }
 

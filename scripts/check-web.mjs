@@ -39,6 +39,63 @@ test("entry decoder preserves Long precision and rejects malformed records", () 
   }
 });
 
+test("money entry and display preserve exact decimal and minor-unit precision", () => {
+  const c = context();
+  assert.equal(vm.runInContext('toMinor("70368744177664.01")', c), "7036874417766401");
+  assert.equal(vm.runInContext('eur("9007199254740995")', c), "€90,071,992,547,409.95");
+  assert.equal(vm.runInContext('eur("-1")', c), "-€0.01");
+  assert.throws(() => vm.runInContext('toMinor("1.001")', c), /two decimal places/);
+  assert.throws(() => vm.runInContext('toMinor("92233720368547758.08")', c), /supported range/);
+});
+
+test("bet submissions send entered decimal amounts as exact minor-unit strings", async () => {
+  const calls = [];
+  const s = slipContext(async (path, options) => {
+    calls.push({ path, body: options.body.toString() });
+    return { ok: true, json: async () => ({ seq: 5 }) };
+  });
+  s.pick("HOME");
+  s.element("slipStake").value = "70368744177664.01";
+  await s.submit();
+  assert.match(calls[0].body, /stake=7036874417766401/);
+});
+
+test("uncertain wallet actions retry their original customer, amount and idempotency reference", async () => {
+  const calls = [];
+  const s = slipContext((path, options) => {
+    calls.push({ path, body: options.body.toString() });
+    if (calls.length === 1) return Promise.reject({ status: 504, error: "outcome_unknown", message: "unknown" });
+    return Promise.resolve({ ok: true, json: async () => ({ seq: 9, chainHash: "abcdef0123456789" }) });
+  });
+  s.element("depAmount").value = "1.01";
+  await s.c.walletAction("deposit");
+  assert.match(s.element("walletResult").innerHTML, /original deposit/);
+  vm.runInContext('player = "bob"', s.c);
+  s.element("depAmount").value = "9.99";
+  await s.c.walletAction("withdraw");
+  assert.deepEqual(calls[1], calls[0]);
+  await s.c.walletAction("withdraw");
+  assert.equal(calls[2].path, "/api/players/bob/withdraw");
+  assert.match(calls[2].body, /amount=999/);
+  assert.notEqual(calls[2].body, calls[1].body);
+});
+
+test("simulator event polling waits for the customer wall to be built", async () => {
+  let requests = 0;
+  const c = context();
+  c.api = async () => { requests++; return { lastId: 10, events: [] }; };
+  const begin = source.indexOf("async function pullEvents()");
+  const end = source.indexOf("function simStat", begin);
+  vm.runInContext(`
+    let wallReady = false, lastEventId = 0, wallFilter = "all";
+    const tiles = new Map();
+    ${source.slice(begin, end)}
+  `, c);
+  await c.pullEvents();
+  assert.equal(requests, 0);
+  assert.equal(vm.runInContext("lastEventId", c), 0);
+});
+
 test("verified panel renders canonical bytes, not altered JSON entry fields", async () => {
   const bytes = entryBytes();
   const root = Buffer.from(await webcrypto.subtle.digest("SHA-256", Buffer.concat([Buffer.from([0]), bytes])));
@@ -60,6 +117,7 @@ test("verified panel renders canonical bytes, not altered JSON entry fields", as
   assert.match(target.innerHTML, /deposit:real/);
   assert.match(target.innerHTML, /alice:cash:EUR/);
   assert.match(target.innerHTML, /\+100 EUR minor units/);
+  assert.match(target.innerHTML, /closest\('\.panel-head'\)\.parentElement\.hidden=true/);
   assert.doesNotMatch(target.innerHTML, /forged/i);
 });
 

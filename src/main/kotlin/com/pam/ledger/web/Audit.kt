@@ -71,7 +71,11 @@ class Audit(
     private fun snapshot(treeSize: Long): Path {
         val copy = Files.createTempDirectory("pam-ledger-snapshot")
         try {
-            val checkpoints = checkpoints().filter { it.head.treeSize <= treeSize }.map { it.encode() }
+            val checkpoints = ArrayList<ByteArray>()
+            Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE)) { record ->
+                val checkpoint = SignedTreeHead.decode(record)
+                if (checkpoint.head.treeSize <= treeSize) checkpoints += record
+            }
             writeRecords(copy.resolve(Ledger.CHECKPOINTS_FILE), checkpoints)
             copyEntryPrefix(copy.resolve(Ledger.ENTRIES_FILE), treeSize)
             return copy

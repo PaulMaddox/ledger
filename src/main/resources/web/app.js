@@ -13,12 +13,25 @@
 // ============================== helpers and API ==============================
 const $ = id => document.getElementById(id);
 const esc = s => String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
-const money = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR" });
-const eur = minor => money.format((minor ?? 0) / 100);
+const wholeMoney = new Intl.NumberFormat("en-IE", { style: "currency", currency: "EUR", maximumFractionDigits: 0 });
+const eur = minor => {
+  const amount = typeof minor === "number" ? BigInt(Math.round(minor)) : BigInt(minor ?? 0);
+  const absolute = amount < 0n ? -amount : amount;
+  return `${amount < 0n ? "-" : ""}${wholeMoney.format(absolute / 100n)}.${String(absolute % 100n).padStart(2, "0")}`;
+};
 const odds = h => (h / 100).toFixed(2);
 const int = new Intl.NumberFormat("en-IE");
 const short = h => h ? h.slice(0, 10) + "…" : "–";
-const toMinor = v => Math.round(parseFloat(v) * 100);
+const toMinor = v => {
+  const match = /^([+-]?)(\d+)(?:\.(\d{0,2}))?$/.exec(String(v).trim());
+  if (!match) throw new Error("Enter an amount with at most two decimal places.");
+  const absolute = BigInt(match[2]) * 100n + BigInt((match[3] || "").padEnd(2, "0"));
+  const amount = match[1] === "-" ? -absolute : absolute;
+  if (amount > 9223372036854775807n || amount < -9223372036854775808n) {
+    throw new Error("Amount exceeds the supported range.");
+  }
+  return amount.toString();
+};
 const timeOf = iso => new Date(iso).toLocaleTimeString([], { hour12: false });
 const uuid = () => crypto.randomUUID();
 
@@ -165,7 +178,7 @@ async function verifyEntry(seq, target) {
       : step(sig, `Checked the Ed25519 signature on those bytes with the ledger's public key (key ${esc(p.sth.keyId)}): ${sig ? "valid" : "INVALID"}`));
     const ok = leafOk && !!root && headOk && sig === true;
     target.innerHTML = `
-      <div class="panel-head"><h2>Entry #${e.seq}: ${esc(e.kind)}</h2><button type="button" onclick="this.closest('.panel').hidden=true">Close</button></div>
+      <div class="panel-head"><h2>Entry #${e.seq}: ${esc(e.kind)}</h2><button type="button" onclick="this.closest('.panel-head').parentElement.hidden=true">Close</button></div>
       <div class="verdict ${ok ? "ok" : "bad"}">${ok ? "Verified in this browser: this entry is part of the signed ledger, unaltered." : "Verification FAILED."}</div>
       <dl class="kv"><dt>key</dt><dd>${esc(e.key)}</dd><dt>time</dt><dd>${esc(new Date(Number(e.timestampMicros / 1000n)).toISOString())}</dd>
         ${e.postings.map(x => `<dt>${esc(x.account)}</dt><dd class="${x.amount > 0n ? "pos" : "neg"}">${x.amount > 0n ? "+" : ""}${int.format(x.amount)} ${esc(x.currency)} minor units</dd>`).join("")}</dl>
@@ -211,6 +224,8 @@ poll(async () => {
 let player = "alice";
 let selection = null; // {fixture, sel, odds, label, betId, params}
 let slipSubmitting = false;
+let walletRequest = null;
+let walletSubmitting = false;
 let fixturesCache = [];
 
 function updateSlipControls() {
@@ -235,7 +250,10 @@ function selectPlayer(id) {
   player = id;
   $("custProof").hidden = true;
   $("raceResult").innerHTML = "";
-  say($("walletResult"), null, ""); say($("betResult"), null, "");
+  if (walletRequest) {
+    say($("walletResult"), false, `Pending ${walletRequest.kind} for ${esc(walletRequest.player)}: retry to check its original reference.`);
+  } else say($("walletResult"), null, "");
+  say($("betResult"), null, "");
   document.querySelectorAll("#playerList [data-player]").forEach(b => b.setAttribute("aria-current", String(b.dataset.player === id)));
   refreshPlayer();
 }
@@ -259,7 +277,7 @@ async function refreshPlayer() {
     p.history.map(h => {
       const cash = h.postings.find(x => x.account === `player:${p.id}:cash:EUR`);
       return `<tr><td class="num">${h.seq}</td><td>${esc(h.kind)}</td>
-        <td class="num ${cash ? (cash.amount > 0 ? "pos" : "neg") : ""}">${cash ? (cash.amount > 0 ? "+" : "") + eur(cash.amount) : "–"}</td>
+        <td class="num ${cash ? (BigInt(cash.amount) > 0n ? "pos" : "neg") : ""}">${cash ? (BigInt(cash.amount) > 0n ? "+" : "") + eur(cash.amount) : "–"}</td>
         <td>${timeOf(h.time)}</td><td><button type="button" data-verify="${h.seq}">Verify</button></td></tr>`;
     }).join("");
 }
@@ -284,16 +302,35 @@ $("historyTable").addEventListener("click", e => {
 $("depositForm").addEventListener("submit", e => { e.preventDefault(); walletAction("deposit"); });
 $("withdrawBtn").addEventListener("click", () => walletAction("withdraw"));
 async function walletAction(kind) {
-  const amount = toMinor($("depAmount").value);
-  if (!(amount > 0)) return say($("walletResult"), false, "Enter an amount above zero.");
-  try {
-    // A fresh reference per click: a retried request would reuse it and be recorded once.
-    const r = await api(`players/${encodeURIComponent(player)}/${kind}`, { method: "POST", params: { amount, ref: `web-${kind}-${uuid()}` } });
-    say($("walletResult"), true, `${kind === "deposit" ? "Deposited" : "Withdrew"} ${eur(amount)}. Entry #${r.seq}, chain <code>${short(r.chainHash)}</code>`);
-  } catch (err) {
-    say($("walletResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds. The ledger never lets a balance go negative." : errText(err));
+  if (walletSubmitting) return;
+  if (!walletRequest) {
+    let amount;
+    try { amount = toMinor($("depAmount").value); }
+    catch (e) { return say($("walletResult"), false, esc(e.message)); }
+    if (BigInt(amount) <= 0n) return say($("walletResult"), false, "Enter an amount above zero.");
+    walletRequest = { kind, player, amount, ref: `web-${kind}-${uuid()}` };
   }
-  refreshPlayer(); loadPlayers();
+  const request = walletRequest;
+  walletSubmitting = true;
+  try {
+    const r = await api(`players/${encodeURIComponent(request.player)}/${request.kind}`, {
+      method: "POST", params: { amount: request.amount, ref: request.ref },
+    });
+    walletRequest = null;
+    say($("walletResult"), true, `${request.kind === "deposit" ? "Deposited" : "Withdrew"} ${eur(request.amount)} for ${esc(request.player)}. Entry #${r.seq}, chain <code>${short(r.chainHash)}</code>`);
+  } catch (err) {
+    if (Number.isInteger(err.status) && err.status < 500 && err.error !== "outcome_unknown") walletRequest = null;
+    const uncertain = walletRequest === request;
+    say($("walletResult"), false, err.error === "insufficient_funds"
+      ? "Refused: insufficient funds. The ledger never lets a balance go negative."
+      : uncertain
+        ? `Outcome unknown. Retry to check the original ${request.kind} for ${esc(request.player)}; its amount and reference are retained.`
+        : errText(err));
+  } finally {
+    walletSubmitting = false;
+  }
+  if (player === request.player) refreshPlayer();
+  loadPlayers();
 }
 
 async function loadCustFixtures() {
@@ -320,8 +357,10 @@ $("slip").addEventListener("submit", async e => {
   const submittedSelection = selection;
   // A lost response must retry the same player, stake and key, not silently create another bet.
   if (!submittedSelection.params) {
-    const stake = toMinor($("slipStake").value);
-    if (!(stake > 0)) return say($("betResult"), false, "Enter a stake above zero.");
+    let stake;
+    try { stake = toMinor($("slipStake").value); }
+    catch (e) { return say($("betResult"), false, esc(e.message)); }
+    if (BigInt(stake) <= 0n) return say($("betResult"), false, "Enter a stake above zero.");
     submittedSelection.player = player;
     submittedSelection.params = { fixture: submittedSelection.fixture, selection: submittedSelection.sel, stake, betId: submittedSelection.betId };
   }
@@ -352,7 +391,7 @@ $("raceBtn").addEventListener("click", async () => {
   if (player !== requestedPlayer) return;
   const f = fixturesCache.find(x => !x.result);
   if (!f) return ($("raceResult").innerHTML = `<p class="hint">No open fixture to bet on.</p>`);
-  if (p.cash <= 0) return ($("raceResult").innerHTML = `<p class="hint">${esc(requestedPlayer)} has no cash. Deposit first.</p>`);
+  if (BigInt(p.cash) <= 0n) return ($("raceResult").innerHTML = `<p class="hint">${esc(requestedPlayer)} has no cash. Deposit first.</p>`);
   $("raceResult").innerHTML = "";
   const attempts = await Promise.allSettled([1, 2, 3, 4, 5].map(() =>
     api(`players/${encodeURIComponent(requestedPlayer)}/bets`, { method: "POST", params: { fixture: f.id, selection: "HOME", stake: p.cash, betId: uuid() } })));
@@ -416,7 +455,7 @@ async function refreshOperator() {
   const max = Math.max(1, ...kinds.map(k => k[1]));
   $("kindBars").innerHTML = kinds.map(([k, n]) => `<div class="bar"><span>${esc(k)}</span><div class="track"><i style="width:${(100 * n / max).toFixed(1)}%"></i></div><span class="n">${int.format(n)}</span></div>`).join("");
   $("feed").innerHTML = o.feed.map(e => {
-    const plus = e.postings.find(p => p.amount > 0);
+    const plus = e.postings.find(p => BigInt(p.amount) > 0n);
     return `<div><span class="seq">#${e.seq}</span><span class="who">${esc(e.metadata.playerId || "")}</span><span>${esc(e.kind)} ${plus ? eur(plus.amount) : ""}</span></div>`;
   }).join("");
 }
@@ -549,7 +588,7 @@ $("paForm").addEventListener("submit", async e => {
         <span class="hint">${int.format(r.entries)} entries · replayed cash ${eur(r.replayedCash)} vs ledger ${eur(r.ledgerCash)} · in open bets ${eur(r.replayedEscrow)} vs ${eur(r.ledgerEscrow)}</span></div>
       <div class="tablewrap"><table class="tbl"><tr><th class="num">#</th><th>Type</th><th>Time</th><th class="num">Cash change</th><th class="num">Cash after</th><th class="num">Open bets after</th><th>Chain hash</th></tr>
       ${r.rows.map(x => `<tr><td class="num">${x.seq}</td><td>${esc(x.kind)}</td><td>${timeOf(x.time)}</td>
-        <td class="num ${x.cashDelta > 0 ? "pos" : x.cashDelta < 0 ? "neg" : ""}">${x.cashDelta ? eur(x.cashDelta) : "–"}</td>
+        <td class="num ${BigInt(x.cashDelta) > 0n ? "pos" : BigInt(x.cashDelta) < 0n ? "neg" : ""}">${BigInt(x.cashDelta) !== 0n ? eur(x.cashDelta) : "–"}</td>
         <td class="num">${eur(x.cash)}</td><td class="num">${eur(x.escrow)}</td><td><code>${short(x.chainHash)}</code></td></tr>`).join("")}</table></div>`;
   } catch (err) { $("paResult").innerHTML = `<div class="verdict bad">${errText(err)}</div>`; }
 });
@@ -563,6 +602,7 @@ views.regulator = {
 // ============================== simulator ==============================
 const WALL_LIMIT = 500;
 const tiles = new Map(); // customer -> {el, stream, bal, lastOk}
+let wallReady = false;
 let wallSize = 0, lastEventId = 0, wallFilter = "all", lastCount = null, lastCountAt = 0, measuredRate = 0;
 
 function buildWall(customers) {
@@ -608,6 +648,7 @@ $("wall").addEventListener("click", e => {
 });
 
 async function pullEvents() {
+  if (!wallReady) return;
   const r = await api("simulator/events?after=" + lastEventId);
   lastEventId = r.lastId;
   const now = performance.now();
@@ -649,6 +690,7 @@ async function refreshSim() {
     $("simAuto").checked = s.autoFixtures;
   }
   buildWall(s.customers);
+  wallReady = true;
   $("simStart").disabled = s.state !== "STOPPED";
   $("simPause").disabled = s.state === "STOPPED";
   $("simPause").textContent = s.state === "PAUSED" ? "Resume" : "Pause";
@@ -689,7 +731,7 @@ $("simStop").addEventListener("click", () => simAction("stop", false));
 
 let stopSim = [];
 views.simulator = {
-  enter() { stopSim = [poll(refreshSim, 1000), poll(pullEvents, 500)]; },
+  enter() { wallReady = false; stopSim = [poll(refreshSim, 1000), poll(pullEvents, 500)]; },
   leave() { stopSim.forEach(f => f()); },
 };
 
