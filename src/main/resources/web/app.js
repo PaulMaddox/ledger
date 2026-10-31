@@ -511,13 +511,14 @@ async function refreshCheckpoints() {
       sigCache.set(k, sig === null ? null : sig && consistentFields);
     }
   }
+  const checkpointTime = c => timeOf(parseTreeHead(b64(c.signingBytes)).timestampMicros / 1000);
   $("sthTable").innerHTML = `<tr><th class="num">Entries covered</th><th>Merkle root</th><th>Signed</th><th>Signature (checked here)</th></tr>` +
     r.checkpoints.slice(0, 50).map(c => {
       const v = sigCache.get(checkpointKey(c, r.publicKey));
-      return `<tr><td class="num">${int.format(c.treeSize)}</td><td><code>${short(c.rootHash)}</code></td><td>${timeOf(c.time)}</td>
+      return `<tr><td class="num">${int.format(c.treeSize)}</td><td><code>${short(c.rootHash)}</code></td><td>${checkpointTime(c)}</td>
         <td>${v === null ? `<span class="pill mut">no Ed25519 in browser</span>` : v ? `<span class="pill ok">valid</span>` : `<span class="pill bad">invalid</span>`}</td></tr>`;
     }).join("");
-  const opts = r.checkpoints.filter(c => c.treeSize > 0).map(c => `<option value="${c.treeSize}">${int.format(c.treeSize)} entries · ${timeOf(c.time)}</option>`).join("");
+  const opts = r.checkpoints.filter(c => c.treeSize > 0).map(c => `<option value="${c.treeSize}">${int.format(c.treeSize)} entries · ${checkpointTime(c)}</option>`).join("");
   for (const id of ["consFrom", "consTo"]) {
     const el = $(id), keep = el.value;
     el.innerHTML = opts;
