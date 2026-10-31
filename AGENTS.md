@@ -110,6 +110,10 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
   explains why.
 - A PR description states what changed, why, and which checks you ran and their results.
 - Before opening a PR: run the tests, rebuild the guide, and run `check-guide.mjs`.
+- CI (`.github/workflows/ci.yml`) runs on every pull request: the test suite twice (to
+  catch intermittent races), the demo with its audit, a check that `docs/index.html` was
+  rebuilt, and `check-guide.mjs`. Both CI jobs must pass before a PR can be merged. If CI
+  fails, fix the cause; never skip, retry until green, or weaken the check.
 
 ## Security and data
 
