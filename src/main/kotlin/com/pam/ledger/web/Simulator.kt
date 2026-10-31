@@ -260,7 +260,8 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
         state = State.STOPPED
         ticker.shutdownNow()
         workers.shutdown()
-        workers.awaitTermination(5, TimeUnit.SECONDS)
+        check(ticker.awaitTermination(5, TimeUnit.SECONDS)) { "simulator ticker did not stop" }
+        check(workers.awaitTermination(30, TimeUnit.SECONDS)) { "simulator workers did not stop" }
     }
 
     companion object {
@@ -305,5 +306,8 @@ class Stats(private val readModel: ReadModel) : AutoCloseable {
 
     fun series(): List<Point> = synchronized(points) { points.toList() }
 
-    override fun close() { sampler.shutdownNow() }
+    override fun close() {
+        sampler.shutdownNow()
+        check(sampler.awaitTermination(5, TimeUnit.SECONDS)) { "operator sampler did not stop" }
+    }
 }
