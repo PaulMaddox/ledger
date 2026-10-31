@@ -372,7 +372,7 @@ async function refreshFixtures() {
       <td class="num">${odds(f.odds.HOME)} / ${odds(f.odds.DRAW)} / ${odds(f.odds.AWAY)}</td>
       <td class="num">${int.format(f.openBets)}</td><td class="num">${eur(f.staked)}</td>
       <td class="num liab">${eur(f.liability.HOME)} / ${eur(f.liability.DRAW)} / ${eur(f.liability.AWAY)}</td>
-      <td>${f.result ? `<span class="pill mut">${esc(f.result)}</span>` : `<span class="settle">${["HOME", "DRAW", "AWAY", "VOID"].map(r => `<button type="button" data-settle="${esc(f.id)}" data-result="${r}">${r[0] + r.slice(1).toLowerCase()}</button>`).join("")}</span>`}</td></tr>`).join("");
+      <td>${f.result ? (f.needsSettlement ? `<span class="settle"><span class="pill mut">${esc(f.result)}</span><button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume settlement</button></span>` : `<span class="pill mut">${esc(f.result)}</span>`) : `<span class="settle">${["HOME", "DRAW", "AWAY", "VOID"].map(r => `<button type="button" data-settle="${esc(f.id)}" data-result="${r}">${r[0] + r.slice(1).toLowerCase()}</button>`).join("")}</span>`}</td></tr>`).join("");
 }
 $("fixtureTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-settle]");
