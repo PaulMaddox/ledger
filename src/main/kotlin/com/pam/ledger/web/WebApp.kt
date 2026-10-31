@@ -55,6 +55,7 @@ import kotlin.system.exitProcess
  *
  *  Run with:  ./gradlew web          (Windows: .\gradlew.bat web)
  *  Options:   --port 8080  --host 127.0.0.1  --allowed-host <hostname>  --data <folder>
+ *             --public-origin https://<hostname> (behind a TLS reverse proxy)
  *
  *  Uses only the JDK's built-in HTTP server, so the runtime still has no
  *  dependencies beyond the JDK and the Kotlin standard library.
@@ -70,7 +71,21 @@ data class WebOptions(
     val host: String = "127.0.0.1",
     val dataDir: Path? = null,
     val allowedHosts: Set<String> = emptySet(),
+    val publicOrigin: String? = null,
 )
+
+private fun publicOrigin(value: String): URI {
+    val uri = try { URI(value) } catch (e: java.net.URISyntaxException) {
+        throw IllegalArgumentException("--public-origin must be an exact HTTPS origin", e)
+    }
+    require(uri.scheme == "https" && uri.host != null && uri.rawUserInfo == null &&
+        uri.rawPath.isEmpty() && uri.rawQuery == null && uri.rawFragment == null &&
+        (uri.port == -1 || uri.port in 1..65535)) {
+        "--public-origin must be an exact HTTPS origin without a path"
+    }
+    allowedHost(uri.host)
+    return uri
+}
 
 private fun allowedHost(value: String): String {
     val authority = if (':' in value && !value.startsWith("[")) "[$value]" else value
@@ -89,7 +104,8 @@ internal fun WebOptions.allowedRequestHosts(): Set<String> {
     val configured = host.removeSurrounding("[", "]").lowercase()
     val loopbacks = setOf("localhost", "127.0.0.1", "::1")
     val defaults = if (configured in loopbacks || configured in setOf("0.0.0.0", "::")) loopbacks else setOf(configured)
-    return defaults + allowedHosts.map(::allowedHost)
+    return defaults + allowedHosts.map(::allowedHost) +
+        listOfNotNull(publicOrigin?.let { publicOrigin(it).host.removeSurrounding("[", "]").lowercase() })
 }
 
 fun main(args: Array<String>) {
@@ -97,7 +113,7 @@ fun main(args: Array<String>) {
         parseArgs(args)
     } catch (e: IllegalArgumentException) {
         System.err.println(e.message)
-        System.err.println("usage: web [--port 8080] [--host 127.0.0.1] [--allowed-host <hostname>] [--data <folder>]")
+        System.err.println("usage: web [--port 8080] [--host 127.0.0.1] [--allowed-host <hostname>] [--data <folder>] [--public-origin https://<hostname>]")
         exitProcess(2)
     }
     val app = LedgerWebApp.start(opts)
@@ -121,6 +137,7 @@ internal fun parseArgs(args: Array<String>): WebOptions {
             "--port" -> o = o.copy(port = value().toIntOrNull()?.takeIf { it in 0..65535 } ?: throw IllegalArgumentException("--port must be 0-65535"))
             "--host" -> o = o.copy(host = value())
             "--allowed-host" -> o = o.copy(allowedHosts = o.allowedHosts + allowedHost(value()))
+            "--public-origin" -> o = o.copy(publicOrigin = publicOrigin(value()).toString())
             "--data" -> o = o.copy(dataDir = Path.of(value()))
             else -> throw IllegalArgumentException("unknown option ${args[i]}")
         }
@@ -187,6 +204,7 @@ class LedgerWebApp private constructor(
     private val stats: Stats,
     private val audit: Audit,
     private val allowedHosts: Set<String>,
+    private val publicOrigin: URI?,
     private val resources: List<AutoCloseable>,
 ) : AutoCloseable {
     private lateinit var server: HttpServer
@@ -214,7 +232,7 @@ class LedgerWebApp private constructor(
                 val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
                 val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
                 resources.add(AutoCloseable { server.stop(0) })
-                val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, stats, audit, allowedHosts, resources)
+                val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, stats, audit, allowedHosts, opts.publicOrigin?.let(::publicOrigin), resources)
                 app.server = server
                 server.executor = executor
                 server.createContext("/") { ex -> app.handle(ex) }
@@ -329,9 +347,16 @@ class LedgerWebApp private constructor(
         val port = server.address.port
         val hostUri = ex.requestHeaders.getFirst("Host")?.let { runCatching { URI("http://$it") }.getOrNull() }
         val host = hostUri?.host?.removeSurrounding("[", "]")?.lowercase()
-        val hostPort = hostUri?.port?.takeIf { it >= 0 } ?: 80
+        // Trust only the configured public origin, never client-supplied forwarding headers.
+        val external = publicOrigin?.takeIf {
+            it.host.removeSurrounding("[", "]").equals(host, true) &&
+                (hostUri?.port?.takeIf { p -> p >= 0 } ?: 443) == (it.port.takeIf { p -> p >= 0 } ?: 443)
+        }
+        val scheme = if (external != null) "https" else "http"
+        val hostPort = hostUri?.port?.takeIf { it >= 0 } ?: if (external != null) 443 else 80
+        val expectedPort = if (external != null) hostPort else port
         if (hostUri == null || hostUri.rawUserInfo != null || hostUri.rawPath.isNotEmpty() ||
-            hostUri.rawQuery != null || hostUri.rawFragment != null || hostPort != port || host !in allowedHosts) {
+            hostUri.rawQuery != null || hostUri.rawFragment != null || hostPort != expectedPort || host !in allowedHosts) {
             throw HttpError(403, "invalid_host", "request Host is not allowed")
         }
         // Following a link from another site is safe; Host validation still prevents rebinding.
@@ -339,9 +364,9 @@ class LedgerWebApp private constructor(
 
         fun sameOrigin(value: String, isReferer: Boolean): Boolean {
             val origin = runCatching { URI(value) }.getOrNull() ?: return false
-            val originPort = origin.port.takeIf { it >= 0 } ?: 80
-            return origin.scheme == "http" && origin.host?.removeSurrounding("[", "]")?.equals(host, true) == true &&
-                originPort == port && origin.rawUserInfo == null &&
+            val originPort = origin.port.takeIf { it >= 0 } ?: if (origin.scheme == "https") 443 else 80
+            return origin.scheme == scheme && origin.host?.removeSurrounding("[", "]")?.equals(host, true) == true &&
+                originPort == expectedPort && origin.rawUserInfo == null &&
                 (isReferer || (origin.rawPath.isEmpty() && origin.rawQuery == null && origin.rawFragment == null))
         }
         val origin = ex.requestHeaders.getFirst("Origin")
