@@ -79,6 +79,25 @@ class WebAppTest {
         assertTrue(proof.second.contains("\"verified\":true"), proof.second)
     }
 
+    /** Tamper demonstrations must attack signed history even as new unsigned entries arrive. */
+    @Test
+    fun `every tamper mode is caught while the simulator appends`() = withApp { app ->
+        repeat(10) { call(app, "POST", "players/bob/deposit", mapOf("amount" to 100, "ref" to "signed-$it")) }
+        assertEquals(200, call(app, "POST", "simulator", mapOf("customers" to 20, "opsPerMinute" to 600, "autoFixtures" to "false", "action" to "start")).first)
+        try {
+            repeat(10) {
+                for (mode in listOf("edit", "rewrite", "truncate")) {
+                    val (status, body) = call(app, "POST", "regulator/tamper", mapOf("mode" to mode))
+                    assertEquals(200, status, body)
+                    assertTrue(body.contains("\"ok\":false"), "concurrent '$mode' must change signed history: $body")
+                }
+            }
+        } finally {
+            call(app, "POST", "simulator", mapOf("action" to "stop"))
+        }
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
     @Test
     fun `simulator starts, pauses, resumes and stops, and its customers appear in the ledger`() = withApp { app ->
         val start = call(app, "POST", "simulator", mapOf("customers" to 50, "opsPerMinute" to 600, "autoFixtures" to "true", "action" to "start"))

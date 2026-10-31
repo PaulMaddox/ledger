@@ -73,7 +73,8 @@ ledger, so anything done in one view shows up in the others.
   settlement buttons, and a live transaction feed.
 - **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
   consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
-  corrupts a *copy* of the journal three different ways and shows the verifier catching each.
+  corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
+  catching each, even while the simulator appends new entries.
 
 | Operator | Customer |
 |---|---|

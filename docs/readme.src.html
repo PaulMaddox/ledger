@@ -545,7 +545,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   </div>
   <figure class="shot wide">
     <a href="screenshots/regulator-tamper.png"><img src="screenshots/regulator-tamper.png" alt="Tamper lab: a rewritten history caught by the signed checkpoint" loading="lazy"></a>
-    <figcaption><b>Tamper lab.</b> A copy of the journal is rewritten with every hash recomputed; the signed checkpoint still exposes it.</figcaption>
+    <figcaption><b>Tamper lab.</b> A copy is bounded to a captured signed checkpoint before attacking it, even while the simulator runs. Recomputing every hash still cannot conceal the rewritten signed history.</figcaption>
   </figure>
 </section>
 

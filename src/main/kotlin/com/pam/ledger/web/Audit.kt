@@ -101,23 +101,36 @@ class Audit(
      *
      *  - "edit":     inflate one deposit tenfold in place (a careless forger);
      *  - "rewrite":  inflate it and recompute every later hash (a careful forger);
-     *  - "truncate": delete the newest five entries (a rollback to hide a recent payout).
+     *  - "truncate": delete the newest five signed entries (a rollback to hide a recent payout).
      */
     fun tamper(mode: String): AuditResult {
         require(mode in setOf("edit", "rewrite", "truncate")) { "mode must be edit, rewrite or truncate" }
-        ledger.checkpoint() // make sure a signed checkpoint covers everything, as in production
+        val sth = checkpointNow()
         val dir = snapshot()
         try {
             val path = dir.resolve(Ledger.ENTRIES_FILE)
             val records = ArrayList<ByteArray>()
-            Journal.scanReadOnly(path) { records += it }
+            Journal.scanReadOnly(path) {
+                if (records.size.toLong() < sth.head.treeSize) records += it
+            }
+            require(records.size.toLong() == sth.head.treeSize) { "snapshot is missing signed entries" }
+            // The simulator can append while files are copied. Attack exactly this signed
+            // prefix, not an unsigned suffix; discard newer checkpoints from the copy too.
+            val checkpointsPath = dir.resolve(Ledger.CHECKPOINTS_FILE)
+            val checkpoints = ArrayList<ByteArray>()
+            Journal.scanReadOnly(checkpointsPath) {
+                if (SignedTreeHead.decode(it).head.treeSize <= sth.head.treeSize) checkpoints += it
+            }
+            Files.delete(checkpointsPath)
+            val (checkpointJournal, _) = Journal.openForAppend(checkpointsPath) {}
+            checkpointJournal.use { it.appendBatch(checkpoints) }
             require(records.size >= 6) { "the ledger needs a few more entries first" }
             fun body(r: ByteArray) = r.copyOfRange(0, r.size - 32)
 
             val note = when (mode) {
                 "truncate" -> {
                     repeat(5) { records.removeAt(records.size - 1) }
-                    "Deleted the newest 5 entries from a copy of the journal, as if to hide recent payouts."
+                    "Deleted the newest 5 signed entries from a copy of the journal, as if to hide recent payouts."
                 }
                 else -> {
                     // The victim: the most recent deposit outside the newest few entries.
