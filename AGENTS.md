@@ -30,6 +30,7 @@ docs/
   readme.src.html        SOURCE of the interactive guide (edit this)
   index.html             BUILT guide served by GitHub Pages (never edit by hand)
 scripts/
+  setup.sh, setup.ps1    one-command developer setup (Ubuntu, Windows); keep README in step
   build-readme.py        builds docs/index.html, embedding the real Kotlin sources and tests
   check-guide.mjs        headless check of the built guide
 ```
@@ -37,13 +38,17 @@ scripts/
 ## Commands
 
 ```
-gradle test                          # full test suite (JUnit 5)
-gradle run                           # demo: concurrent betting, audit, proofs
+./gradlew test                       # full test suite (JUnit 5); gradlew.bat on Windows
+./gradlew run                        # demo: concurrent betting, audit, proofs
 python3 scripts/build-readme.py      # rebuild docs/index.html after ANY source or guide change
 node scripts/check-guide.mjs         # must print four PASS lines
 ```
 
-If Gradle cannot reach Maven Central in your environment, say so plainly. You may
+Always use the wrapper (`./gradlew`), never a locally installed `gradle`, so builds use
+the same Gradle version as CI. Do not change `gradle/wrapper/` except to upgrade Gradle
+deliberately, with `./gradlew wrapper --gradle-version <version>`.
+
+If the wrapper cannot download Gradle, or Gradle cannot reach Maven Central, in your environment, say so plainly. You may
 compile with a standalone `kotlinc`, but never report the test suite as passing
 unless the tests actually ran.
 
@@ -112,7 +117,8 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 - Before opening a PR: run the tests, rebuild the guide, and run `check-guide.mjs`.
 - CI (`.github/workflows/ci.yml`) runs on every pull request: the test suite twice (to
   catch intermittent races), the demo with its audit, a check that `docs/index.html` was
-  rebuilt, and `check-guide.mjs`. Both CI jobs must pass before a PR can be merged. If CI
+  rebuilt, `check-guide.mjs`, and the README's one-command setup and demo on fresh Ubuntu
+  and Windows machines. All CI jobs must pass before a PR can be merged. If CI
   fails, fix the cause; never skip, retry until green, or weaken the check.
 
 ## Security and data
