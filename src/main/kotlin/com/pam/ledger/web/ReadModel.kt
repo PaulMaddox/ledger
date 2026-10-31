@@ -39,8 +39,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         val payout: Long? = null,
     ) {
         val isOpen get() = settledSeq == null
-        /** What the house would pay out if this bet won: stake x odds, rounded down, computed without overflow. */
-        val potentialPayout get() = Book.payout(stake, oddsHundredths)
+        /** What the house would pay out if this bet won: stake x odds, rounded down to whole minor units. */
+        val potentialPayout get() = payout(stake, oddsHundredths)
     }
 
     data class Totals(
@@ -52,15 +52,14 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     private var next = 0L
     private val byPlayer = HashMap<String, MutableList<Long>>()
     private val bets = LinkedHashMap<String, BetView>()
+    private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
+    private val openBetsByFixture = HashMap<String, MutableSet<String>>()
     private val kindCounts = HashMap<String, Long>()
     private var deposits = 0L
     private var withdrawals = 0L
     private var staked = 0L
     private var returned = 0L
     private val recent = ArrayDeque<Long>()
-    // Open bets indexed two ways, so per-player and per-fixture lookups never scan every bet ever placed.
-    private val openByPlayer = HashMap<String, LinkedHashSet<String>>()
-    private val openByFixture = HashMap<String, LinkedHashSet<String>>()
 
     @Volatile private var running = true
     private val poller = Thread({
@@ -100,12 +99,12 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 if (parts != null && parts.size == 3) {
                     val betId = e.metadata.getValue("betId")
                     bets[betId] = BetView(
-                        betId = betId, playerId = player, fixtureId = parts[0],
+                        betId = e.metadata.getValue("betId"), playerId = player, fixtureId = parts[0],
                         selection = parts[1], oddsHundredths = parts[2].toInt(), stake = stake,
                         placedSeq = e.seq, placedAtMicros = e.timestampMicros,
                     )
-                    openByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
-                    openByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
+                    openBetsByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
+                    openBetsByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
                 }
             }
             "BET_WON", "BET_LOST", "BET_VOIDED", "BET_CASHED_OUT" -> {
@@ -114,8 +113,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 returned += payout
                 bets[betId]?.let {
                     bets[betId] = it.copy(settledSeq = e.seq, outcome = e.kind.removePrefix("BET_"), payout = payout)
-                    openByPlayer[it.playerId]?.remove(betId)
-                    openByFixture[it.fixtureId]?.remove(betId)
+                    openBetsByPlayer[it.playerId]?.remove(betId)
+                    openBetsByFixture[it.fixtureId]?.remove(betId)
                 }
             }
         }
@@ -125,30 +124,20 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
 
     fun seqsForPlayer(player: String): List<Long> = synchronized(lock) { byPlayer[player]?.toList() ?: emptyList() }
     fun betsForPlayer(player: String): List<BetView> = synchronized(lock) { bets.values.filter { it.playerId == player } }
+    fun allBets(): List<BetView> = synchronized(lock) { bets.values.toList() }
+    fun openBetsForPlayer(player: String): List<BetView> = synchronized(lock) {
+        openBetsByPlayer[player].orEmpty().mapNotNull(bets::get)
+    }
     fun bet(betId: String): BetView? = synchronized(lock) { bets[betId] }
     fun openBets(): List<BetView> = synchronized(lock) { bets.values.filter { it.isOpen } }
-    fun openBetsOn(fixtureId: String): List<BetView> = synchronized(lock) { openByFixture[fixtureId]?.mapNotNull { bets[it] } ?: emptyList() }
-    fun openBetIdsFor(player: String): List<String> = synchronized(lock) { openByPlayer[player]?.toList() ?: emptyList() }
-    /** Every fixture id any bet refers to, so a restarted app never reuses one. */
-    fun referencedFixtureIds(): Set<String> = synchronized(lock) { bets.values.mapTo(HashSet()) { it.fixtureId } }
+    fun openBetsOn(fixtureId: String): List<BetView> = synchronized(lock) {
+        openBetsByFixture[fixtureId].orEmpty().mapNotNull(bets::get)
+    }
     fun recentSeqs(): List<Long> = synchronized(lock) { recent.toList().asReversed() }
     fun players(): Set<String> = synchronized(lock) { byPlayer.keys.toSet() }
     fun totals(): Totals = synchronized(lock) { Totals(next, deposits, withdrawals, staked, returned, HashMap(kindCounts)) }
 
     fun balance(account: AccountId) = ledger.balance(account)
-
-    /**
-     * Catch up until entry [seq] has been processed. An account's new balance becomes visible a
-     * moment before the ledger's head moves past its entry, so this waits (briefly) for the head.
-     */
-    fun catchUpTo(seq: Long) {
-        repeat(500) {
-            catchUp()
-            if (synchronized(lock) { next } > seq) return
-            Thread.sleep(1)
-        }
-        throw IllegalStateException("read model could not reach entry #$seq")
-    }
 
     override fun close() {
         running = false

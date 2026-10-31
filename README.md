@@ -81,10 +81,13 @@ ledger, so anything done in one view shows up in the others.
 | ![Regulator view](docs/screenshots/regulator.png) | ![An entry verified in the browser](docs/screenshots/customer-verify.png) |
 
 Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
-ledger lives in a fresh temporary folder each run; with it, the ledger survives restarts.
-The console is a **demonstration with no authentication**: the tabs are a view switch, not
-access control, so it listens on localhost only. It uses the JDK's built-in HTTP server and
-no front-end libraries, so the project still has no runtime dependencies beyond the JDK.
+ledger lives in a fresh temporary folder each run; with it, the ledger, signing key, fixture
+definitions and results survive restarts. Old data without saved fixture state is kept
+unresolved rather than being assigned a guessed result. The console is a **demonstration
+with no authentication**: the tabs are a view switch, not access control. Browser mutations
+are restricted to same-origin requests and valid Host names; by default it listens on
+localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so the project
+still has no runtime dependencies beyond the JDK.
 
 ## Running
 

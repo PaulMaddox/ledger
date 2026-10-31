@@ -1,5 +1,7 @@
 package com.pam.ledger
 
+import java.util.concurrent.CompletableFuture
+
 /*
  * ============================================================================
  *  SPORTSBOOK WALLET: the PAM-facing API on top of the generic ledger
@@ -82,23 +84,18 @@ class SportsbookWallet(private val ledger: Ledger) {
      * [InsufficientFundsException]. There is no window for a double spend.
      */
     fun placeBet(playerId: String, betId: String, stake: Long, currency: String, selection: String = ""): Receipt {
-        require(stake > 0) { "stake must be positive" }
-        return ledger.append(
-            TransactionRequest(
-                idempotencyKey = placementKey(betId),
-                kind = "BET_PLACED",
-                postings = listOf(
-                    Posting(Accounts.cash(playerId, currency), currency, -stake),
-                    Posting(Accounts.openBets(playerId, currency), currency, stake),
-                ),
-                metadata = buildMap {
-                    put("betId", betId)
-                    put("playerId", playerId)
-                    if (selection.isNotEmpty()) put("selection", selection)
-                },
-            ),
-        )
+        return ledger.append(placementRequest(playerId, betId, stake, currency, selection))
     }
+
+    /**
+     * Submit a placement without cancelling it when a caller stops waiting.
+     * The returned future completes only when the ledger has a definitive outcome.
+     */
+    fun placeBetAsync(playerId: String, betId: String, stake: Long, currency: String, selection: String = "") =
+        ledger.submit(placementRequest(playerId, betId, stake, currency, selection))
+
+    /** True once this bet's placement has committed. */
+    fun hasBetPlacement(betId: String) = ledger.findByIdempotencyKey(placementKey(betId)) != null
 
     /** Bet won: return [payout] (stake included) to the player. */
     fun settleWin(betId: String, payout: Long) = settle(betId, "BET_WON", payout)
@@ -142,6 +139,23 @@ class SportsbookWallet(private val ledger: Ledger) {
     }
 
     private data class Placement(val seq: Long, val playerId: String, val stake: Long, val currency: String)
+
+    private fun placementRequest(playerId: String, betId: String, stake: Long, currency: String, selection: String): TransactionRequest {
+        require(stake > 0) { "stake must be positive" }
+        return TransactionRequest(
+            idempotencyKey = placementKey(betId),
+            kind = "BET_PLACED",
+            postings = listOf(
+                Posting(Accounts.cash(playerId, currency), currency, -stake),
+                Posting(Accounts.openBets(playerId, currency), currency, stake),
+            ),
+            metadata = buildMap {
+                put("betId", betId)
+                put("playerId", playerId)
+                if (selection.isNotEmpty()) put("selection", selection)
+            },
+        )
+    }
 
     /** Reconstruct the bet from its placement entry, the single source of truth. */
     private fun placement(betId: String): Placement {
