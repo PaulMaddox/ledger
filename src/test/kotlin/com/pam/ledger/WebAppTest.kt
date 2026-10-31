@@ -89,7 +89,7 @@ class WebAppTest {
         assertTrue(retry.second.contains("\"replayed\":true"), "a retried slip must replay, not bet twice: ${retry.second}")
 
         val (_, offer) = call(app, "GET", "bets/slip-1/cashout")
-        assertTrue(offer.contains("\"offer\":850"), "85% cash-out offer on a 10.00 stake: $offer")
+        assertTrue(offer.contains("\"offer\":\"850\""), "85% cash-out offer on a 10.00 stake: $offer")
         assertEquals(400, call(app, "POST", "players/alice/bets", bet + ("selection" to "PINK") + ("betId" to "slip-2")).first)
     }
 
