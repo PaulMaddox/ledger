@@ -396,6 +396,45 @@ class WebAppTest {
         }
     }
 
+    /** A delayed wallet response is pending, not a rejected money movement. */
+    @Test
+    fun `simulator waits beyond wallet timeout before publishing an outcome`() {
+        val hold = AtomicBoolean(true)
+        val queued = ConcurrentLinkedQueue<Runnable>()
+        val waiting = CountDownLatch(1)
+        val executor = Executor { task ->
+            if (hold.get()) { queued.add(task); waiting.countDown() }
+            else java.util.concurrent.ForkJoinPool.commonPool().execute(task)
+        }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                Simulator(Book(wallet, model), wallet).use { simulator ->
+                    simulator.configure(1, 600, false)
+                    try {
+                        race(2) { t ->
+                            if (t == 0) simulator.start()
+                            else {
+                                check(waiting.await(5, TimeUnit.SECONDS))
+                                simulator.pause()
+                                Thread.sleep(31_000)
+                                assertEquals(0L, simulator.rejectedOther.get())
+                                assertTrue(simulator.eventPage(0).events.isEmpty())
+                            }
+                        }.forEach { it.getOrThrow() }
+                    } finally {
+                        hold.set(false)
+                        while (true) java.util.concurrent.ForkJoinPool.commonPool().execute(queued.poll() ?: break)
+                    }
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (simulator.eventPage(0).events.isEmpty() && System.nanoTime() < deadline) Thread.sleep(10)
+                    assertTrue(simulator.eventPage(0).events.any { it.op == "SEED" && it.ok })
+                    assertEquals(0L, simulator.rejectedOther.get())
+                }
+            }
+        }
+    }
+
     /** Old random seed payloads are recognized rather than regenerated after reopening. */
     @Test
     fun `simulator restart skips committed legacy seed deposits`() {

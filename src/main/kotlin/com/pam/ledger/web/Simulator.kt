@@ -172,7 +172,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     // are recognized by their committed reference, not regenerated.
                     val amount = 50_00 + (customer.hashCode().toLong() and 0xffffffffL) % 450_00
                     text = "joined, deposited ${eur(amount)}"
-                    wallet.deposit(customer, amount, "EUR", ref)
+                    wallet.depositDefinitive(customer, amount, "EUR", ref)
                     if (funded.add(customer)) record(counters, customer, op, text, true)
                 } else funded.add(customer)
             }
@@ -185,14 +185,14 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     val odds = f.odds.getValue(selection)
                     text = "bet ${eur(stake)} on ${f.id} $selection @ ${"%.2f".format(Locale.ROOT, odds / 100.0)}"
                     val betId = "sim-" + UUID.randomUUID()
-                    book.placeBet(customer, f.id, selection, stake, betId)
+                    book.placeBetDefinitive(customer, f.id, selection, stake, betId)
                     counters.bets.incrementAndGet()
                 }
                 in 65..79 -> {
                     op = "DEPOSIT"
                     val amount = rnd.nextLong(10_00, 100_00)
                     text = "deposited ${eur(amount)}"
-                    wallet.deposit(customer, amount, "EUR", "sim-dep-" + UUID.randomUUID())
+                    wallet.depositDefinitive(customer, amount, "EUR", "sim-dep-" + UUID.randomUUID())
                     counters.deposits.incrementAndGet()
                 }
                 in 80..89 -> {
@@ -200,7 +200,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     // Deliberately sometimes more than the balance, to show the ledger refusing.
                     val amount = rnd.nextLong(5_00, 200_00)
                     text = "withdrew ${eur(amount)}"
-                    wallet.withdraw(customer, amount, "EUR", "sim-wd-" + UUID.randomUUID())
+                    wallet.withdrawDefinitive(customer, amount, "EUR", "sim-wd-" + UUID.randomUUID())
                     counters.withdrawals.incrementAndGet()
                 }
                 else -> {
@@ -208,7 +208,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     val bet = book.openBetsForPlayer(customer).randomOrNull(rnd) ?: return
                     val offer = book.cashOutOffer(bet.betId)
                     text = "cashed out ${eur(offer)}"
-                    book.cashOut(bet.betId)
+                    wallet.cashOutDefinitive(bet.betId, offer)
                     counters.cashOuts.incrementAndGet()
                 }
             }

@@ -12,6 +12,7 @@ import java.nio.file.StandardCopyOption
 import java.time.Duration
 import java.util.Properties
 import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
@@ -110,6 +111,15 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
      * request idempotent: a retried or double-tapped slip is recorded once.
      */
     fun placeBet(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): Receipt {
+        return awaitPlacement(placementFuture(playerId, fixtureId, selection, stake, betId), betId)
+    }
+
+    /** Wait for the original placement outcome without misreporting a timeout as a refusal. */
+    internal fun placeBetDefinitive(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): Receipt {
+        return awaitPlacement(placementFuture(playerId, fixtureId, selection, stake, betId), betId, null)
+    }
+
+    private fun placementFuture(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): CompletableFuture<Receipt> {
         val f = fixture(fixtureId)
         val odds = f.odds[selection] ?: throw IllegalArgumentException("selection must be HOME, DRAW or AWAY")
         try {
@@ -118,10 +128,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
             throw IllegalArgumentException("potential payout exceeds the supported amount range")
         }
         val metadata = "$fixtureId|$selection|$odds"
-        if (wallet.hasBetPlacement(betId)) return wallet.placeBet(playerId, betId, stake, "EUR", selection = metadata)
+        if (wallet.hasBetPlacement(betId)) return wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
         val future = f.lock.read {
             if (wallet.hasBetPlacement(betId)) {
-                return@read CompletableFuture.completedFuture(wallet.placeBet(playerId, betId, stake, "EUR", selection = metadata))
+                return@read wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
             }
             var created: PendingPlacement? = null
             val pending = pendingByBetId.compute(betId) { _, current ->
@@ -149,7 +159,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
             }
             pending.future
         }
-        return awaitPlacement(future, betId)
+        return future
     }
 
     /** The illustrative cash-out offer for an open bet: 85% of the stake. */
@@ -272,8 +282,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         }
     }
 
-    private fun awaitPlacement(future: CompletableFuture<Receipt>, betId: String): Receipt = try {
-        future.get(placementTimeout.toNanos(), TimeUnit.NANOSECONDS)
+    private fun awaitPlacement(future: CompletableFuture<Receipt>, betId: String, timeout: Duration? = placementTimeout): Receipt = try {
+        if (timeout == null) future.join() else future.get(timeout.toNanos(), TimeUnit.NANOSECONDS)
+    } catch (e: CompletionException) {
+        throw (e.cause as? RuntimeException ?: e)
     } catch (e: TimeoutException) {
         throw OutcomeUnknownException("bet:$betId:place")
     } catch (e: ExecutionException) {
