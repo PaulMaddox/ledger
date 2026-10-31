@@ -464,26 +464,38 @@ class LedgerWebApp private constructor(
         )
     }
 
-    /** Every entry for one player, with balances recomputed entry by entry from the postings themselves. */
+    /**
+     * Every entry for one player, with balances recomputed entry by entry from the postings,
+     * then reconciled against the ledger AT THE SAME POINT. Each account's committed state
+     * records the sequence number it reflects (lastSeq), so the replay is compared at exactly
+     * that entry, never against a balance that has moved on since.
+     */
     private fun playerAudit(id: String): Any {
-        readModel.catchUp()
+        val cashState = ledger.account(Accounts.cash(id, "EUR"))
+        val escrowState = ledger.account(Accounts.openBets(id, "EUR"))
+        readModel.catchUpTo(maxOf(cashState?.lastSeq ?: -1, escrowState?.lastSeq ?: -1))
         var cash = 0L
         var escrow = 0L
+        var cashAtPin = 0L
+        var escrowAtPin = 0L
         val rows = readModel.seqsForPlayer(id).map { seq ->
             val s = ledger.entry(seq)
             val dc = s.entry.postings.filter { it.account == Accounts.cash(id, "EUR") }.sumOf { it.amount }
             val de = s.entry.postings.filter { it.account == Accounts.openBets(id, "EUR") }.sumOf { it.amount }
             cash += dc
             escrow += de
+            if (seq <= (cashState?.lastSeq ?: -1)) cashAtPin = cash
+            if (seq <= (escrowState?.lastSeq ?: -1)) escrowAtPin = escrow
             mapOf("seq" to seq, "kind" to s.entry.kind, "time" to time(s.entry.timestampMicros), "key" to s.entry.idempotencyKey,
                 "cashDelta" to dc, "cash" to cash, "escrowDelta" to de, "escrow" to escrow, "chainHash" to s.chainHash)
         }
-        val ledgerCash = wallet.cashBalance(id, "EUR")
-        val ledgerEscrow = wallet.openBetsBalance(id, "EUR")
+        val ledgerCash = cashState?.balance ?: 0L
+        val ledgerEscrow = escrowState?.balance ?: 0L
         return mapOf(
             "id" to id, "rows" to rows.asReversed().take(200), "entries" to rows.size,
-            "replayedCash" to cash, "replayedEscrow" to escrow, "ledgerCash" to ledgerCash, "ledgerEscrow" to ledgerEscrow,
-            "reconciles" to (cash == ledgerCash && escrow == ledgerEscrow),
+            "replayedCash" to cashAtPin, "replayedEscrow" to escrowAtPin, "ledgerCash" to ledgerCash, "ledgerEscrow" to ledgerEscrow,
+            "pinnedAt" to mapOf("cash" to cashState?.lastSeq, "openBets" to escrowState?.lastSeq),
+            "reconciles" to (cashAtPin == ledgerCash && escrowAtPin == ledgerEscrow),
             "neverNegative" to rows.all { (it["cash"] as Long) >= 0 && (it["escrow"] as Long) >= 0 },
         )
     }

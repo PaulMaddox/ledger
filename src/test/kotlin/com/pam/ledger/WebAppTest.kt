@@ -102,6 +102,21 @@ class WebAppTest {
         assertTrue(audit.contains("\"ok\":true"), audit)
     }
 
+    /** The player audit must reconcile even while the customer is being changed concurrently. */
+    @Test
+    fun `player audit reconciles while the simulator is running`() = withApp { app ->
+        // Two customers at the maximum rate (10 operations a second each), audited repeatedly.
+        // A regression check: the race it guards against is microseconds wide and could not be
+        // reproduced on demand; the fix (comparing at each account's lastSeq) removes it by design.
+        call(app, "POST", "simulator", mapOf("customers" to 2, "opsPerMinute" to 600, "autoFixtures" to "false", "action" to "start"))
+        Thread.sleep(800)
+        repeat(200) { i ->
+            val body = call(app, "GET", "regulator/players/sim-0000${i % 2 + 1}").second
+            assertTrue(body.contains("\"reconciles\":true"), "audit #$i did not reconcile: ${body.take(400)}")
+        }
+        call(app, "POST", "simulator", mapOf("action" to "stop"))
+    }
+
     /** Another website can make the user's browser send requests here; such requests must be refused. */
     @Test
     fun `cross-site requests cannot move money`() = withApp { app ->
