@@ -240,7 +240,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
         const val MAX_CUSTOMERS = 20_000
         private const val MAX_IN_FLIGHT = 512
         private const val MAX_EVENTS = 5_000
-        fun customerName(i: Int) = "sim-%05d".format(i)
+        fun customerName(i: Int) = "sim-%05d".format(Locale.ROOT, i)
         fun isAutomated(player: String) = player.startsWith("sim-")
     }
 }

@@ -66,6 +66,7 @@ ledger, so anything done in one view shows up in the others.
   Select a tile to open that customer.
   Seed deposits are stable across retries and restarts; existing seed references are not funded again.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
+  Customer IDs always use ASCII digits, independent of the host locale.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an

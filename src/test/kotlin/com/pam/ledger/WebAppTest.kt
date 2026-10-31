@@ -21,6 +21,7 @@ import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.UUID
+import java.util.Locale
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -393,6 +394,19 @@ class WebAppTest {
                 }
             }
 
+        }
+    }
+
+    /** Browser tile IDs are ASCII regardless of the host's regional settings. */
+    @Test
+    fun `simulator customer identifiers are locale independent`() {
+        val original = Locale.getDefault()
+        try {
+            Locale.setDefault(Locale.forLanguageTag("ar-EG"))
+            assertEquals("sim-00001", Simulator.customerName(1))
+            assertEquals("sim-20000", Simulator.customerName(20_000))
+        } finally {
+            Locale.setDefault(original)
         }
     }
 
