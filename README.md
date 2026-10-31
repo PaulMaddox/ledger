@@ -55,7 +55,8 @@ safe to run again, and CI runs these exact commands on fresh Ubuntu and Windows 
 
 `./gradlew web` (Windows: `.\gradlew.bat web`) starts the ledger with a browser dashboard at
 <http://localhost:8080>. It has a view for each persona, all working against the same live
-ledger, so anything done in one view shows up in the others.
+ledger, so anything done in one view shows up in the others. The first tab, **About**, embeds
+the interactive ledger guide and its screenshots.
 
 ![Simulator: 500 automated customers, each tile streaming its latest actions](docs/screenshots/simulator.png)
 
@@ -232,7 +233,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -WithGuideTools   # W
 Then:
 
 ```
-python3 scripts/build-readme.py   # rebuild docs/index.html (Windows: python instead of python3)
+python3 scripts/build-readme.py   # rebuild docs/index.html and the web console's embedded guide
 node scripts/check-guide.mjs      # headless check of the guide
 node scripts/check-web.mjs        # console browser regression checks (no dependencies)
 ```
@@ -259,7 +260,7 @@ src/main/kotlin/com/pam/ledger/
   Hashes.kt, EntryCodec.kt, Validation.kt, Model.kt, Errors.kt, AppendOnlyList.kt
   LedgerVerifier.kt    offline auditor
   web/                 web console server: read model, book, simulator, regulator tools, HTTP API
-src/main/resources/web/  web console front end (index.html, app.js, app.css; no libraries)
+src/main/resources/web/  web console front end (including generated about.html; no libraries)
 src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1–R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt

@@ -9,7 +9,7 @@
 <body>
 <!--
   Ledger Console: a single-page dashboard over the running ledger.
-  Six views share one header, with operational telemetry and isolated failure experiments.
+  The About guide and six console views share one header, with operational telemetry and isolated failure experiments.
   All behaviour lives in app.js; all data comes from /api/* on the same server.
 -->
 <header class="topbar">
@@ -17,7 +17,8 @@
     <span class="mark" aria-hidden="true"></span>
     <div><b>Ledger Console</b><span id="ledgerId">sportsbook-web</span></div>
   </div>
-  <nav class="personas" role="tablist" aria-label="Persona">
+  <nav class="personas" role="tablist" aria-label="Console view">
+    <a href="#about" role="tab" data-view="about">About</a>
     <a href="#customer" role="tab" data-view="customer">Customer</a>
     <a href="#operator" role="tab" data-view="operator">Operator</a>
     <a href="#regulator" role="tab" data-view="regulator">Regulator</a>
@@ -34,6 +35,11 @@
 <div class="demo-note" id="storeStatus" role="status">Demonstration only: no authentication. The tabs switch views, they do not control access.</div>
 
 <main>
+<!-- ============================== ABOUT ============================== -->
+<section class="view about-view" id="view-about" hidden>
+  <iframe class="about-frame" src="/about/" title="PAM Ledger documentation" loading="lazy"></iframe>
+</section>
+
 <!-- ============================== CUSTOMER ============================== -->
 <section class="view" id="view-customer" hidden>
   <div class="cust">
