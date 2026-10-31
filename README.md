@@ -169,6 +169,8 @@ permissions without changing the cluster or storing an Azure password.
 After setup, pushes to `main` build and
 test a container, deploy it with a persistent Azure disk, and publish an Azure DNS
 address with automatic HTTPS. The workflow reports the public URL.
+The container includes the generated About guide and its screenshots, so the
+same About-page regression runs during the container build.
 
 This is still an **unauthenticated synthetic-money demo**, not a production wallet.
 It runs exactly one ledger instance; updates briefly interrupt service. Behind a TLS

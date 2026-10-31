@@ -13,6 +13,15 @@ WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/deploy-aks.yml").read_text(
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_container_build_includes_about_screenshots(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        ignore = (ROOT / ".dockerignore").read_text().splitlines()
+        self.assertIn("COPY docs/screenshots/ docs/screenshots/", dockerfile)
+        for rule in ("!docs/", "!docs/screenshots/", "!docs/screenshots/*.png"):
+            self.assertIn(rule, ignore)
+        self.assertTrue((ROOT / "docs/screenshots/simulator.png").is_file())
+        self.assertTrue((ROOT / "src/main/resources/web/about.html").is_file())
+
     def test_bootstrap_does_not_modify_cluster_or_create_namespace(self):
         self.assertEqual(
             {r["type"] for r in TEMPLATE["resources"]},

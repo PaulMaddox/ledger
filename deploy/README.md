@@ -56,6 +56,13 @@ Select subscription `9600a075-454a-4e6b-82d4-58bef3e21b4a` and resource group
 unless you want to choose another globally unique name for a new dedicated registry.
 Use **Review + create > Create**.
 
+If GitHub uses immutable OIDC subjects, set **Github Repository** to the repository
+prefix returned by `gh api repos/PaulMaddox/ledger/actions/oidc/customization/sub`
+without the leading `repo:`. For this repository that is
+`PaulMaddox@4678446/ledger@1440482868`. The complete trusted subject must match
+GitHub's assertion exactly, including `:environment:azure-demo`; reapplying the
+template with the older name-only value would break Azure login again.
+
 The person deploying needs resource creation and role-assignment permissions in
 resource group `ledger` (for example **Owner**, or **Contributor** plus **Role Based
 Access Control Administrator** with permission to assign the template's roles).
@@ -105,6 +112,10 @@ also checks the guide and console JavaScript, waits for rollout and verified HTT
 then prints the public URL in its summary:
 
 `https://<AKS_DNS_LABEL>.swedencentral.cloudapp.azure.com/`
+
+The Docker build includes the generated About guide from `src/main/resources`
+and the PNGs from `docs/screenshots`, which Gradle packages into the application.
+The About-page HTTP regression must pass in the container as well as locally.
 
 The regulatory stress test retains all balance observations as evidence; the test
 JVM has a 2 GiB maximum heap so container builds do not exhaust Gradle's default
