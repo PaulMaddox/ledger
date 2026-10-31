@@ -133,7 +133,7 @@ async function verifyEntry(seq, target) {
     steps.push(sig === null
       ? `<li>This browser has no Ed25519 support, so the signature could not be checked here (the server reports it ${p.sth.verified ? "valid" : "invalid"}).</li>`
       : step(sig, `Checked the Ed25519 signature on those bytes with the ledger's public key (key ${esc(p.sth.keyId)}): ${sig ? "valid" : "INVALID"}`));
-    const ok = leafOk && !!root && headOk && sig !== false;
+    const ok = leafOk && !!root && headOk && sig === true;
     const e = p.entry;
     target.innerHTML = `
       <div class="panel-head"><h2>Entry #${seq}: ${esc(e.kind)}</h2><button type="button" onclick="this.closest('.panel').hidden=true">Close</button></div>
