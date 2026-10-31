@@ -426,11 +426,12 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="cloud">
   <div class="eyebrow">Deployment</div>
   <h2>Cloud architecture</h2>
-  <p class="prose">How the ledger runs in production when every bet must be exact, a zone outage must lose nothing, and a World Cup final can multiply traffic a hundredfold in seconds. Switch provider, select any component for the reasoning behind it, run a failure drill, or drag the load slider to see where the pressure goes.</p>
+  <p class="prose">How the ledger runs in production when every bet must be exact, a zone outage must lose nothing, and a World Cup final can multiply traffic a hundredfold in seconds. Switch between AWS, Azure and a cloud-portable build, select any component for the reasoning behind it, run a failure drill, or drag the load slider to see where the pressure goes.</p>
   <div class="cloudbar">
-    <div><span class="lbl">Provider</span><span class="seg" role="group" aria-label="Cloud provider"><button type="button" id="pvAws" aria-pressed="true">AWS</button><button type="button" id="pvAzure" aria-pressed="false">Azure</button></span></div>
+    <div><span class="lbl">Provider</span><span class="seg" role="group" aria-label="Cloud provider"><button type="button" id="pvAws" aria-pressed="true">AWS</button><button type="button" id="pvAzure" aria-pressed="false">Azure</button><button type="button" id="pvPortable" aria-pressed="false">Cloud portable</button></span></div>
     <div><span class="lbl">Drill</span><span class="seg" role="group" aria-label="Failure drill" id="drills"><button type="button" data-drill="none" aria-pressed="true">Healthy</button><button type="button" data-drill="az" aria-pressed="false">Lose a zone</button><button type="button" data-drill="region" aria-pressed="false">Lose the region</button></span></div>
   </div>
+  <p id="pvNote" class="prose" style="font-size:.9rem"></p>
   <div id="drillNote" class="drillnote" aria-live="polite"></div>
   <div class="cloud">
     <div class="regions">
@@ -1129,6 +1130,46 @@ const CLOUD = {
     azure: { svc: "Managed HSM, not activated", why: "Activated only by restoring the security domain with the custodians' quorum.", alt: "As for AWS." },
     peaks: "Not involved.", fail: "Its only job is to exist and be empty." },
 };
+/* ---- Cloud portable: open-source and standard-interface choices that run on any
+   conformant Kubernetes (EKS, AKS, GKE, or an in-country data centre). Where a
+   capability cannot be made portable (edge DDoS, hardware HSMs), the portable answer
+   is a standard interface with a swappable provider behind it, and the text says so. */
+const PORTABLE = {
+  dns: { svc: "ExternalDNS + any authoritative DNS", why: "DNS records are declared in Kubernetes and ExternalDNS writes them to whichever provider is in use, so moving clouds changes one controller setting, not the runbook. The DR switch stays a deliberate, manual change.", alt: "Each cloud's own DNS managed by hand, which ties the failover runbook to one vendor's console." },
+  front: { svc: "Envoy Gateway + cert-manager, thin CDN in front", why: "TLS terminates in Envoy through the standard Kubernetes Gateway API, and cert-manager issues certificates from any ACME CA. The CDN only serves static assets, so it can be swapped without touching the API path.", alt: "Putting routing and TLS logic in a proprietary CDN, which is the hardest piece to move later." },
+  waf: { svc: "Coraza WAF (OWASP CRS) in Envoy + upstream DDoS provider", why: "Application-layer rules run in-cluster with the open OWASP Core Rule Set, identical on every platform. Volumetric DDoS cannot be absorbed inside a cluster, so this layer stays a purchased service, chosen to be swappable.", alt: "Relying on in-cluster defences alone, which a large volumetric attack would simply overwhelm." },
+  lb: { svc: "Gateway API (Envoy Gateway) behind an L4 LoadBalancer Service", why: "All Layer 7 routing lives in portable Gateway API resources. The only provider-specific piece is a plain Layer 4 load balancer, which every cloud and on-premises platform (MetalLB, F5) can supply.", alt: "Provider-specific ingress annotations, which have to be rewritten for every platform." },
+  k8s: { svc: "Any conformant Kubernetes, provisioned with Cluster API", why: "CNCF-conformant clusters behave the same on EKS, AKS, GKE or bare metal in an in-country data centre. Cluster API declares the clusters themselves as Kubernetes resources, and GitOps (Argo CD or Flux) applies identical manifests everywhere.", alt: "Platform-specific services such as ECS or Container Apps, which do not travel." },
+  api: { svc: "Pods on any Kubernetes (gRPC to shards)", why: "Already portable: a stateless container image with no cloud SDK in its request path.", alt: "Serverless functions, which differ on every platform." },
+  workers: { svc: "Kafka consumers on any Kubernetes", why: "Standard Kafka clients with idempotent processing; nothing provider-specific.", alt: "Provider queue triggers, which tie consumption to one cloud's event model." },
+  scale: { svc: "KEDA + Cluster Autoscaler (or Karpenter where supported)", why: "KEDA is a CNCF project that scales on Kafka lag and request rate the same way everywhere. Node scaling uses the Cluster Autoscaler, which has providers for every major cloud and Cluster API, with Karpenter as an upgrade where available. The fixture-calendar pre-scaling is plain CronJobs.", alt: "Provider-native scaling policies, which need re-engineering on every move." },
+  bus: { svc: "Apache Kafka via the Strimzi operator", why: "Kafka itself is the portable standard here. Strimzi runs it on any Kubernetes in KRaft mode with rack awareness, so replicas spread across zones, and manages upgrades, users and topics as Kubernetes resources.", alt: "Managed Kafka on one cloud: less to operate, but the operator is what keeps the same configuration valid everywhere. RabbitMQ was rejected for lacking per-key ordering at this throughput and long replay." },
+  shards: { svc: "StatefulSets on any Kubernetes, Raft-replicated", why: "The ledger already depends on nothing but a filesystem and fsync, which makes it the most portable component in the system. Zone spreading uses standard topology spread constraints.", alt: "A cloud's managed ledger or database service, which would anchor the most important component to one vendor." },
+  disk: { svc: "CSI StorageClass per platform (block volumes or local NVMe)", why: "Manifests ask for a StorageClass named, say, ledger-journal; each platform maps it to its best low-latency block storage through CSI. Because Raft keeps three copies, fast local NVMe (via a local-volume CSI driver such as TopoLVM) is also acceptable on bare metal.", alt: "A distributed storage layer such as Ceph RBD under the journal, which adds a network hop to every fsync." },
+  archive: { svc: "S3 API with Object Lock (cloud S3, or Ceph RGW via Rook)", why: "The S3 API with Object Lock is the de facto portable WORM interface. Use the provider's S3-compatible store where it supports Object Lock, otherwise run Ceph's RADOS Gateway via the Rook operator, which implements it. Segments are encrypted by the application before upload in every case.", alt: "Each cloud's native blob API, since some are not S3-compatible; that would mean writing an archive adapter per provider." },
+  readdb: { svc: "PostgreSQL via the CloudNativePG operator", why: "Statements, bet history and back-office queries are relational, ad hoc and need indexes, which is where PostgreSQL is genuinely the best tool. CloudNativePG runs it with streaming replicas across zones, automated failover and backups to the S3 archive, on any Kubernetes. Time-based partitioning keeps hot tables small.", alt: "A document or wide-column store, which suits fixed access patterns but serves back-office reporting less well. PostgreSQL is not used for the ledger itself; the ledger's single-writer journal remains the source of truth." },
+  hsm: { svc: "Network HSMs in country, accessed via PKCS#11", why: "HSMs are hardware, so the portable part is the interface: PKCS#11 (and KMIP for key management). Network HSMs from established vendors, placed in an in-country data centre, serve every cluster, and cloud HSMs that expose PKCS#11 can stand in. Confirm FIPS 140 Level 3 validation and Ed25519 support for the chosen model; TreeHeadSigner can use ECDSA P-256 instead.", alt: "A software key manager without hardware backing, which a regulator is unlikely to accept for signing keys." },
+  crypto: { svc: "AES-256-GCM in the app, data keys wrapped via PKCS#11", why: "Envelope encryption happens in the ledger process with the JDK's own cryptography, so it is identical on every platform. Only the key-wrapping call goes to the HSM, over a standard interface.", alt: "Storage-level encryption from each platform, which differs everywhere and does not stop cross-region replication from seeing plaintext." },
+  net: { svc: "Cilium network policy + SPIFFE/SPIRE mTLS", why: "Cilium enforces default-deny network policies and encrypts node-to-node traffic (WireGuard or IPsec) on any cluster. SPIFFE/SPIRE issues every workload a cryptographic identity, so mTLS between services works the same across clouds and data centres.", alt: "Cloud-specific security groups as the main control, which have to be redesigned on every platform." },
+  iam: { svc: "SPIFFE workload identity, OpenBao, Keycloak", why: "Workloads authenticate with SPIFFE identities rather than cloud IAM roles. Secrets live in OpenBao, the open-source Vault fork, auto-unsealed by the HSM. People sign in through Keycloak (OIDC) with time-boxed, approved elevation.", alt: "Each cloud's IAM, which is powerful but is the deepest lock-in of all." },
+  logs: { svc: "Kubernetes audit logs + Falco, shipped by Vector to WORM storage", why: "API-server audit logs and Falco runtime alerts are collected the same way everywhere and written to an Object Lock bucket in a separate account or cluster.", alt: "Each provider's activity log, which captures cloud-level actions but differs in format and coverage." },
+  dir: { svc: "PostgreSQL table (versioned), via CloudNativePG", why: "The shard map is small, transactional and read-mostly, so a versioned table in the same PostgreSQL cluster is the simplest portable home. API pods cache it, and shard leaders reject stale map versions.", alt: "etcd or ZooKeeper, which adds another stateful system to operate for a small table." },
+  obs: { svc: "OpenTelemetry, Prometheus, Grafana, Loki, Tempo", why: "OpenTelemetry instrumentation is vendor-neutral; the open-source Grafana stack stores and displays metrics, logs and traces on any platform. Managed versions can be swapped in without touching instrumentation.", alt: "A proprietary APM agent, which ties instrumentation to one vendor." },
+  audit: { svc: "CronJob in a separate audit cluster", why: "The verifier is a container, so it runs anywhere. Placing it in a cluster owned by a different team, or by an independent auditor, preserves separation of duties.", alt: "Running the verifier in the production cluster." },
+  regulator: { svc: "STH feed, proof API, read-only audit access", why: "Identical on every platform: the regulator's independent copy of the signed heads is what makes history unforgeable. Portability strengthens this role, because the regulator's tooling never depends on which cloud is in use.", alt: "Platform-specific audit consoles." },
+  custodians: { svc: "HSM quorum authentication (M-of-N)", why: "Network HSMs support M-of-N quorum authentication with smart cards or PIN-entry devices, which maps directly onto the key ceremony.", alt: "A key copy stored at the DR site." },
+  drstore: { svc: "S3 Object Lock bucket at the DR site", why: "App-encrypted segments replicate to any S3-compatible store abroad (cloud S3, or Ceph RGW multisite). Kafka topics needed for replay can be mirrored as ciphertext with MirrorMaker 2.", alt: "Database-level replication abroad, which would carry readable data." },
+  drcluster: { svc: "Cluster API template + GitOps, zero ledger nodes", why: "The DR cluster is declared in the same repository as production. It can even sit with a different cloud provider from the primary, which a portable design makes possible and which removes a single-vendor failure mode.", alt: "Hand-built DR environments, which drift until the day they are needed." },
+  drhsm: { svc: "Network HSM at the DR site, no key material", why: "Initialised and reachable, but empty until custodians restore the key backup under quorum.", alt: "Pre-loaded keys, which would break residency." },
+};
+for (const k of Object.keys(PORTABLE)) CLOUD[k].portable = PORTABLE[k];
+const PV_NOTES = {
+  aws: "<b>AWS:</b> managed services wherever they reduce operational load without weakening a guarantee. Fastest to run well; the deepest coupling is IAM, KMS and CloudHSM.",
+  azure: "<b>Azure:</b> the same design on Azure's managed services. Managed HSM's security-domain quorum maps neatly onto the key ceremony.",
+  portable: "<b>Cloud portable:</b> open standards and CNCF projects that run on any conformant Kubernetes, including an in-country data centre where no hyperscaler region exists. The cost is operating Kafka, PostgreSQL and storage yourselves. Two things cannot be made portable: volumetric DDoS protection and the HSM hardware, so those sit behind swappable providers and standard interfaces (PKCS#11, KMIP).",
+};
+const PV_NAMES = { aws: "AWS", azure: "Azure", portable: "Cloud portable" };
+
 const TIERS = [
   ["edge", "Edge", "global"], ["ingress", "Ingress", "3 zones"], ["services", "Stateless services", "elastic"],
   ["stream", "Event stream", "3 zones"], ["ledger", "Ledger", "3 zones, quorum"], ["storage", "Storage", "in country"],
@@ -1176,6 +1217,7 @@ function shardGrid() {
   return h + `</div></div>`;
 }
 function renderCloud() {
+  $("pvNote").innerHTML = PV_NOTES[pv];
   $("tiers").innerHTML = TIERS.map(([t, label, sub]) => {
     const ids = Object.keys(CLOUD).filter(k => CLOUD[k].tier === t);
     const inner = t === "ledger" ? shardGrid() : `<div class="tnodes">${ids.map(nodeBtn).join("")}</div>`;
@@ -1186,7 +1228,7 @@ function renderCloud() {
   document.querySelectorAll("[data-cn]").forEach(b => b.addEventListener("click", () => { cSel = b.dataset.cn; renderCloud(); }));
 
   const n = CLOUD[cSel], p = n[pv], st = nodeStatus(cSel);
-  $("cdetail").innerHTML = `<div class="prov">${pv === "aws" ? "AWS" : "Azure"} · ${n.tier === "dr" ? "DR region" : n.tier === "outside" ? "outside the platform" : "primary region"}${st ? " · " + st : ""}</div>
+  $("cdetail").innerHTML = `<div class="prov">${PV_NAMES[pv]} · ${n.tier === "dr" ? "DR region" : n.tier === "outside" ? "outside the platform" : "primary region"}${st ? " · " + st : ""}</div>
     <h3>${n.label}</h3><div class="svc">${esc(p.svc)}</div>
     <dl><div><dt>Role</dt><dd>${n.role}</dd></div><div><dt>Why this choice</dt><dd>${p.why}</dd></div>
     <div><dt>Under peak load</dt><dd>${n.peaks}</dd></div><div><dt>When things fail</dt><dd>${n.fail}</dd></div>
@@ -1197,9 +1239,10 @@ function renderCloud() {
   else if (drill === "az") { note.className = "drillnote warn"; note.innerHTML = "<b>Zone b lost.</b> Every shard still has two of three replicas, so quorum holds. Shard s02's leader was in zone b; a follower in zone a is elected within seconds (marked green). No acknowledged bet is lost, because a receipt required fsync in two zones. Requests in flight during the election are retried by clients with the same idempotency keys and receive their original receipts. Stateless pods reschedule into zones a and c. Data never left the country."; }
   else { note.className = "drillnote bad"; note.innerHTML = `<b>Primary region lost.</b> Nothing in the DR region can read the data yet. Recovery is a deliberate ceremony, not an automatic failover:<ol class="steps-list" style="font-family:var(--f-body);font-size:.88rem;margin-top:6px">${CEREMONY.map(c => `<li>${c}</li>`).join("")}</ol><span style="display:block;margin-top:6px">Recovery point: the replication lag at the moment of loss, typically seconds, made visible by comparing with the regulator's last signed head. Recovery time: the length of the ceremony plus scale-up, typically within hours, which should be agreed with the regulator in advance.</span>`; }
 }
-function setPv(p) { pv = p; $("pvAws").setAttribute("aria-pressed", String(p === "aws")); $("pvAzure").setAttribute("aria-pressed", String(p === "azure")); renderCloud(); }
+function setPv(p) { pv = p; $("pvAws").setAttribute("aria-pressed", String(p === "aws")); $("pvAzure").setAttribute("aria-pressed", String(p === "azure")); $("pvPortable").setAttribute("aria-pressed", String(p === "portable")); renderCloud(); }
 $("pvAws").onclick = () => setPv("aws");
 $("pvAzure").onclick = () => setPv("azure");
+$("pvPortable").onclick = () => setPv("portable");
 document.querySelectorAll("#drills button").forEach(b => b.onclick = () => {
   drill = b.dataset.drill;
   document.querySelectorAll("#drills button").forEach(x => x.setAttribute("aria-pressed", String(x === b)));
