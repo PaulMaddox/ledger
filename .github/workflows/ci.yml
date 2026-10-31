@@ -67,6 +67,12 @@ jobs:
       - name: Build and run the demo, which ends with an independent audit
         run: gradle run --no-daemon
 
+      # README.md documents running the demo as a standalone program; prove it works.
+      - name: Run the demo from the installed launcher, as documented in README.md
+        run: |
+          gradle installDist --no-daemon
+          build/install/pam-ledger/bin/pam-ledger
+
       - name: Keep the test reports when something fails
         if: failure()
         uses: actions/upload-artifact@v4
