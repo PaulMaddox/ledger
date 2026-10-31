@@ -1,0 +1,115 @@
+name: Deploy web app to AKS
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-aks
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: azure-demo
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      AKS_RESOURCE_GROUP: ledger
+      AKS_CLUSTER_NAME: ledger
+      ACR_NAME: ${{ vars.ACR_NAME }}
+      DNS_LABEL: ${{ vars.AKS_DNS_LABEL }}
+      TLS_EMAIL: ${{ vars.TLS_EMAIL }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Validate configuration and guide
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          required() {
+            if [ -z "$2" ]; then
+              echo "::error::Set $1 in the azure-demo GitHub environment."
+              exit 1
+            fi
+          }
+          required AZURE_CLIENT_ID "$AZURE_CLIENT_ID"
+          required AZURE_TENANT_ID "$AZURE_TENANT_ID"
+          required AZURE_SUBSCRIPTION_ID "$AZURE_SUBSCRIPTION_ID"
+          required ACR_NAME "$ACR_NAME"
+          required AKS_DNS_LABEL "$DNS_LABEL"
+          required TLS_EMAIL "$TLS_EMAIL"
+          [[ "$ACR_NAME" =~ ^[a-zA-Z0-9]{5,50}$ ]]
+          [[ "$DNS_LABEL" =~ ^[a-z][a-z0-9-]{1,61}[a-z0-9]$ ]]
+          [[ "$TLS_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
+          python3 scripts/build-readme.py
+          git diff --exit-code -- docs/index.html
+          node scripts/check-guide.mjs
+          node scripts/check-web.mjs
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/setup-kubectl@v4
+      - uses: azure/use-kubelogin@v1
+        with:
+          kubelogin-version: v0.2.12
+      - name: Connect to Azure resources
+        run: |
+          set -euo pipefail
+          az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" \
+            --query '{state:provisioningState,location:location}' -o table
+          test "$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query provisioningState -o tsv)" = Succeeded
+          test "$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query location -o tsv)" = swedencentral
+          LOGIN_SERVER=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
+          echo "IMAGE=$LOGIN_SERVER/ledger-web:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "PROXY_IMAGE=$LOGIN_SERVER/ledger-proxy:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "PUBLIC_HOST=$DNS_LABEL.swedencentral.cloudapp.azure.com" >> "$GITHUB_ENV"
+          az acr login -n "$ACR_NAME"
+          az aks get-credentials -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --overwrite-existing
+          kubelogin convert-kubeconfig -l azurecli
+      - name: Build, test twice, audit and push image
+        run: |
+          set -euo pipefail
+          docker build --tag "$IMAGE" .
+          docker build --target proxy --tag "$PROXY_IMAGE" .
+          docker push "$IMAGE"
+          docker push "$PROXY_IMAGE"
+      - name: Deploy single-writer web app
+        run: |
+          set -euo pipefail
+          envsubst '${IMAGE} ${PROXY_IMAGE} ${PUBLIC_HOST} ${DNS_LABEL} ${TLS_EMAIL}' < deploy/aks.yaml > "$RUNNER_TEMP/aks.yaml"
+          kubectl apply -f "$RUNNER_TEMP/aks.yaml"
+          kubectl rollout status deployment/ledger-web -n ledger-web --timeout=10m
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error --connect-timeout 10 --max-time 20 "https://$PUBLIC_HOST/" -o /dev/null; then
+              echo "### Public demo: https://$PUBLIC_HOST/" >> "$GITHUB_STEP_SUMMARY"
+              echo "Unauthenticated synthetic-money demonstration; not a production wallet." >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+            fi
+            sleep 10
+          done
+          echo "::error::HTTPS did not become available; inspect the public IP, DNS and Caddy certificate logs."
+          exit 1
+      - name: Deployment diagnostics
+        if: failure()
+        run: |
+          kubectl get pods,pvc,service -n ledger-web
+          kubectl get events -n ledger-web --sort-by=.lastTimestamp

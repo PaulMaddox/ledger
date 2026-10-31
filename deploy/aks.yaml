@@ -1,0 +1,154 @@
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: ledger-data
+  namespace: ledger-web
+spec:
+  accessModes: [ReadWriteOnce]
+  storageClassName: managed-csi
+  resources:
+    requests:
+      storage: 32Gi
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: ledger-proxy
+  namespace: ledger-web
+data:
+  Caddyfile: |
+    {
+      email ${TLS_EMAIL}
+      http_port 8081
+      https_port 8443
+      admin off
+    }
+    https://${PUBLIC_HOST} {
+      reverse_proxy 127.0.0.1:8080
+    }
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ledger-web
+  namespace: ledger-web
+spec:
+  replicas: 1
+  # Never overlap ledger writers or mount the disk on two nodes during an update.
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: ledger-web
+  template:
+    metadata:
+      labels:
+        app: ledger-web
+      annotations:
+        ledger/public-host: "${PUBLIC_HOST}"
+        ledger/tls-email: "${TLS_EMAIL}"
+    spec:
+      automountServiceAccountToken: false
+      terminationGracePeriodSeconds: 90
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ledger
+          image: ${IMAGE}
+          args: ["--host", "127.0.0.1", "--port", "8080", "--data", "/data/ledger", "--public-origin", "https://${PUBLIC_HOST}"]
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 500m
+              memory: 1Gi
+            limits:
+              cpu: "2"
+              memory: 2Gi
+          startupProbe:
+            exec:
+              command: ["/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+            periodSeconds: 5
+            failureThreshold: 120
+          readinessProbe:
+            exec:
+              command: ["/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+            periodSeconds: 10
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: tmp
+              mountPath: /tmp
+        - name: https
+          image: ${PROXY_IMAGE}
+          env:
+            - name: XDG_DATA_HOME
+              value: /data/caddy
+            - name: XDG_CONFIG_HOME
+              value: /tmp/caddy
+          ports:
+            - name: http
+              containerPort: 8081
+            - name: https
+              containerPort: 8443
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          readinessProbe:
+            tcpSocket:
+              port: https
+          volumeMounts:
+            - name: proxy
+              mountPath: /etc/caddy
+              readOnly: true
+            - name: data
+              mountPath: /data
+            - name: proxy-tmp
+              mountPath: /tmp
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: ledger-data
+        - name: proxy
+          configMap:
+            name: ledger-proxy
+        - name: tmp
+          emptyDir: {}
+        - name: proxy-tmp
+          emptyDir: {}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ledger-web
+  namespace: ledger-web
+  annotations:
+    service.beta.kubernetes.io/azure-dns-label-name: "${DNS_LABEL}"
+spec:
+  type: LoadBalancer
+  selector:
+    app: ledger-web
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+    - name: https
+      port: 443
+      targetPort: https

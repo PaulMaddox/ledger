@@ -71,6 +71,7 @@ ledger, so anything done in one view shows up in the others.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
   Customer IDs always use ASCII digits, independent of the host locale.
   Resizing the simulator wall preserves retained customers' activity, balances and refusal state.
+  Action errors appear beside the controls, survive refreshes, and clear after a successful action.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
   API monetary values are decimal strings in minor units, and browser inputs are parsed
@@ -79,6 +80,8 @@ ledger, so anything done in one view shows up in the others.
   different money movements.
   Definitive bet rejections unlock the stake for correction, and late cash-out replies
   cannot overwrite another selected customer's result.
+  Polling preserves keyboard focus on surviving customer picker, cash-out, history
+  verification and fixture-price buttons, and on operator settlement controls.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
   uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance of the customer captured at launch, cancelling if the selection changes before betting,
@@ -133,6 +136,21 @@ mutations remain blocked. Exposing this unauthenticated demo lets reachable user
 Following a link from the README or guide is allowed while Host validation remains enforced.
 Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
 requires a secure context with WebCrypto (HTTPS or localhost).
+
+### Deploying the web console to Azure AKS
+
+The [AKS deployment instructions](deploy/README.md) configure the existing `ledger`
+cluster in resource group `ledger`, Sweden Central, using GitHub Actions and Azure
+OIDC (no stored Azure password). After the one-time setup, pushes to `main` build and
+test a container, deploy it with a persistent Azure disk, and publish an Azure DNS
+address with automatic HTTPS. The workflow reports the public URL.
+
+This is still an **unauthenticated synthetic-money demo**, not a production wallet.
+It runs exactly one ledger instance; updates briefly interrupt service. Behind a TLS
+proxy, set `--public-origin https://<hostname>` and preserve the request Host, Origin
+and Referer headers. Only that exact HTTPS origin is accepted alongside normal local
+HTTP access; forwarding headers never grant trust. Screenshots are unchanged because
+deployment does not change the rendered UI.
 
 ## Running
 
