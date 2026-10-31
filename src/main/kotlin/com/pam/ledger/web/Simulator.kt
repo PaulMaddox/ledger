@@ -51,11 +51,21 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
     @Volatile var startedAtMillis = 0L
         private set
 
-    // Counters for the current run.
-    val bets = AtomicLong(); val deposits = AtomicLong(); val withdrawals = AtomicLong(); val cashOuts = AtomicLong()
-    val rejectedForFunds = AtomicLong(); val rejectedOther = AtomicLong(); val shed = AtomicLong()
-    val fixtureRounds = AtomicLong()
-    val succeeded get() = bets.get() + deposits.get() + withdrawals.get() + cashOuts.get()
+    private class Run {
+        val bets = AtomicLong(); val deposits = AtomicLong(); val withdrawals = AtomicLong(); val cashOuts = AtomicLong()
+        val rejectedForFunds = AtomicLong(); val rejectedOther = AtomicLong(); val shed = AtomicLong()
+        val fixtureRounds = AtomicLong()
+    }
+    @Volatile private var run = Run()
+    val bets get() = run.bets
+    val deposits get() = run.deposits
+    val withdrawals get() = run.withdrawals
+    val cashOuts get() = run.cashOuts
+    val rejectedForFunds get() = run.rejectedForFunds
+    val rejectedOther get() = run.rejectedOther
+    val shed get() = run.shed
+    val fixtureRounds get() = run.fixtureRounds
+    val succeeded get() = run.let { it.bets.get() + it.deposits.get() + it.withdrawals.get() + it.cashOuts.get() }
 
     /**
      * One automated customer's action, for the live wall on the Simulator tab.
@@ -67,9 +77,10 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
     private val events = ArrayDeque<Event>()
     private val eventIds = AtomicLong()
 
-    private fun record(customer: String, op: String, text: String, ok: Boolean) {
+    private fun record(counters: Run, customer: String, op: String, text: String, ok: Boolean) {
         val cash = wallet.cashBalance(customer, "EUR")
         synchronized(events) {
+            if (counters !== run) return
             val e = Event(eventIds.incrementAndGet(), System.currentTimeMillis(), customer, op, text, ok, cash)
             events.addLast(e)
             if (events.size > MAX_EVENTS) events.removeFirst()
@@ -106,7 +117,8 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
 
     @Synchronized fun start() {
         if (state != State.STOPPED) return
-        for (c in listOf(bets, deposits, withdrawals, cashOuts, rejectedForFunds, rejectedOther, shed, fixtureRounds)) c.set(0)
+        synchronized(events) { run = Run(); events.clear() }
+        carry = 0.0
         startedAtMillis = System.currentTimeMillis()
         lastRoundNanos = System.nanoTime()
         state = State.RUNNING
@@ -119,20 +131,21 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
     /** Operations per second the current settings ask for. */
     val targetRate get() = customers * opsPerMinute / 60.0
 
-    private fun tick() {
+    @Synchronized private fun tick() {
         if (state != State.RUNNING) return
+        val counters = run
         carry += targetRate / 10.0
         val due = carry.toInt()
         carry -= due
         repeat(due) {
-            if (!inFlight.tryAcquire()) { shed.incrementAndGet(); return@repeat }
-            workers.submit { try { operation(Random) } finally { inFlight.release() } }
+            if (!inFlight.tryAcquire()) { counters.shed.incrementAndGet(); return@repeat }
+            workers.submit { try { operation(Random, counters) } finally { inFlight.release() } }
         }
         // Keep the book moving: settle the oldest open fixture and open a new one every 15 s.
         if (autoFixtures && System.nanoTime() - lastRoundNanos > 15_000_000_000L) {
             lastRoundNanos = System.nanoTime()
             book.fixtures().firstOrNull { it.isOpen }?.let { f ->
-                workers.submit { runCatching { book.settle(f.id, weightedResult(f)); fixtureRounds.incrementAndGet() } }
+                workers.submit { runCatching { book.settle(f.id, weightedResult(f)); counters.fixtureRounds.incrementAndGet() } }
             }
             book.addFixture()
         }
@@ -146,7 +159,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
         return "HOME"
     }
 
-    private fun operation(rnd: Random) {
+    private fun operation(rnd: Random, counters: Run) {
         val customer = customerName(rnd.nextInt(customers) + 1)
         var op = "SEED"
         var text = ""
@@ -156,7 +169,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                 val amount = rnd.nextLong(50_00, 500_00)
                 text = "joined, deposited ${eur(amount)}"
                 wallet.deposit(customer, amount, "EUR", "sim-seed-$customer")
-                record(customer, op, text, true)
+                record(counters, customer, op, text, true)
             }
             when (rnd.nextInt(100)) {
                 in 0..64 -> {
@@ -168,14 +181,14 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     text = "bet ${eur(stake)} on ${f.id} $selection @ ${"%.2f".format(Locale.ROOT, odds / 100.0)}"
                     val betId = "sim-" + UUID.randomUUID()
                     book.placeBet(customer, f.id, selection, stake, betId)
-                    bets.incrementAndGet()
+                    counters.bets.incrementAndGet()
                 }
                 in 65..79 -> {
                     op = "DEPOSIT"
                     val amount = rnd.nextLong(10_00, 100_00)
                     text = "deposited ${eur(amount)}"
                     wallet.deposit(customer, amount, "EUR", "sim-dep-" + UUID.randomUUID())
-                    deposits.incrementAndGet()
+                    counters.deposits.incrementAndGet()
                 }
                 in 80..89 -> {
                     op = "WITHDRAW"
@@ -183,7 +196,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     val amount = rnd.nextLong(5_00, 200_00)
                     text = "withdrew ${eur(amount)}"
                     wallet.withdraw(customer, amount, "EUR", "sim-wd-" + UUID.randomUUID())
-                    withdrawals.incrementAndGet()
+                    counters.withdrawals.incrementAndGet()
                 }
                 else -> {
                     op = "CASH_OUT"
@@ -191,20 +204,20 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
                     val offer = book.cashOutOffer(bet.betId)
                     text = "cashed out ${eur(offer)}"
                     book.cashOut(bet.betId)
-                    cashOuts.incrementAndGet()
+                    counters.cashOuts.incrementAndGet()
                 }
             }
-            record(customer, op, text, true)
+            record(counters, customer, op, text, true)
         } catch (e: InsufficientFundsException) {
-            rejectedForFunds.incrementAndGet()
-            record(customer, op, "$text: refused, insufficient funds", false)
+            counters.rejectedForFunds.incrementAndGet()
+            record(counters, customer, op, "$text: refused, insufficient funds", false)
         } catch (e: LedgerException) {
             // e.g. a cash-out losing the race to settlement: refused, as it should be
-            rejectedOther.incrementAndGet()
-            record(customer, op, "$text: refused, " + (if (e is com.pam.ledger.IdempotencyConflictException) "bet already settled" else (e.message ?: "rejected")), false)
+            counters.rejectedOther.incrementAndGet()
+            record(counters, customer, op, "$text: refused, " + (if (e is com.pam.ledger.IdempotencyConflictException) "bet already settled" else (e.message ?: "rejected")), false)
         } catch (e: IllegalArgumentException) {
-            rejectedOther.incrementAndGet() // e.g. the fixture was settled a moment ago
-            record(customer, op, "$text: refused, ${e.message}", false)
+            counters.rejectedOther.incrementAndGet() // e.g. the fixture was settled a moment ago
+            record(counters, customer, op, "$text: refused, ${e.message}", false)
         }
     }
 

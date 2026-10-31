@@ -5,6 +5,7 @@ import com.pam.ledger.web.Audit
 import com.pam.ledger.web.LedgerWebApp
 import com.pam.ledger.web.ReadModel
 import com.pam.ledger.web.WebOptions
+import com.pam.ledger.web.Simulator
 import com.pam.ledger.TestSupport.config
 import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
@@ -392,6 +393,43 @@ class WebAppTest {
                 }
             }
 
+        }
+    }
+
+    /** Delayed workers from a stopped run must not publish into the next run. */
+    @Test
+    fun `immediate simulator restart isolates late workers and events`() {
+        val hold = AtomicBoolean(true)
+        val queued = ConcurrentLinkedQueue<Runnable>()
+        val waiting = CountDownLatch(1)
+        val executor = Executor { task ->
+            if (hold.get()) { queued.add(task); waiting.countDown() }
+            else java.util.concurrent.ForkJoinPool.commonPool().execute(task)
+        }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                book.addFixture(Random(0))
+                Simulator(book, wallet).use { simulator ->
+                    simulator.configure(1, 600, false)
+                    race(2) { t ->
+                        if (t == 0) simulator.start()
+                        else {
+                            check(waiting.await(5, TimeUnit.SECONDS))
+                            simulator.stop()
+                            simulator.configure(1, 1, false)
+                            simulator.start()
+                            hold.set(false)
+                            while (true) java.util.concurrent.ForkJoinPool.commonPool().execute(queued.poll() ?: break)
+                        }
+                    }.forEach { it.getOrThrow() }
+                    Thread.sleep(1000)
+                    assertEquals(0L, simulator.succeeded)
+                    assertEquals(0L, simulator.rejectedOther.get())
+                    assertTrue(simulator.eventPage(0).events.isEmpty())
+                }
+            }
         }
     }
 

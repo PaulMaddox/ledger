@@ -520,6 +520,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
+  <p class="prose">Simulator counters and events are scoped to one run, so restarting never counts late work from the previous run.</p>
   <p class="prose">Customer bet lists read the newest 40 placements from that customer's entry index, rather than scanning all customers' bets.</p>
   <p class="prose">Operator statistics read current-open indexes; settled history and empty fixture buckets do not accumulate in their refresh path.</p>
   <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code>. Four views share one live ledger, so anything done in one appears in the others. These screenshots are captured from the running console by <code>scripts/capture-screenshots.py</code>.</p>

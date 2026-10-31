@@ -62,7 +62,8 @@ ledger, so anything done in one view shows up in the others.
 - **Simulator.** Choose how many automated customers to run (500 by default) and how active
   they are, then start, pause, resume or stop them. Each customer gets a tile streaming its
   latest bets, deposits, withdrawals and cash-outs, green when accepted and red when the
-  ledger refuses; select a tile to open that customer.
+  ledger refuses. Counters and events belong to one run; late workers cannot pollute a restart.
+  Select a tile to open that customer.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
