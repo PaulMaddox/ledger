@@ -25,6 +25,18 @@ function context(fetch) {
   return c;
 }
 
+test("API propagates successful body failures and keeps fallback parsing for error responses", async () => {
+  for (const failure of [new SyntaxError("Unexpected end of JSON input"), new TypeError("Body unreadable")]) {
+    const c = context(async () => ({ ok: true, json: async () => { throw failure; } }));
+    await assert.rejects(c.api("test"), err => err === failure);
+  }
+  for (const status of [422, 503]) {
+    const c = context(async () => new Response("not JSON", { status, statusText: "Request failed" }));
+    await assert.rejects(c.api("test"), err =>
+      err.status === status && err.error === "error" && err.message === "Request failed");
+  }
+});
+
 test("entry decoder preserves Long precision and rejects malformed records", () => {
   const c = context();
   const bytes = entryBytes(9223372036854775807n);
@@ -78,6 +90,29 @@ test("uncertain wallet actions retry their original customer, amount and idempot
   assert.equal(calls[2].path, "/api/players/bob/withdraw");
   assert.match(calls[2].body, /amount=999/);
   assert.notEqual(calls[2].body, calls[1].body);
+});
+
+test("unreadable successful wallet responses retain the identical deposit or withdrawal for retry", async () => {
+  for (const kind of ["deposit", "withdraw"]) {
+    for (const failure of [new SyntaxError("Unexpected end of JSON input"), new TypeError("Body unreadable")]) {
+      const calls = [];
+      const s = slipContext(async (path, options) => {
+        calls.push({ path, method: options.method, body: options.body.toString() });
+        if (calls.length === 1) return { ok: true, json: async () => { throw failure; } };
+        return { ok: true, json: async () => ({ seq: 9, chainHash: "abcdef0123456789" }) };
+      });
+      s.element("depAmount").value = "1.01";
+      await s.c.walletAction(kind);
+      assert.match(s.element("walletResult").innerHTML, /Outcome unknown/);
+      assert.match(s.element("walletResult").innerHTML, new RegExp(`original ${kind} for alice`));
+      vm.runInContext('player = "bob"', s.c);
+      s.element("depAmount").value = "9.99";
+      await s.c.walletAction(kind === "deposit" ? "withdraw" : "deposit");
+      assert.deepEqual(calls[1], calls[0]);
+      assert.equal(vm.runInContext("walletRequest", s.c), null);
+      assert.match(s.element("walletResult").className, /\bok\b/);
+    }
+  }
 });
 
 test("LAN wallet and bet requests work without secure-context randomUUID", async () => {
@@ -235,6 +270,30 @@ function slipContext(fetch) {
   const submit = () => element("slip").handlers.submit({ preventDefault() {} });
   return { c, element, pick, submit };
 }
+
+test("unreadable successful bet responses retain the identical slip for retry", async () => {
+  for (const failure of [new SyntaxError("Unexpected end of JSON input"), new TypeError("Body unreadable")]) {
+    const calls = [];
+    const s = slipContext(async (path, options) => {
+      calls.push({ path, method: options.method, body: options.body.toString() });
+      if (calls.length === 1) return { ok: true, json: async () => { throw failure; } };
+      return { ok: true, json: async () => ({ seq: 5 }) };
+    });
+    s.pick("HOME");
+    await s.submit();
+    assert.equal(s.element("slip").hidden, false);
+    assert.equal(s.element("slipStake").disabled, true);
+    assert.equal(s.element("submit").disabled, false);
+    assert.equal(s.element("betResult").innerHTML, failure.message);
+    assert.match(s.element("betResult").className, /\bbad\b/);
+    s.element("slipStake").value = "99.00";
+    vm.runInContext('player = "bob"', s.c);
+    await s.submit();
+    assert.deepEqual(calls[1], calls[0]);
+    assert.equal(s.element("slip").hidden, true);
+    assert.equal(vm.runInContext("selection", s.c), null);
+  }
+});
 
 test("double submission is blocked and a lost response retries the identical slip", async () => {
   const calls = [];

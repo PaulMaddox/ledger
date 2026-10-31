@@ -543,7 +543,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Automatic fixture rounds resume an unfinished settlement with its already-persisted result and keep a per-fixture task guard, so overload retries safely without duplicating concurrent work.</p>
   <p class="prose">Fixture definitions and results are flushed before they become visible to bets or settlements. On restart, saved fixtures are reconciled with ledger placements and outcomes; missing or contradictory definitions are frozen rather than guessed.</p>
   <p class="prose">Money crosses the web API as decimal strings of minor units. Browser input parsing and formatting use exact integer arithmetic, so large balances and decimal amounts do not pass through floating-point rounding.</p>
-  <p class="prose">An uncertain customer deposit or withdrawal retains its original player, amount and idempotency reference; retrying cannot silently turn it into a different money movement.</p>
+  <p class="prose">An uncertain customer deposit or withdrawal retains its original player, amount and idempotency reference; retrying cannot silently turn it into a different money movement. Successful responses with unreadable or truncated JSON are also uncertain: wallet actions and bet slips retain their original requests for retry.</p>
   <p class="prose">The operator fixture list keeps every unfinished fixture visible and limits only completed history to the latest 30 entries.</p>
   <p class="prose">Customer bet lists read the newest 40 placements from that customer's entry index, rather than scanning all customers' bets.</p>
   <p class="prose">Operator statistics read current-open indexes; settled history and empty fixture buckets do not accumulate in their refresh path.</p>

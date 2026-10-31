@@ -76,7 +76,8 @@ ledger, so anything done in one view shows up in the others.
   API monetary values are decimal strings in minor units, and browser inputs are parsed
   without floating-point rounding. Wallet actions retain the original customer, amount
   and idempotency reference after an uncertain response, so retries cannot silently become
-  different money movements.
+  different money movements. Successful responses with unreadable or truncated JSON are
+  also uncertain: wallet actions and bet slips retain their original requests for retry.
   Definitive bet rejections unlock the stake for correction, and late cash-out replies
   cannot overwrite another selected customer's result.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
