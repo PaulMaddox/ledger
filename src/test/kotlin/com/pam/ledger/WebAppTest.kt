@@ -225,7 +225,9 @@ class WebAppTest {
             val result = chaos(app, scenario)
             assertEquals(200, result.first, result.second)
             assertTrue(result.second.contains("\"passed\":true"), result.second)
-            assertTrue(result.second.contains("\"scope\":\"MAIN DATA STORE\""), result.second)
+            val live = scenario in setOf("retries", "double-spend", "settlement")
+            val scope = if (live) "MAIN DATA STORE · LIVE" else "MAIN DATA STORE"
+            assertTrue(result.second.contains("\"scope\":\"$scope\""), result.second)
             val available = scenario in setOf("torn-write", "retries", "double-spend", "settlement", "signer-outage")
             assertTrue(result.second.contains("\"available\":$available"), result.second)
             val overview = call(app, "GET", "overview")
@@ -239,8 +241,11 @@ class WebAppTest {
                 "experiment $scenario must alter the main journal")
             if (available) {
                 assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
-                if (scenario != "torn-write") {
+                if (live) {
                     assertTrue(call(app, "GET", "players").second.contains("chaos-"), "main-store chaos customers must be visible")
+                } else {
+                    assertFalse(call(app, "GET", "players").second.contains("chaos-"),
+                        "file recovery and failed signing must not create a committed customer")
                 }
             } else {
                 assertEquals(503, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "blocked")).first)
@@ -249,7 +254,7 @@ class WebAppTest {
             }
             reset(app)
             assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
-            assertFalse(call(app, "GET", "chaos").second.contains("\"scope\":\"MAIN DATA STORE\""))
+            assertTrue(call(app, "GET", "chaos").second.contains("\"history\":[]"))
             assertEquals("unrelated file", Files.readString(marker))
             assertTrue(key.contentEquals(Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))))
             Files.list(app.directory).use { files ->
@@ -270,7 +275,29 @@ class WebAppTest {
         val players = call(app, "GET", "players").second
         assertEquals(4, Regex("\"id\":\"chaos-").findAll(players).count(), players)
         val history = call(app, "GET", "chaos").second
-        assertEquals(4, Regex("\"scope\":\"MAIN DATA STORE\"").findAll(history).count(), history)
+        assertEquals(4, Regex("\"scope\":\"MAIN DATA STORE · LIVE\"").findAll(history).count(), history)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
+    @Test
+    fun `concurrent live chaos replies publish their customers before acknowledgement`() = withApp { app ->
+        val players = race(4) {
+            val result = chaos(app, "retries")
+            assertEquals(200, result.first, result.second)
+            assertTrue(result.second.contains("\"passed\":true"), result.second)
+            val player = checkNotNull(Regex("chaos-[0-9a-f-]+").find(result.second)) {
+                "experiment reply did not identify its committed customer: ${result.second}"
+            }.value
+            val visible = call(app, "GET", "players", mapOf("q" to player))
+            assertEquals(200, visible.first, visible.second)
+            assertTrue(visible.second.contains("\"id\":\"$player\""), visible.second)
+            val audit = call(app, "GET", "regulator/players/$player")
+            assertEquals(200, audit.first, audit.second)
+            assertTrue(audit.second.contains("\"replayedCash\":\"10100\""), audit.second)
+            assertTrue(audit.second.contains("\"reconciles\":true"), audit.second)
+            player
+        }.map { it.getOrThrow() }
+        assertEquals(4, players.distinct().size)
         assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
     }
 

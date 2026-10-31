@@ -116,7 +116,10 @@ the interactive ledger guide and its screenshots.
   settlement and signing-service outage/fail-stop. Clicking **Run experiment** authorizes
   that run; no typed phrase is required. Retry, double-spend and settlement races run live
   on the ledger alongside the simulator, demonstrating committed outcomes and rejected
-  transactions without interrupting simulator traffic. File and signer faults drain services
+  transactions without interrupting simulator traffic. A live experiment catches the
+  dashboard read model up before replying, so its committed customer is immediately
+  searchable; balances and integrity evidence still come from the ledger.
+  File and signer faults drain services
   before running; the simulator resumes with a fresh run if the store recovers. Corruption
   correctly fail-stops the ledger, so services remain stopped until reset rather than
   accepting writes against damaged history. Storage attacks mutate the main journal under
