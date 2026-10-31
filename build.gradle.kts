@@ -29,7 +29,7 @@ tasks.register<JavaExec>("web") {
 tasks.test {
     useJUnitPlatform()
     // The regulatory storm retains every observed balance as independent evidence.
-    maxHeapSize = "2g"
+    maxHeapSize = "4g"
     testLogging {
         events("passed", "failed", "skipped")
         exceptionFormat = org.gradle.api.tasks.testing.logging.TestExceptionFormat.FULL

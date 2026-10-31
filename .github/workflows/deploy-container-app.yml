@@ -1,0 +1,77 @@
+name: Deploy web app to Container Apps
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-azure-demo
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: azure-demo
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      ACR_NAME: ${{ vars.ACR_NAME }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: gradle/actions/wrapper-validation@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - uses: actions/setup-node@v5
+        with:
+          node-version: "22"
+      - name: Validate configuration and guide
+        env:
+          AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
+        run: |
+          set -euo pipefail
+          for name in AZURE_CLIENT_ID AZURE_TENANT_ID AZURE_SUBSCRIPTION_ID ACR_NAME; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Set $name in the azure-demo GitHub environment."
+              exit 1
+            fi
+          done
+          [[ "$ACR_NAME" =~ ^[a-zA-Z0-9]{5,50}$ ]]
+          python3 scripts/build-readme.py
+          git diff --exit-code -- docs/index.html
+          node scripts/check-guide.mjs
+          node scripts/check-web.mjs
+          python3 -m unittest discover -s scripts -p 'test_deploy_container_app.py'
+      - uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - name: Build, test twice, audit and push image
+        run: |
+          set -euo pipefail
+          LOGIN_SERVER=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
+          az acr login -n "$ACR_NAME"
+          docker build --tag "$LOGIN_SERVER/ledger-web:${GITHUB_SHA}" .
+          docker push "$LOGIN_SERVER/ledger-web:${GITHUB_SHA}"
+      - name: Drain old writer, deploy and verify HTTPS
+        run: |
+          set -euo pipefail
+          python3 scripts/deploy-container-app.py --registry "$ACR_NAME" \
+            --tag "$GITHUB_SHA" --revision "gh-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+      - name: Deployment diagnostics
+        if: failure()
+        run: |
+          az containerapp show -g ledger -n ledger-web \
+            --query '{state:properties.provisioningState,running:properties.runningStatus}'
+          az containerapp revision list -g ledger -n ledger-web -o table
+          az containerapp logs show -g ledger -n ledger-web --type system --tail 50

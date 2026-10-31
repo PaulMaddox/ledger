@@ -1,0 +1,54 @@
+location: swedencentral
+identity:
+  type: UserAssigned
+  userAssignedIdentities:
+    "${PULL_IDENTITY_ID}": {}
+properties:
+  managedEnvironmentId: "${ENVIRONMENT_ID}"
+  configuration:
+    # The deploy script drains every old revision before creating a new writer.
+    activeRevisionsMode: Multiple
+    ingress:
+      external: true
+      allowInsecure: false
+      targetPort: 8080
+      transport: http
+      traffic:
+        - latestRevision: true
+          weight: 100
+    registries:
+      - server: "${LOGIN_SERVER}"
+        identity: "${PULL_IDENTITY_ID}"
+  template:
+    revisionSuffix: "${REVISION_SUFFIX}"
+    terminationGracePeriodSeconds: 90
+    containers:
+      - name: ledger
+        image: "${IMAGE}"
+        args: ["--host", "0.0.0.0", "--port", "8080", "--data", "/data/ledger", "--public-origin", "https://${PUBLIC_HOST}"]
+        resources:
+          cpu: 1.0
+          memory: 2Gi
+        probes:
+          - type: Startup
+            tcpSocket:
+              port: 8080
+            periodSeconds: 5
+            failureThreshold: 120
+          - type: Readiness
+            tcpSocket:
+              port: 8080
+            periodSeconds: 10
+            failureThreshold: 3
+        volumeMounts:
+          - volumeName: ledger-data
+            mountPath: /data
+    scale:
+      minReplicas: 1
+      maxReplicas: 1
+    volumes:
+      - name: ledger-data
+        storageType: AzureFile
+        storageName: ledger-data
+        # Keep SMB byte-range locks enabled: never add nobrl.
+        mountOptions: "uid=10001,gid=10001,dir_mode=0700,file_mode=0600,cache=strict"
