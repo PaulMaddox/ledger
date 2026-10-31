@@ -165,6 +165,31 @@ table.bal{border-collapse:collapse;width:100%;font-size:.78rem}
 .banner{margin:10px 16px 0;padding:8px 10px;font-size:.84rem;border:1px solid var(--rule);background:var(--paper)}
 .banner.bad{border-color:var(--bad);color:var(--bad)} .banner.ok{border-color:var(--ok)}
 
+/* ---------- expandable tests ---------- */
+.tlink{font:500 .78rem/1.4 var(--f-mono);color:var(--accent);background:none;border:0;padding:0;text-align:left;cursor:pointer;text-decoration:underline;text-decoration-thickness:1px;text-underline-offset:2px}
+.tlink:hover{text-decoration-thickness:2px}
+.tests{display:grid;gap:18px}
+.tgroup{display:grid;gap:6px}
+.tgroup > header{display:flex;flex-wrap:wrap;gap:4px 12px;align-items:baseline}
+.tgroup > header h4{margin:0;font:700 1rem var(--f-display)}
+.tgroup > header span{font-size:.82rem;color:var(--muted)}
+.tests details{border:1px solid var(--rule);background:var(--panel)}
+.tests details[open]{border-color:var(--accent)}
+.tests summary{cursor:pointer;padding:9px 12px;display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:10px;align-items:baseline;list-style:none}
+.tests summary::-webkit-details-marker{display:none}
+.tests summary::before{content:"▸";color:var(--muted);transition:transform .15s}
+.tests details[open] > summary::before{transform:rotate(90deg)}
+.tests summary .tn{font:500 .86rem/1.4 var(--f-mono);overflow-wrap:anywhere}
+.tests summary .tl{font:.72rem var(--f-mono);color:var(--muted);white-space:nowrap}
+.tests summary .tag{font:600 .66rem/1 var(--f-body);letter-spacing:.06em;text-transform:uppercase;color:var(--accent);border:1px solid currentColor;border-radius:999px;padding:3px 6px;margin-right:6px}
+.tests details.whole > summary .tn{font-family:var(--f-body);font-weight:600}
+.tcode{overflow:auto;max-height:560px;font:12.5px/1.6 var(--f-mono);background:var(--code-bg);border-top:1px solid var(--rule);padding-block:6px}
+.tcode .ln{display:grid;grid-template-columns:3.4em max-content;white-space:pre;min-width:100%}
+.tcode .no{color:var(--com);text-align:right;padding-right:1em;user-select:none}
+.tests details.flash{animation:flash 1.2s ease-out}
+@keyframes flash{from{box-shadow:0 0 0 3px var(--accent)}to{box-shadow:0 0 0 0 transparent}}
+@media (prefers-reduced-motion:reduce){.tests details.flash{animation:none}.tests summary::before{transition:none}}
+
 /* ---------- tables ---------- */
 .tblwrap{overflow-x:auto;border:1px solid var(--rule)}
 table.reg{border-collapse:collapse;width:100%;min-width:640px;font-size:.88rem;background:var(--panel)}
@@ -475,14 +500,19 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <div class="tblwrap"><table class="reg">
     <thead><tr><th>Property</th><th>Guarantee</th><th>How it is enforced</th><th>Tests</th></tr></thead>
     <tbody>
-      <tr><td>R1</td><td>No double spend</td><td>One writer applies transactions in order; later requests in a batch see earlier ones through the overlay.</td><td><code>withdrawal and bet racing…</code>, <code>simultaneous full-balance withdrawals…</code>, <code>no double spend…</code></td></tr>
-      <tr><td>R2</td><td>Never negative, at any instant</td><td><code>AccountPolicy</code> checked on every posting; replay re-checks every historic balance.</td><td><code>STORM</code> replays every intermediate balance</td></tr>
-      <tr><td>R3</td><td>No phantom balances</td><td>Read structures are updated only after fsync; rejections wait for their batch to commit.</td><td><code>STORM</code>: every observed balance must appear in history</td></tr>
-      <tr><td>R4</td><td>Exactly-once</td><td>Idempotency keys with content fingerprints; one settlement key per bet for every outcome.</td><td><code>double-tapped…</code>, <code>cash-out racing settlement…</code>, <code>bet settles exactly once…</code></td></tr>
-      <tr><td>R5</td><td>Full reconciliation</td><td>Independent model built from client receipts must equal the ledger to the cent.</td><td><code>STORM</code>, <code>stress - invariants hold…</code></td></tr>
-      <tr><td>R6</td><td>Provability</td><td>Inclusion proof for every receipt; consistency proofs between checkpoints signed mid-storm.</td><td><code>STORM</code>, <code>MerkleTest</code>, <code>IntegrityTest</code></td></tr>
+      <tr><td>R1</td><td>No double spend</td><td>One writer applies transactions in order; later requests in a batch see earlier ones through the overlay.</td><td><button type="button" class="tlink" data-test="R1 - withdrawal and bet racing for the same funds cannot both succeed">R1 - withdrawal and bet racing for the same funds cannot both succeed</button>, <button type="button" class="tlink" data-test="R1 - simultaneous full-balance withdrawals from many devices pay out once">R1 - simultaneous full-balance withdrawals from many devices pay out once</button>, <button type="button" class="tlink" data-test="R1 - cash-out racing settlement resolves the bet exactly once">R1 - cash-out racing settlement resolves the bet exactly once</button>, <button type="button" class="tlink" data-test="R1 - withdrawing winnings only succeeds against committed settlement">R1 - withdrawing winnings only succeeds against committed settlement</button>, <button type="button" class="tlink" data-test="no double spend when many bets race for the same funds">no double spend when many bets race for the same funds</button></td></tr>
+      <tr><td>R2</td><td>Never negative, at any instant</td><td><code>AccountPolicy</code> checked on every posting; replay re-checks every historic balance.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="stress - invariants hold under heavy concurrent load and survive restart">stress - invariants hold under heavy concurrent load and survive restart</button></td></tr>
+      <tr><td>R3</td><td>No phantom balances</td><td>Read structures are updated only after fsync; rejections wait for their batch to commit.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button></td></tr>
+      <tr><td>R4</td><td>Exactly-once</td><td>Idempotency keys with content fingerprints; one settlement key per bet for every outcome.</td><td><button type="button" class="tlink" data-test="R4 - double-tapped and retried bet placement debits once">R4 - double-tapped and retried bet placement debits once</button>, <button type="button" class="tlink" data-test="R4 - reusing a bet id with a different stake is refused">R4 - reusing a bet id with a different stake is refused</button>, <button type="button" class="tlink" data-test="R4 - settling an unknown bet moves no money">R4 - settling an unknown bet moves no money</button>, <button type="button" class="tlink" data-test="a bet settles exactly once even under conflicting concurrent settlements">a bet settles exactly once even under conflicting concurrent settlements</button>, <button type="button" class="tlink" data-test="concurrent duplicate deposits are recorded once">concurrent duplicate deposits are recorded once</button></td></tr>
+      <tr><td>R5</td><td>Full reconciliation</td><td>Independent model built from client receipts must equal the ledger to the cent.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="stress - invariants hold under heavy concurrent load and survive restart">stress - invariants hold under heavy concurrent load and survive restart</button></td></tr>
+      <tr><td>R6</td><td>Provability</td><td>Inclusion proof for every receipt; consistency proofs between checkpoints signed mid-storm.</td><td><button type="button" class="tlink" data-test="STORM - one player on many devices with live settlement satisfies R1 to R6">STORM - one player on many devices with live settlement satisfies R1 to R6</button>, <button type="button" class="tlink" data-test="inclusion proofs verify for every leaf of every tree, and forgeries fail">inclusion proofs verify for every leaf of every tree, and forgeries fail</button>, <button type="button" class="tlink" data-test="consistency proofs verify for every pair of sizes, and rewritten history fails">consistency proofs verify for every pair of sizes, and rewritten history fails</button>, <button type="button" class="tlink" data-test="rewriting history with recomputed hashes is caught by the signed checkpoint">rewriting history with recomputed hashes is caught by the signed checkpoint</button></td></tr>
     </tbody>
   </table></div>
+  <div class="prose" style="display:grid;gap:8px">
+    <h3>Every test, with its source</h3>
+    <p>Select a test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
+  </div>
+  <div class="tests" id="testList"></div>
 </section>
 
 <!-- ======================= FILES ======================= -->
@@ -511,6 +541,7 @@ gradle run           # demo: 16 threads of betting, then an independent audit an
 
 <script>
 /*__SOURCES__*/
+/*__TESTS__*/
 </script>
 <script>
 "use strict";
@@ -1219,4 +1250,62 @@ function renderLoad(exact) {
 }
 $("load").value = toSlider(150000);
 renderLoad(150000);
+</script>
+<script>
+"use strict";
+/* ============================== EXPANDABLE TESTS ==============================
+   TESTS (from the build script) maps each test file to its @Test functions:
+   { name, line, src }. Source is highlighted lazily, the first time a test opens. */
+const TEST_GROUPS = {
+  "MultiDeviceWalletTest.kt": "Regulatory properties R1 to R6, with one player on many devices at once.",
+  "ConcurrencyTest.kt": "Races, idempotent retries, optimistic locking and a heavy stress run.",
+  "IntegrityTest.kt": "Tampering, rollback, untrusted keys, torn writes and corruption.",
+  "MerkleTest.kt": "Exhaustive proof checks for every tree size up to 70.",
+};
+const testSlug = name => "t-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+function codeLines(src, firstLine) {
+  return highlight(src).map((h, i) => `<div class="ln"><span class="no">${firstLine + i}</span><span>${h || " "}</span></div>`).join("");
+}
+function testSummary(t, file) {
+  const m = t.name.match(/^(R\d|STORM) - (.*)$/);
+  const label = m ? `<span class="tag">${m[1]}</span>${esc(m[2])}` : esc(t.name);
+  return `<summary><span class="tn">${label}</span><span class="tl">${file}:${t.line}</span></summary>`;
+}
+function renderTests() {
+  let h = "";
+  for (const [file, list] of Object.entries(TESTS)) {
+    h += `<div class="tgroup"><header><h4>${file}</h4><span>${list.length} tests · ${TEST_GROUPS[file] || ""}</span></header>`;
+    for (const t of list) {
+      h += `<details id="${testSlug(t.name)}" data-file="${file}" data-line="${t.line}">${testSummary(t, file)}<div class="tcode" data-src></div></details>`;
+    }
+    h += `</div>`;
+  }
+  h += `<div class="tgroup"><header><h4>TestSupport.kt</h4><span>Shared helpers: temp directories, a start-gate for races, journal rewriting for tamper tests.</span></header>
+    <details class="whole" data-whole="TestSupport.kt"><summary><span class="tn">Show the whole file</span><span class="tl">TestSupport.kt</span></summary><div class="tcode" data-src></div></details></div>`;
+  $("testList").innerHTML = h;
+
+  document.querySelectorAll("#testList details").forEach(d => d.addEventListener("toggle", () => {
+    const box = d.querySelector("[data-src]");
+    if (!d.open || box.dataset.done) return;
+    if (d.dataset.whole) box.innerHTML = codeLines(TEST_FILES[d.dataset.whole], 1);
+    else {
+      const t = TESTS[d.dataset.file].find(x => d.id === testSlug(x.name));
+      box.innerHTML = codeLines(t.src, t.line);
+    }
+    box.dataset.done = "1";
+  }));
+}
+function openTest(name) {
+  const d = document.getElementById(testSlug(name));
+  if (!d) return;
+  d.open = true;
+  d.classList.remove("flash");
+  void d.offsetWidth; // restart the highlight animation
+  d.classList.add("flash");
+  const reduce = window.matchMedia && matchMedia("(prefers-reduced-motion: reduce)").matches;
+  d.scrollIntoView({ behavior: reduce ? "auto" : "smooth", block: "start" });
+  d.querySelector("summary").focus({ preventScroll: true });
+}
+renderTests();
+document.querySelectorAll(".tlink").forEach(b => b.addEventListener("click", () => openTest(b.dataset.test)));
 </script>
