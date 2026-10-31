@@ -25,7 +25,12 @@ rewrite) over the real source code.
 ```
 gradle test   # 27 tests: Merkle, integrity, concurrency, multi-device regulatory suite
 gradle run    # demo: 16 betting threads, then an independent audit and proofs
+python3 scripts/build-readme.py   # rebuild the interactive guide
+node scripts/check-guide.mjs      # headless check of the guide
 ```
+
+Contributing, including with coding agents: read [`AGENTS.md`](AGENTS.md) first. It lists
+the invariants that must never be broken and the branch-and-pull-request workflow.
 
 ## Layout
 
@@ -45,6 +50,9 @@ src/test/kotlin/com/pam/ledger/
 docs/
   readme.src.html      template for the interactive guide
   index.html           built guide, served by GitHub Pages (python3 scripts/build-readme.py)
+scripts/
+  build-readme.py       builds docs/index.html from the template and real sources
+  check-guide.mjs      headless check: debugger anchors, cloud data, test links
 ```
 
 ## Before production
