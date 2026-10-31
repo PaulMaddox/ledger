@@ -1,0 +1,120 @@
+# Working on this repository
+
+Instructions for coding agents (and humans) changing this project. Read it fully
+before your first change: several rules protect properties that tests alone cannot.
+
+## What this is
+
+A cryptographically verifiable, append-only, double-entry ledger for a sportsbook
+player account platform, in Kotlin on JDK 21, plus an interactive guide published
+with GitHub Pages. The ledger's job is to make money movements exact, durable and
+provable to a regulator. Correctness outranks speed, features and tidiness.
+
+## Layout
+
+```
+src/main/kotlin/com/pam/ledger/
+  Ledger.kt              engine: queue, single writer thread, group commit, recovery
+  SportsbookWallet.kt    deposits, withdrawals, bets, exactly-once settlement
+  Replay.kt              balance rules, replay verification, checkpoint checks
+  Journal.kt             CRC-framed append-only file, fsync, torn-write recovery, lock
+  Merkle.kt              incremental root, inclusion and consistency proofs
+  Signing.kt             signed tree heads, TreeHeadSigner interface
+  EntryCodec.kt, Hashes.kt   canonical byte format and domain-separated hashing
+  Model.kt, Validation.kt, Errors.kt, AppendOnlyList.kt, LedgerVerifier.kt
+  demo/Demo.kt
+src/test/kotlin/com/pam/ledger/
+  MultiDeviceWalletTest.kt   regulatory properties R1-R6 under multi-device load
+  ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
+docs/
+  readme.src.html        SOURCE of the interactive guide (edit this)
+  index.html             BUILT guide served by GitHub Pages (never edit by hand)
+scripts/
+  build-readme.py        builds docs/index.html, embedding the real Kotlin sources and tests
+  check-guide.mjs        headless check of the built guide
+```
+
+## Commands
+
+```
+gradle test                          # full test suite (JUnit 5)
+gradle run                           # demo: concurrent betting, audit, proofs
+python3 scripts/build-readme.py      # rebuild docs/index.html after ANY source or guide change
+node scripts/check-guide.mjs         # must print four PASS lines
+```
+
+If Gradle cannot reach Maven Central in your environment, say so plainly. You may
+compile with a standalone `kotlinc`, but never report the test suite as passing
+unless the tests actually ran.
+
+## Invariants: never break these
+
+Each of these is load-bearing. If a task seems to require breaking one, stop and ask.
+
+1. **Single writer.** Only the writer thread in `Ledger.kt` mutates ledger state.
+   Do not add locks, a second writer, or parallel processing of a batch. Throughput
+   comes from group commit and, in the cloud design, from sharding by player.
+2. **Acknowledge only what is durable.** A receipt is issued only after the batch
+   is fsynced. Publication order is entries, then indexes and balances, then the head.
+   Rejections are delivered only after the batch they depend on has committed (see
+   the comment above `rejections` in `processBatch`).
+3. **Money is conserved and exact.** Postings sum to zero per currency. Amounts are
+   `Long` minor units with overflow-checked arithmetic (`Math.addExact`). Never use
+   floating point for money.
+4. **Append-only.** Never update or delete a journal record. Corrections are new,
+   compensating transactions with their own idempotency keys
+   (for example `bet:{id}:resettle:{n}`).
+5. **The byte formats are a contract.** `EntryCodec`, `Hashes` and
+   `TreeHead.signingBytes` define every hash and signature. Changing them makes every
+   existing ledger fail verification. Do not "tidy" them. A real format change needs
+   a new version number, a migration plan and explicit approval from the owner.
+6. **Exactly-once by idempotency key.** Every business operation has a deterministic
+   key. All outcomes of a bet (win, loss, void, cash-out) share `bet:{id}:settle`;
+   that shared key is what makes settlement exactly-once.
+7. **One rulebook for writing and replay.** `Validation` and `Accounting` are used both
+   for new requests and when replaying the journal. Changing a rule, or the
+   `AccountPolicy`, changes which existing journals verify.
+8. **Fail-stop.** After an I/O error the engine refuses further writes. Do not add retry
+   loops around journal writes; clients retry with the same idempotency key instead.
+9. **No new runtime dependencies.** The runtime is the JDK plus the Kotlin standard
+   library. Test-only dependencies are fine.
+10. **Never weaken a test to make it pass.** A failing concurrency or integrity test is
+    a bug report. Regulatory tests check against the ledger's replayed history; keep it
+    that way.
+
+## Changing code
+
+- Follow the existing comment style: explain *why*, not *what*, and keep KDoc on public
+  APIs. This codebase is meant to be read by auditors as well as engineers.
+- New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`)
+  and the suite run several times; an intermittent failure is a real bug.
+- Keep error types in the sealed `LedgerException` hierarchy.
+
+## Changing the guide
+
+- Edit `docs/readme.src.html`, then run `build-readme.py` and `check-guide.mjs`.
+  Commit the rebuilt `docs/index.html` with the change.
+- Debugger steps point at code by quoting a distinctive line (`anchor`). If you change
+  those lines in Kotlin, update the anchors; `check-guide.mjs` reports any that break.
+- Never let the guide claim more than the code does. Requirement statuses mean:
+  **In the code** = implemented and tested here; **Partly in the code**; **Designed** =
+  specified but not built. Update a status when you implement a roadmap item.
+- Every cloud component needs `svc`, `why` and `alt` for each provider (AWS, Azure,
+  portable). Hedge vendor specifics you cannot verify, as the existing HSM entries do.
+
+## Git and pull requests
+
+- Never push to `main`. Work on a branch (`feature/<topic>` or `fix/<topic>`) and open a
+  pull request; the owner reviews and merges.
+- Keep commits small and focused, with an imperative subject line and a body that
+  explains why.
+- A PR description states what changed, why, and which checks you ran and their results.
+- Before opening a PR: run the tests, rebuild the guide, and run `check-guide.mjs`.
+
+## Security and data
+
+- Never commit secrets or private keys. `Ed25519TreeHeadSigner.generate()` is for tests
+  and the demo only; production signing goes through an HSM-backed `TreeHeadSigner`.
+- Respect the residency design: plaintext ledger data and keys stay in the primary,
+  in-country region. Do not add code or design that replicates unencrypted data or key
+  material elsewhere.
