@@ -77,14 +77,18 @@ class WebAppTest {
         try { body(app) } finally { app.close() }
     }
 
-    private fun rawRequest(app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null): String {
+    private fun rawRequest(
+        app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null,
+        path: String = if (method == "POST") "/api/players/alice/deposit" else "/api/overview",
+        fetchSite: String? = null,
+    ): String {
         val body = if (method == "POST") "amount=1&ref=allowed-host-test" else ""
-        val path = if (method == "POST") "players/alice/deposit" else "overview"
         return Socket("127.0.0.1", app.port).use { socket ->
             socket.soTimeout = 5_000
             val request = buildString {
-                append("$method /api/$path HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n")
+                append("$method $path HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n")
                 if (origin != null) append("Origin: $origin\r\n")
+                if (fetchSite != null) append("Sec-Fetch-Site: $fetchSite\r\n")
                 append("Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ${body.length}\r\n\r\n$body")
             }
             socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
@@ -225,6 +229,18 @@ class WebAppTest {
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
         assertTrue(invalidHost.startsWith("HTTP/1.1 403"), invalidHost)
+    }
+
+    @Test
+    fun `cross-site page navigation is allowed without weakening host or mutation checks`() = withApp { app ->
+        for (path in listOf("/", "/index.html")) {
+            val page = rawRequest(app, "localhost:${app.port}", origin = "https://docs.example", path = path, fetchSite = "cross-site")
+            assertTrue(page.startsWith("HTTP/1.1 200"), page)
+            val refused = rawRequest(app, "attacker.example:${app.port}", path = path, fetchSite = "cross-site")
+            assertTrue(refused.startsWith("HTTP/1.1 403"), refused)
+        }
+        val mutation = rawRequest(app, "localhost:${app.port}", "POST", "http://localhost:${app.port}", fetchSite = "cross-site")
+        assertTrue(mutation.startsWith("HTTP/1.1 403"), mutation)
     }
 
     @Test
@@ -485,6 +501,23 @@ class WebAppTest {
                 }
                 assertEquals(listOf(1L, 2L, 3L), audit.checkpoints().map { it.head.treeSize })
                 assertTrue(audit.checkpointOfSize(2) != null)
+            }
+        }
+    }
+
+    @Test
+    fun `failed checkpoint scans publish neither partial history nor a partial offset`() {
+        val historyDir = tempDir()
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            SportsbookWallet(ledger).deposit("p", 1, "EUR", "history-stage")
+            val checkpoint = ledger.checkpoint()
+            Audit(ledger, historyDir, "test-ledger", listOf(ledger.publicKey)).use { audit ->
+                val path = historyDir.resolve(Ledger.CHECKPOINTS_FILE)
+                TestSupport.writeJournal(path, listOf(checkpoint.encode(), byteArrayOf(1)))
+                repeat(5) { assertFailsWith<Exception> { audit.checkpoints() } }
+                TestSupport.writeJournal(path, listOf(checkpoint.encode()))
+                assertEquals(listOf(checkpoint.head.treeSize), audit.checkpoints().map { it.head.treeSize })
+                assertEquals(1, audit.checkpoints().size)
             }
         }
     }

@@ -70,12 +70,15 @@ ledger, so anything done in one view shows up in the others.
   Betting selects from a current-open fixture index rather than sorting completed fixture history.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
   Customer IDs always use ASCII digits, independent of the host locale.
+  Resizing the simulator wall preserves retained customers' activity, balances and refusal state.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
   API monetary values are decimal strings in minor units, and browser inputs are parsed
   without floating-point rounding. Wallet actions retain the original customer, amount
   and idempotency reference after an uncertain response, so retries cannot silently become
   different money movements.
+  Definitive bet rejections unlock the stake for correction, and late cash-out replies
+  cannot overwrite another selected customer's result.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
   uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance of the customer captured at launch, cancelling if the selection changes before betting,
@@ -98,6 +101,7 @@ ledger, so anything done in one view shows up in the others.
   trusting cached copies or unverified tree sizes. Player audits compare posting replays
   with immutable engine account states at each account's own last sequence.
   Signing times are decoded from the signed bytes.
+  Checkpoint history and its read offset advance together only after a successful scan.
 
 | Operator | Customer |
 |---|---|
@@ -122,6 +126,9 @@ To listen on the LAN, explicitly allow the hostname or IP address users will acc
 IP addresses (without schemes, ports or wildcards). IPv6 wildcard binding uses `--host ::`.
 Loopback access stays available with wildcard binding; other hosts and cross-origin
 mutations remain blocked. Exposing this unauthenticated demo lets reachable users move money.
+Following a link from the README or guide is allowed while Host validation remains enforced.
+Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
+requires a secure context with WebCrypto (HTTPS or localhost).
 
 ## Running
 

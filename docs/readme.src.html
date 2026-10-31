@@ -355,7 +355,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <nav class="topnav" aria-label="Contents">
   <a class="brand" href="#top">Ledger Internals</a>
   <div class="navlinks">
-    <a href="#requirements">Requirements</a><a href="#architecture">How it works</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Debugger</a><a href="#console">Console</a><a href="#regulators">Tests</a><a href="#cloud">Cloud</a><a href="#files">Files</a>
+    <a href="#requirements">Requirements</a><a href="#architecture">How it works</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Debugger</a><a href="#web-console">Console</a><a href="#regulators">Tests</a><a href="#cloud">Cloud</a><a href="#files">Files</a>
   </div>
 </nav>
 
@@ -517,7 +517,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 </section>
 
 <!-- ======================= CONSOLE ======================= -->
-<section id="console">
+<section id="web-console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
   <p class="prose">The five-device test captures its customer before loading the balance, aborts if selection changes before betting, and never displays late results in another customer's view.</p>
@@ -526,6 +526,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Simulator money operations await their original ledger futures before recording acceptance or refusal. Delayed replies cannot appear as rejected transactions that later commit.</p>
   <p class="prose">Simulator seed deposits use stable customer-specific amounts. Restarting recognizes previously committed seed references, including older random seeds, without creating conflicts or duplicate funding.</p>
   <p class="prose">Simulator counters and events are scoped to one run, so restarting never counts late work from the previous run.</p>
+  <p class="prose">Resizing the wall retains existing customers' activity, balances and refusal state. Late cash-out replies stay with their original customer, and definitive bet rejections unlock the stake for correction.</p>
   <p class="prose">Simulated betting reads a current-open fixture index, not a sorted copy of every historical fixture definition.</p>
   <p class="prose">Automatic fixture rounds resume an unfinished settlement with its already-persisted result and keep a per-fixture task guard, so overload retries safely without duplicating concurrent work.</p>
   <p class="prose">Fixture definitions and results are flushed before they become visible to bets or settlements. On restart, saved fixtures are reconciled with ledger placements and outcomes; missing or contradictory definitions are frozen rather than guessed.</p>
@@ -536,9 +537,11 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Operator statistics read current-open indexes; settled history and empty fixture buckets do not accumulate in their refresh path.</p>
   <p class="prose">Independent audit snapshots reread checkpoint records from byte zero through the captured checkpoint's position. Unverified tree sizes cannot exclude tampered history. Player audits reconcile posting replays with immutable engine account states at each account's own last sequence.</p>
   <p class="prose">Checkpoint signing times in the table and proof selectors come from the signed timestamp, never the separate JSON time field.</p>
+  <p class="prose">Checkpoint history and its scan offset are published together only after a successful scan, so a corrupt later record cannot duplicate earlier history on retries.</p>
   <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code>. Four views share one live ledger, so anything done in one appears in the others. These screenshots are captured from the running console by <code>scripts/capture-screenshots.py</code>.</p>
   <p class="prose">Use <code>--data &lt;folder&gt;</code> to retain the ledger, signing key, fixture definitions and results across restarts. Legacy bets whose fixture result was never saved are frozen instead of being assigned a guessed outcome. The demo has no authentication; the server rejects cross-origin browser mutations and invalid hosts.</p>
   <p class="prose">For LAN access, use <code>--host 0.0.0.0 --allowed-host ledger.example</code> (or <code>--host ::</code> for IPv6 wildcard binding). The bind address and allowed request hosts are separate. Repeat <code>--allowed-host</code> for exact hostnames or IP addresses without schemes, ports or wildcards; loopback access remains available. This exposes an unauthenticated demo to anyone who can reach it.</p>
+  <p class="prose">Following a link from another site can open the console, while Host validation and mutation origin checks stay enforced. Request IDs work on LAN HTTP origins; browser cryptographic verification requires WebCrypto in a secure context (HTTPS or localhost).</p>
   <figure class="shot wide">
     <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>
     <figcaption><b>Simulator.</b> 500 automated customers by default, with start, pause, resume and stop. Each tile streams one customer's latest actions, green when accepted and red when the ledger refuses.</figcaption>
@@ -676,7 +679,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <div><code>LedgerVerifier.kt</code><span>Offline auditor that needs only the files and a public key.</span></div>
     <div><code>web/</code><span>Web console: read model, fixtures and betting, simulator, regulator tools, HTTP API.</span></div>
   </div>
-  <pre class="cmd">./gradlew test       # 39 tests: Merkle, integrity, concurrency, multi-device regulatory suite, web console
+  <pre class="cmd">./gradlew test       # full suite: Merkle, integrity, concurrency, multi-device regulatory suite, web console
 ./gradlew run        # demo: 16 threads of betting, then an independent audit and proofs
 ./gradlew web        # web console at http://localhost:8080
                      # on Windows: gradlew.bat test, gradlew.bat run</pre>

@@ -334,6 +334,8 @@ class LedgerWebApp private constructor(
             hostUri.rawQuery != null || hostUri.rawFragment != null || hostPort != port || host !in allowedHosts) {
             throw HttpError(403, "invalid_host", "request Host is not allowed")
         }
+        // Following a link from another site is safe; Host validation still prevents rebinding.
+        if (ex.requestMethod == "GET" && ex.requestURI.path in setOf("/", "/index.html")) return
 
         fun sameOrigin(value: String, isReferer: Boolean): Boolean {
             val origin = runCatching { URI(value) }.getOrNull() ?: return false

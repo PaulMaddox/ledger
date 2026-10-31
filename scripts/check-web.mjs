@@ -80,6 +80,95 @@ test("uncertain wallet actions retry their original customer, amount and idempot
   assert.notEqual(calls[2].body, calls[1].body);
 });
 
+test("LAN wallet and bet requests work without secure-context randomUUID", async () => {
+  const calls = [];
+  const s = slipContext(async (path, options) => {
+    calls.push({ path, body: options.body.toString() });
+    return { ok: true, json: async () => ({ seq: 1, chainHash: "abcdef" }) };
+  });
+  s.c.crypto = { getRandomValues: webcrypto.getRandomValues.bind(webcrypto) };
+  s.element("depAmount").value = "1.00";
+  await s.c.walletAction("deposit");
+  s.pick("HOME");
+  await s.submit();
+  const id = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  assert.match(new URLSearchParams(calls[0].body).get("ref").replace("web-deposit-", ""), id);
+  assert.match(new URLSearchParams(calls[1].body).get("betId"), id);
+});
+
+test("late cash-out success and failure do not overwrite a different customer's result", async () => {
+  for (const fails of [false, true]) {
+    let finish, started;
+    const pending = new Promise(yes => { started = yes; });
+    const s = slipContext(path => {
+      if (path.endsWith("/cashout") && !finish) {
+        finish = "offer";
+        return Promise.resolve({ ok: true, json: async () => ({ offer: "85" }) });
+      }
+      return new Promise((yes, no) => {
+        finish = () => fails ? no({ status: 409, error: "idempotency_conflict" }) : yes({ ok: true, json: async () => ({}) });
+        started();
+      });
+    });
+    const action = s.element("betTable").handlers.click({ target: { closest: () => ({ dataset: { cashout: "alice-bet" } }) } });
+    await pending;
+    vm.runInContext('player = "bob"', s.c);
+    s.element("betResult").innerHTML = "Bob's result";
+    finish();
+    await action;
+    assert.equal(s.element("betResult").innerHTML, "Bob's result");
+  }
+});
+
+test("a definitive 422 bet rejection unlocks the stake and starts a corrected request", async () => {
+  const bodies = [];
+  const s = slipContext(async (path, options) => {
+    bodies.push(options.body.toString());
+    if (bodies.length === 1) return { ok: false, status: 422, json: async () => ({ error: "rejected", message: "overflow" }) };
+    return { ok: true, json: async () => ({ seq: 2 }) };
+  });
+  s.pick("HOME");
+  await s.submit();
+  assert.equal(s.element("slipStake").disabled, false);
+  s.element("slipStake").value = "1.00";
+  await s.submit();
+  assert.match(bodies[1], /stake=100(?:&|$)/);
+  assert.notEqual(new URLSearchParams(bodies[0]).get("betId"), new URLSearchParams(bodies[1]).get("betId"));
+});
+
+test("resizing the simulator wall preserves retained customers' activity and filters", () => {
+  const c = context();
+  const elements = new Map([["wall", { replaceChildren(frag) { this.children = frag.children; } }],
+    ["wallNote", {}], ["wallSearch", { value: "" }]]);
+  c.document = {
+    getElementById: id => elements.get(id),
+    createDocumentFragment: () => ({ children: [], appendChild(el) { this.children.push(el); } }),
+    createElement: () => {
+      const stream = {}, bal = {};
+      return { dataset: {}, querySelector: sel => sel === ".stream" ? stream : bal };
+    },
+  };
+  vm.runInContext(source.slice(source.indexOf("const WALL_LIMIT"), source.indexOf('$("wallSearch").addEventListener')), c);
+  c.buildWall(500);
+  const retained = vm.runInContext('tiles.get("sim-00001")', c);
+  retained.lastOk = false;
+  retained.stream.innerHTML = "Refused";
+  retained.bal.textContent = "€1.00";
+  retained.el.className = "tile live lastbad";
+  vm.runInContext('lastEventId = 99; wallFilter = "refused"', c);
+  c.buildWall(400);
+  assert.equal(vm.runInContext('tiles.get("sim-00001")', c), retained);
+  assert.equal(retained.stream.innerHTML, "Refused");
+  assert.equal(retained.bal.textContent, "€1.00");
+  assert.equal(retained.el.className, "tile live lastbad");
+  assert.equal(retained.el.hidden, false);
+  assert.equal(vm.runInContext("tiles.size", c), 400);
+  assert.equal(vm.runInContext("lastEventId", c), 99);
+  c.buildWall(600);
+  c.buildWall(700);
+  assert.match(elements.get("wallNote").textContent, /of 700/);
+});
+
 test("simulator event polling waits for the customer wall to be built", async () => {
   let requests = 0;
   const c = context();

@@ -33,7 +33,14 @@ const toMinor = v => {
   return amount.toString();
 };
 const timeOf = iso => new Date(iso).toLocaleTimeString([], { hour12: false });
-const uuid = () => crypto.randomUUID();
+const uuid = () => {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  const bytes = crypto.getRandomValues(new Uint8Array(16));
+  bytes[6] = (bytes[6] & 15) | 64;
+  bytes[8] = (bytes[8] & 63) | 128;
+  const value = Array.from(bytes, b => b.toString(16).padStart(2, "0")).join("");
+  return `${value.slice(0, 8)}-${value.slice(8, 12)}-${value.slice(12, 16)}-${value.slice(16, 20)}-${value.slice(20)}`;
+};
 
 /** Call the API. Resolves with the JSON body; rejects with {status, error, message} for non-2xx. */
 async function api(path, { method = "GET", params } = {}) {
@@ -284,15 +291,16 @@ async function refreshPlayer() {
 $("betTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-cashout]");
   if (!b) return;
+  const requestedPlayer = player;
   b.disabled = true;
   try {
     const offer = await api(`bets/${encodeURIComponent(b.dataset.cashout)}/cashout`);
     await api(`bets/${encodeURIComponent(b.dataset.cashout)}/cashout`, { method: "POST" });
-    say($("betResult"), true, `Cashed out for ${eur(offer.offer)}.`);
+    if (player === requestedPlayer) say($("betResult"), true, `Cashed out for ${eur(offer.offer)}.`);
   } catch (err) {
-    say($("betResult"), false, err.error === "idempotency_conflict" ? "Too late: this bet has already been settled." : errText(err));
+    if (player === requestedPlayer) say($("betResult"), false, err.error === "idempotency_conflict" ? "Too late: this bet has already been settled." : errText(err));
   }
-  refreshPlayer();
+  if (player === requestedPlayer) refreshPlayer();
 });
 $("historyTable").addEventListener("click", e => {
   const b = e.target.closest("[data-verify]");
@@ -373,7 +381,7 @@ $("slip").addEventListener("submit", async e => {
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     if (player === submittedSelection.player) say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
-    if ([400, 403, 409].includes(err.status)) {
+    if ([400, 403, 409, 422].includes(err.status)) {
       submittedSelection.params = null;
       submittedSelection.betId = uuid();
     }
@@ -608,12 +616,19 @@ let wallSize = 0, lastEventId = 0, wallFilter = "all", lastCount = null, lastCou
 
 function buildWall(customers) {
   const n = Math.min(customers, WALL_LIMIT);
+  $("wallNote").textContent = customers > WALL_LIMIT
+    ? `Showing the first ${WALL_LIMIT} of ${int.format(customers)} automated customers. Every customer's activity still reaches the ledger and the other views.`
+    : "Each tile is one automated customer. Select a tile to open that customer in the Customer view.";
   if (n === wallSize) return;
   wallSize = n;
-  tiles.clear();
+  for (const name of tiles.keys()) {
+    if (Number(name.slice(4)) > n) tiles.delete(name);
+  }
   const frag = document.createDocumentFragment();
   for (let i = 1; i <= n; i++) {
     const name = "sim-" + String(i).padStart(5, "0");
+    const existing = tiles.get(name);
+    if (existing) { frag.appendChild(existing.el); continue; }
     const el = document.createElement("button");
     el.type = "button";
     el.className = "tile idle";
@@ -623,9 +638,6 @@ function buildWall(customers) {
     tiles.set(name, { el, stream: el.querySelector(".stream"), bal: el.querySelector(".bal"), lastOk: true });
   }
   $("wall").replaceChildren(frag);
-  $("wallNote").textContent = customers > WALL_LIMIT
-    ? `Showing the first ${WALL_LIMIT} of ${int.format(customers)} automated customers. Every customer's activity still reaches the ledger and the other views.`
-    : "Each tile is one automated customer. Select a tile to open that customer in the Customer view.";
   applyWallFilter();
 }
 

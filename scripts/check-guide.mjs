@@ -47,6 +47,11 @@ globalThis.__checks = {
   },
   debugger() {
     const broken = [];
+    const ids = [...GUIDE_HTML.matchAll(/\\bid="([^"]+)"/g)].map(m => m[1]);
+    if (new Set(ids).size !== ids.length) broken.push("duplicate HTML IDs");
+    if (!GUIDE_HTML.includes('<section id="web-console">') || !GUIDE_HTML.includes('href="#web-console"')) {
+      broken.push("Console navigation target");
+    }
     let steps = 0;
     for (const sc of SCENARIOS) {
       selectScenario(sc.id);

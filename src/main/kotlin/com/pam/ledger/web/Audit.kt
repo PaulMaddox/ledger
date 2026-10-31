@@ -41,9 +41,12 @@ class Audit(
     }
 
     private fun refreshHistory() = synchronized(history) {
-        checkpointOffset = Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE), checkpointOffset) {
-            history += SignedTreeHead.decode(it)
-        }.validBytes
+        val additions = ArrayList<SignedTreeHead>()
+        val scan = Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE), checkpointOffset) {
+            additions += SignedTreeHead.decode(it)
+        }
+        history += additions
+        checkpointOffset = scan.validBytes
     }
 
     fun checkpoints(): List<SignedTreeHead> {
