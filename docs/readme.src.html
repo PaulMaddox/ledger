@@ -47,13 +47,20 @@ header.hero{padding-block:48px 40px;display:grid;gap:22px}
 .hero .lede{font-size:1.14rem;color:var(--ink);max-width:62ch}
 .ledgerline{font-family:var(--f-mono);font-size:.82rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px}
 .ledgerline b{color:var(--ink);font-weight:600}
-.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule)}
-.facts div{background:var(--panel);padding:14px 16px;display:grid;gap:4px}
-.facts strong{font-family:var(--f-display);font-size:1.05rem}
-.facts span{color:var(--muted);font-size:.9rem}
 .toc{display:flex;flex-wrap:wrap;gap:8px}
 .toc a{font-size:.88rem;text-decoration:none;border:1px solid var(--rule);padding:5px 11px;border-radius:999px;color:var(--ink);background:var(--panel)}
 .toc a:hover{border-color:var(--accent)}
+
+/* ---------- requirements ---------- */
+.reqgroups{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,480px),1fr));gap:28px 32px}
+.reqgroup{display:grid;gap:10px;align-content:start;min-width:0}
+.reqgroup h3{font-size:1.05rem;padding-bottom:8px;border-bottom:2px solid var(--accent)}
+.reqs{list-style:none;margin:0;padding:0;display:grid}
+.reqs li{display:grid;gap:4px;padding:12px 0;border-bottom:1px solid var(--rule)}
+.reqs li:last-child{border-bottom:0}
+.reqs .rq{display:flex;flex-wrap:wrap;gap:6px 10px;align-items:baseline;justify-content:space-between}
+.reqs b{font:600 .98rem/1.35 var(--f-body)}
+.reqs p{font-size:.92rem;color:var(--muted);max-width:62ch}
 
 /* ---------- architecture ---------- */
 .arch{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:20px;align-items:start}
@@ -287,16 +294,43 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <h1>Sportsbook Ledger Internals</h1>
   <p class="lede">An append-only, double-entry money ledger for a sportsbook player account platform. Every bet, deposit and payout is hash-chained, placed in a Merkle tree and periodically signed, so anyone holding the public key can prove nothing was altered, removed or invented. One writer thread orders every transaction, which makes double spends structurally impossible rather than merely unlikely.</p>
   <div class="ledgerline"><span>seq <b>#1423</b></span><span>BET_PLACED</span><span>player:42:cash:EUR <b>−1000</b></span><span>player:42:open-bets:EUR <b>+1000</b></span><span>Σ <b>0</b></span><span>chain <b>740174cf…</b></span></div>
-  <div class="facts">
-    <div><strong>Tamper-evident</strong><span>SHA-256 chain + RFC 9162 Merkle tree + Ed25519 signed heads</span></div>
-    <div><strong>Linearizable</strong><span>Single writer, group commit, lock-free reads</span></div>
-    <div><strong>Exactly-once</strong><span>Idempotency keys make every retry safe</span></div>
-    <div><strong>Crash-safe</strong><span>Receipt only after fsync; torn writes quarantined</span></div>
-  </div>
   <nav class="toc" aria-label="Contents">
-    <a href="#architecture">Architecture</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Step-through debugger</a><a href="#cloud">Cloud architecture</a><a href="#regulators">Regulatory tests</a><a href="#files">Files & running</a>
+    <a href="#requirements">Requirements</a><a href="#architecture">Architecture</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Step-through debugger</a><a href="#cloud">Cloud architecture</a><a href="#regulators">Regulatory tests</a><a href="#files">Files & running</a>
   </nav>
 </header>
+
+<!-- ======================= REQUIREMENTS ======================= -->
+<section id="requirements">
+  <div class="eyebrow">What the ledger must do</div>
+  <h2>Requirements</h2>
+  <p class="prose">The requirements this ledger is built to meet, each with how it is met. <span class="pill ok">In the code</span> means implemented and tested in this repository; <span class="pill warn">Designed</span> means specified in the cloud architecture below but not yet built.</p>
+  <div class="reqgroups">
+    <div class="reqgroup"><h3>Money is always right</h3><ul class="reqs">
+      <li><div class="rq"><b>Money is never created or destroyed</b><span class="pill ok">In the code</span></div><p>Every transaction is double-entry and its postings must sum to zero in each currency, checked when it is written and again whenever the ledger is replayed.</p></li>
+      <li><div class="rq"><b>No double spend, no negative balance</b><span class="pill ok">In the code</span></div><p>Each shard has a single writer that applies transactions strictly in order, so two requests for the same money can never both see it available.</p></li>
+      <li><div class="rq"><b>Exactly-once, even with retries</b><span class="pill ok">In the code</span></div><p>Every request carries an idempotency key, and every outcome of a bet shares one settlement key, so retries, double taps and redelivered feeds never move money twice.</p></li>
+      <li><div class="rq"><b>No balance shown that was never real</b><span class="pill ok">In the code</span></div><p>Balances become visible only after the entry is safely on disk, and rejections wait until whatever caused them is durable too.</p></li>
+    </ul></div>
+    <div class="reqgroup"><h3>Nothing can be quietly changed</h3><ul class="reqs">
+      <li><div class="rq"><b>Tamper-evident history</b><span class="pill ok">In the code</span></div><p>Entries are hash-chained and placed in a Merkle tree, so altering, removing or inserting any entry changes every hash after it.</p></li>
+      <li><div class="rq"><b>Rewrites and rollbacks are caught</b><span class="pill ok">In the code</span></div><p>Signed tree heads expose any rebuilt or truncated history, even if every hash was recomputed, because a forger cannot produce the signature.</p></li>
+      <li><div class="rq"><b>Independently verifiable</b><span class="pill ok">In the code</span></div><p>Anyone holding the public key can check a single entry with a Merkle proof, or the whole ledger with the offline verifier.</p></li>
+      <li><div class="rq"><b>Provable under concurrency</b><span class="pill ok">In the code</span></div><p>The regulatory test suite checks properties R1 to R6 against the ledger's own replayed history while many devices hammer one account.</p></li>
+    </ul></div>
+    <div class="reqgroup"><h3>Always on, at any scale</h3><ul class="reqs">
+      <li><div class="rq"><b>No acknowledged bet is ever lost</b><span class="pill mut">Partly in the code</span></div><p>A receipt is issued only after fsync, and with replication only after two of three zones have stored the entry; torn writes are quarantined rather than trusted.</p></li>
+      <li><div class="rq"><b>Survives the loss of a zone</b><span class="pill warn">Designed</span></div><p>Each shard runs three replicas across three availability zones, and a new leader takes over within seconds.</p></li>
+      <li><div class="rq"><b>Absorbs huge peaks</b><span class="pill mut">Partly in the code</span></div><p>Players are spread across many independent shards, group commit turns extra load into bigger batches, and settlement storms queue in Kafka.</p></li>
+      <li><div class="rq"><b>Recovers from losing a region</b><span class="pill warn">Designed</span></div><p>A pilot-light DR region abroad is activated through a key ceremony with M-of-N custodians, with the regulator notified first.</p></li>
+    </ul></div>
+    <div class="reqgroup"><h3>Fit for regulators and the business</h3><ul class="reqs">
+      <li><div class="rq"><b>Data stays in country</b><span class="pill warn">Designed</span></div><p>All data is encrypted with in-country HSM keys before it is replicated, so the DR region only ever holds ciphertext it cannot read.</p></li>
+      <li><div class="rq"><b>Separation of duties</b><span class="pill warn">Designed</span></div><p>A continuous verifier runs in a separate audit account, and no human holds standing access to production data or keys.</p></li>
+      <li><div class="rq"><b>Not locked to one cloud</b><span class="pill warn">Designed</span></div><p>The design runs on AWS, Azure, or any conformant Kubernetes using open standards, including an in-country data centre.</p></li>
+      <li><div class="rq"><b>Readable and changeable</b><span class="pill ok">In the code</span></div><p>The code is commented throughout, has no runtime dependencies beyond the JDK, and this guide is built from the real source.</p></li>
+    </ul></div>
+  </div>
+</section>
 
 <!-- ======================= ARCHITECTURE ======================= -->
 <section id="architecture">
