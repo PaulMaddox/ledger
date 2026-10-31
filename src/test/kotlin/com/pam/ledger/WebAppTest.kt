@@ -121,6 +121,31 @@ class WebAppTest {
     }
 
     @Test
+    fun `About tab serves the generated guide and its screenshots`() = withApp { app ->
+        val console = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/")).GET().build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200, console.statusCode())
+        assertTrue(console.body().indexOf("data-view=\"about\"") < console.body().indexOf("data-view=\"customer\""))
+        assertTrue(console.body().contains("id=\"view-about\""))
+
+        val guide = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/about/")).GET().build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200, guide.statusCode())
+        assertTrue(guide.body().contains("<title>Sportsbook Ledger Internals</title>"))
+        assertTrue(guide.body().contains("screenshots/simulator.png"))
+
+        val screenshot = http.send(HttpRequest.newBuilder(
+            URI("http://127.0.0.1:${app.port}/about/screenshots/simulator.png")).GET().build(),
+            HttpResponse.BodyHandlers.ofByteArray())
+        assertEquals(200, screenshot.statusCode())
+        assertTrue(screenshot.headers().firstValue("Content-Type").orElse("").startsWith("image/png"))
+        assertTrue(screenshot.body().isNotEmpty())
+        assertEquals(404, http.send(HttpRequest.newBuilder(
+            URI("http://127.0.0.1:${app.port}/about/screenshots/%2e%2e/app.js")).GET().build(),
+            HttpResponse.BodyHandlers.discarding()).statusCode())
+    }
+
+    @Test
     fun `administrator exposes real host counters and committed throughput`() = withApp { app ->
         repeat(20) { i ->
             assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "metrics-$i")).first)

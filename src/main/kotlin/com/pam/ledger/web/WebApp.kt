@@ -459,14 +459,26 @@ class LedgerWebApp private constructor(
     }
 
     private fun serveStatic(ex: HttpExchange, path: String) {
-        val name = when (path) { "/", "/index.html" -> "index.html"; "/app.js" -> "app.js"; "/app.css" -> "app.css"; else -> null }
+        val name = when {
+            path in setOf("/", "/index.html") -> "index.html"
+            path == "/app.js" -> "app.js"
+            path == "/app.css" -> "app.css"
+            path == "/about/" -> "about.html"
+            path.matches(Regex("/about/screenshots/[a-z0-9-]+\\.png")) -> path.removePrefix("/about/")
+            else -> null
+        }
         val bytes = name?.let { javaClass.getResourceAsStream("/web/$it")?.use { s -> s.readAllBytes() } }
         if (bytes == null) {
             ex.sendResponseHeaders(404, -1)
             return
         }
-        val type = when { name.endsWith(".js") -> "text/javascript"; name.endsWith(".css") -> "text/css"; else -> "text/html" }
-        ex.responseHeaders.add("Content-Type", "$type; charset=utf-8")
+        val type = when {
+            name.endsWith(".js") -> "text/javascript"
+            name.endsWith(".css") -> "text/css"
+            name.endsWith(".png") -> "image/png"
+            else -> "text/html"
+        }
+        ex.responseHeaders.add("Content-Type", if (type == "image/png") type else "$type; charset=utf-8")
         ex.responseHeaders.add("Cache-Control", "no-store")
         ex.sendResponseHeaders(200, bytes.size.toLong())
         ex.responseBody.use { it.write(bytes) }

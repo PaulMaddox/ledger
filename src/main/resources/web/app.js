@@ -211,7 +211,7 @@ async function verifyEntry(seq, target) {
 const views = {};
 let current = null;
 function show(name) {
-  if (!views[name]) name = "customer";
+  if (!views[name]) name = "about";
   if (current && views[current].leave) views[current].leave();
   current = name;
   document.querySelectorAll(".view").forEach(v => { v.hidden = v.id !== "view-" + name; });
@@ -219,6 +219,7 @@ function show(name) {
   views[name].enter();
 }
 window.addEventListener("hashchange", () => show(location.hash.slice(1)));
+views.about = { enter() {} };
 
 /** setInterval that runs immediately, skips overlapping calls, and can be stopped. */
 function poll(fn, ms) {
@@ -901,4 +902,4 @@ views.chaos = {
 
 // ============================== start ==============================
 const firstView = location.hash.slice(1);
-show(firstView || "customer");
+show(firstView || "about");
