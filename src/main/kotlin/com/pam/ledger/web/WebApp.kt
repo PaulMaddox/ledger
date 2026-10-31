@@ -24,6 +24,7 @@ import com.pam.ledger.VersionConflictException
 import com.sun.net.httpserver.HttpExchange
 import com.sun.net.httpserver.HttpServer
 import java.net.InetSocketAddress
+import java.net.URI
 import java.net.URLDecoder
 import java.nio.file.Files
 import java.nio.file.Path
@@ -102,9 +103,9 @@ class LedgerWebApp private constructor(
     private val simulator: Simulator,
     private val stats: Stats,
     private val audit: Audit,
+    private val configuredHost: String,
 ) : AutoCloseable {
     private lateinit var server: HttpServer
-    private var allowedHost = "127.0.0.1"
     val port: Int get() = server.address.port
 
     companion object {
@@ -118,17 +119,15 @@ class LedgerWebApp private constructor(
             val ledger = Ledger.open(LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000))
             val wallet = SportsbookWallet(ledger)
             val readModel = ReadModel(ledger)
-            val book = Book(ledger, wallet, readModel, store = dir.resolve("fixtures.txt"))
-            val simulator = Simulator(book, wallet, readModel)
+            val book = Book(wallet, readModel, dir)
+            val simulator = Simulator(book, wallet)
             val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, Stats(readModel),
-                Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)))
+                Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)), opts.host)
 
             // Demo data. Deposit keys are fixed, so restarting with --data replays them instead of paying twice.
             CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
-            // Fixtures persist beside the ledger, so a restart only tops up the open ones.
-            while (book.fixtures().count { it.isOpen } < 6) book.addFixture()
+            if (book.fixtures().isEmpty()) repeat(6) { book.addFixture() }
 
-            app.allowedHost = opts.host
             app.server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0).apply {
                 executor = Executors.newVirtualThreadPerTaskExecutor()
                 createContext("/") { ex -> app.handle(ex) }
@@ -173,42 +172,18 @@ class LedgerWebApp private constructor(
 
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
 
-    /**
-     * Listening on localhost is not enough on its own: any web page the user visits can make
-     * their browser send requests here. So:
-     *  - the Host header must name this server (defeats DNS rebinding, where a hostile site's
-     *    name is re-pointed at 127.0.0.1 so the browser treats this server as same-origin);
-     *  - every POST must carry the X-Ledger-Console header, which a plain cross-site form cannot
-     *    set and a cross-site script cannot send without a CORS preflight this server never allows;
-     *  - a POST that does carry an Origin header must come from this server's own origin.
-     */
-    private fun checkRequestOrigin(ex: HttpExchange) {
-        val host = ex.requestHeaders.getFirst("Host")?.lowercase()
-        val accepted = setOf("localhost", "127.0.0.1", "[::1]", allowedHost.lowercase()).map { "$it:$port" }
-        if (host == null || host !in accepted) throw HttpError(403, "forbidden_host", "requests must address this server by its own name, e.g. http://localhost:$port/")
-        if (ex.requestMethod == "POST") {
-            if (ex.requestHeaders.getFirst("X-Ledger-Console") != "1") {
-                throw HttpError(403, "forbidden", "changes must come from the Ledger Console page itself")
-            }
-            val origin = ex.requestHeaders.getFirst("Origin")
-            if (origin != null && origin.lowercase() != "http://$host") throw HttpError(403, "forbidden_origin", "cross-origin request refused")
-        }
-        if (ex.requestMethod != "GET" && ex.requestMethod != "POST") throw HttpError(405, "method_not_allowed", "only GET and POST are supported")
-    }
-
-    /** Split the RAW path and decode each segment exactly once; "+" is literal in paths. */
-    private fun pathSegments(rawPath: String): List<String> =
-        rawPath.removePrefix("/api/").trimEnd('/').split('/').map { URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8) }
-
     private fun handle(ex: HttpExchange) {
         try {
-            checkRequestOrigin(ex)
             val uri = ex.requestURI
-            if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.rawPath)
+            validateRequestOrigin(ex)
+            if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
             if (ex.requestMethod == "POST") parseForm(ex.requestBody.readAllBytes().toString(Charsets.UTF_8), params)
-            respond(ex, 200, route(Request(ex.requestMethod, pathSegments(uri.rawPath), params)))
+            val segments = uri.rawPath.removePrefix("/api/").trimEnd('/').split('/').map {
+                URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8)
+            }
+            respond(ex, 200, route(Request(ex.requestMethod, segments, params)))
         } catch (e: Throwable) {
             val (status, code) = when (e) {
                 is HttpError -> e.status to e.code
@@ -228,6 +203,38 @@ class LedgerWebApp private constructor(
             runCatching { respond(ex, status, mapOf("error" to code, "message" to (e.message ?: code))) }
         } finally {
             ex.close()
+        }
+    }
+
+    private fun validateRequestOrigin(ex: HttpExchange) {
+        val port = server.address.port
+        val hostUri = ex.requestHeaders.getFirst("Host")?.let { runCatching { URI("http://$it") }.getOrNull() }
+        val host = hostUri?.host?.removeSurrounding("[", "]")?.lowercase()
+        val configured = configuredHost.removeSurrounding("[", "]").lowercase()
+        val loopbacks = setOf("localhost", "127.0.0.1", "::1")
+        val allowedHosts = if (configured in loopbacks || configured == "0.0.0.0" || configured == "::") {
+            loopbacks + configured
+        } else setOf(configured)
+        val hostPort = hostUri?.port?.takeIf { it >= 0 } ?: 80
+        if (hostUri == null || hostUri.rawUserInfo != null || hostUri.rawPath.isNotEmpty() ||
+            hostUri.rawQuery != null || hostUri.rawFragment != null || hostPort != port || host !in allowedHosts) {
+            throw HttpError(403, "invalid_host", "request Host is not allowed")
+        }
+
+        fun sameOrigin(value: String, isReferer: Boolean): Boolean {
+            val origin = runCatching { URI(value) }.getOrNull() ?: return false
+            val originPort = origin.port.takeIf { it >= 0 } ?: 80
+            return origin.scheme == "http" && origin.host?.removeSurrounding("[", "]")?.equals(host, true) == true &&
+                originPort == port && origin.rawUserInfo == null &&
+                (isReferer || (origin.rawPath.isEmpty() && origin.rawQuery == null && origin.rawFragment == null))
+        }
+        val origin = ex.requestHeaders.getFirst("Origin")
+        val referer = ex.requestHeaders.getFirst("Referer")
+        if ((origin != null && !sameOrigin(origin, false)) ||
+            (origin == null && referer != null && !sameOrigin(referer, true)) ||
+            (ex.requestMethod == "POST" && origin == null && referer == null) ||
+            ex.requestHeaders.getFirst("Sec-Fetch-Site")?.equals("cross-site", true) == true) {
+            throw HttpError(403, "cross_origin", "mutations require a same-origin browser request")
         }
     }
 
@@ -286,16 +293,16 @@ class LedgerWebApp private constructor(
             get("fixtures") -> fixtures()
             post("fixtures") -> fixtureView(book.addFixture())
             post("fixtures", "*", "settle") -> book.settle(p[1], r.str("result")).let {
-                mapOf("fixture" to it.fixtureId, "result" to it.result, "won" to it.won, "lost" to it.lost, "voided" to it.voided,
-                    "alreadySettled" to it.alreadySettled, "complete" to it.complete)
+                mapOf("fixture" to it.fixtureId, "result" to it.result, "won" to it.won, "lost" to it.lost, "voided" to it.voided, "alreadySettled" to it.alreadySettled)
             }
             get("operator") -> operator()
 
             // ---- Simulator ----
             get("simulator") -> simulatorView()
             get("simulator", "events") -> {
-                val (events, cursor) = simulator.eventsAfter(r.params["after"]?.toLongOrNull() ?: 0L)
-                mapOf("lastId" to cursor, "events" to events.map {
+                val after = r.params["after"]?.toLongOrNull() ?: 0L
+                val page = simulator.eventPage(after)
+                mapOf("lastId" to page.lastId, "events" to page.events.map {
                     mapOf("id" to it.id, "t" to it.time, "customer" to it.customer, "op" to it.op, "text" to it.text, "ok" to it.ok, "cash" to it.cash)
                 })
             }
@@ -398,8 +405,8 @@ class LedgerWebApp private constructor(
         val liability = f.odds.keys.associateWith { sel -> open.filter { it.selection == sel }.sumOf { it.potentialPayout } }
         return mapOf(
             "id" to f.id, "home" to f.home, "away" to f.away, "odds" to f.odds, "result" to f.result,
+            "settlementComplete" to f.settlementComplete,
             "openBets" to open.size, "staked" to open.sumOf { it.stake }, "liability" to liability,
-            "settled" to f.settled, "needsSettlement" to f.needsSettlement,
         )
     }
 
@@ -450,6 +457,7 @@ class LedgerWebApp private constructor(
         "chainHead" to s.head.chainHead,
         "time" to time(s.head.timestampMicros),
         "keyId" to s.keyId,
+        "ledgerId" to s.head.ledgerId,
         "signature" to s.signature(),
         "signingBytes" to s.head.signingBytes(),
         "verified" to s.verify(ledger.publicKey),
@@ -464,38 +472,36 @@ class LedgerWebApp private constructor(
         )
     }
 
-    /**
-     * Every entry for one player, with balances recomputed entry by entry from the postings,
-     * then reconciled against the ledger AT THE SAME POINT. Each account's committed state
-     * records the sequence number it reflects (lastSeq), so the replay is compared at exactly
-     * that entry, never against a balance that has moved on since.
-     */
+    /** Every entry for one player, with balances recomputed entry by entry from the postings themselves. */
     private fun playerAudit(id: String): Any {
-        val cashState = ledger.account(Accounts.cash(id, "EUR"))
-        val escrowState = ledger.account(Accounts.openBets(id, "EUR"))
-        readModel.catchUpTo(maxOf(cashState?.lastSeq ?: -1, escrowState?.lastSeq ?: -1))
+        val snapshotSize = ledger.head().size
+        readModel.catchUp()
         var cash = 0L
         var escrow = 0L
-        var cashAtPin = 0L
-        var escrowAtPin = 0L
-        val rows = readModel.seqsForPlayer(id).map { seq ->
+        val seqs = readModel.seqsForPlayer(id).filter { it < snapshotSize }
+        val rows = seqs.map { seq ->
             val s = ledger.entry(seq)
             val dc = s.entry.postings.filter { it.account == Accounts.cash(id, "EUR") }.sumOf { it.amount }
             val de = s.entry.postings.filter { it.account == Accounts.openBets(id, "EUR") }.sumOf { it.amount }
-            cash += dc
-            escrow += de
-            if (seq <= (cashState?.lastSeq ?: -1)) cashAtPin = cash
-            if (seq <= (escrowState?.lastSeq ?: -1)) escrowAtPin = escrow
+            cash = Math.addExact(cash, dc)
+            escrow = Math.addExact(escrow, de)
             mapOf("seq" to seq, "kind" to s.entry.kind, "time" to time(s.entry.timestampMicros), "key" to s.entry.idempotencyKey,
                 "cashDelta" to dc, "cash" to cash, "escrowDelta" to de, "escrow" to escrow, "chainHash" to s.chainHash)
         }
-        val ledgerCash = cashState?.balance ?: 0L
-        val ledgerEscrow = escrowState?.balance ?: 0L
+        var ledgerCash = 0L
+        var ledgerEscrow = 0L
+        for (seq in 0L until snapshotSize) {
+            for (posting in ledger.entry(seq).entry.postings) {
+                when (posting.account) {
+                    Accounts.cash(id, "EUR") -> ledgerCash = Math.addExact(ledgerCash, posting.amount)
+                    Accounts.openBets(id, "EUR") -> ledgerEscrow = Math.addExact(ledgerEscrow, posting.amount)
+                }
+            }
+        }
         return mapOf(
             "id" to id, "rows" to rows.asReversed().take(200), "entries" to rows.size,
-            "replayedCash" to cashAtPin, "replayedEscrow" to escrowAtPin, "ledgerCash" to ledgerCash, "ledgerEscrow" to ledgerEscrow,
-            "pinnedAt" to mapOf("cash" to cashState?.lastSeq, "openBets" to escrowState?.lastSeq),
-            "reconciles" to (cashAtPin == ledgerCash && escrowAtPin == ledgerEscrow),
+            "replayedCash" to cash, "replayedEscrow" to escrow, "ledgerCash" to ledgerCash, "ledgerEscrow" to ledgerEscrow,
+            "reconciles" to (cash == ledgerCash && escrow == ledgerEscrow),
             "neverNegative" to rows.all { (it["cash"] as Long) >= 0 && (it["escrow"] as Long) >= 0 },
         )
     }
@@ -514,18 +520,22 @@ class LedgerWebApp private constructor(
             "path" to proof.auditPath,
             "treeSize" to proof.treeSize,
             "sth" to sthView(sth),
+            "ledgerId" to ledgerId,
             "publicKey" to ledger.publicKey.encoded,
         )
     }
 
     /** Proof that checkpoint [from] is a prefix of checkpoint [to]: nothing was rewritten between them. */
     private fun consistency(from: Long, to: Long): Any {
+        require(from in 1..to) { "need 1 <= from <= to" }
         val a = audit.checkpointOfSize(from) ?: throw NotFoundException("no checkpoint covers exactly $from entries")
         val b = audit.checkpointOfSize(to) ?: throw NotFoundException("no checkpoint covers exactly $to entries")
-        require(from in 1..to) { "need 1 <= from <= to" }
         val proof = ledger.consistencyProof(from, to)
         check(MerkleVerify.consistency(from, to, a.head.rootHash, b.head.rootHash, proof))
-        return mapOf("proof" to proof, "from" to sthView(a), "to" to sthView(b), "publicKey" to ledger.publicKey.encoded)
+        return mapOf(
+            "proof" to proof, "from" to sthView(a), "to" to sthView(b),
+            "ledgerId" to ledgerId, "publicKey" to ledger.publicKey.encoded,
+        )
     }
 
     override fun close() {

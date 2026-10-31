@@ -25,9 +25,7 @@ const uuid = () => crypto.randomUUID();
 /** Call the API. Resolves with the JSON body; rejects with {status, error, message} for non-2xx. */
 async function api(path, { method = "GET", params } = {}) {
   const body = params ? new URLSearchParams(params) : undefined;
-  // The header marks requests as coming from this page; the server refuses changes without it,
-  // which is what stops other websites from submitting forms to the console.
-  const res = await fetch("/api/" + path, { method, body, headers: { "X-Ledger-Console": "1" } });
+  const res = await fetch("/api/" + path, { method, body });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
   return data;
@@ -42,6 +40,7 @@ const b64 = s => Uint8Array.from(atob(s), c => c.charCodeAt(0));
 const hex = b => Array.from(b, x => x.toString(16).padStart(2, "0")).join("");
 const fromHex = h => Uint8Array.from(h.match(/../g).map(x => parseInt(x, 16)));
 const sameBytes = (a, b) => a.length === b.length && a.every((v, i) => v === b[i]);
+const WEB_LEDGER_ID = "sportsbook-web";
 
 async function sha256(...parts) {
   const buf = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
@@ -95,10 +94,16 @@ async function consistent(m, n, oldRoot, newRoot, proof) {
 function parseTreeHead(bytes) {
   const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
   let o = 0;
-  const str = () => { const n = v.getInt32(o); o += 4; const s = new TextDecoder().decode(bytes.slice(o, o + n)); o += n; return s; };
-  const long = () => { const x = v.getBigInt64(o); o += 8; return Number(x); };
-  const dig = () => { const d = bytes.slice(o, o + 32); o += 32; return d; };
-  return { tag: str(), ledgerId: str(), treeSize: long(), root: dig(), chainHead: dig(), timestampMicros: long() };
+  const need = n => { if (n < 0 || o + n > bytes.length) throw new Error("malformed signed tree head"); };
+  const str = () => {
+    need(4); const n = v.getInt32(o); o += 4; need(n);
+    const s = new TextDecoder("utf-8", { fatal: true }).decode(bytes.slice(o, o + n)); o += n; return s;
+  };
+  const long = () => { need(8); const x = v.getBigInt64(o); o += 8; return Number(x); };
+  const dig = () => { need(32); const d = bytes.slice(o, o + 32); o += 32; return d; };
+  const head = { tag: str(), ledgerId: str(), treeSize: long(), root: dig(), chainHead: dig(), timestampMicros: long() };
+  if (o !== bytes.length) throw new Error("trailing bytes in signed tree head");
+  return head;
 }
 
 /** Decode EntryCodec v1 without losing precision in signed 64-bit amounts. */
@@ -151,7 +156,8 @@ async function verifyEntry(seq, target) {
     const root = await inclusionRoot(leaf, seq, p.treeSize, p.path.map(fromHex));
     steps.push(step(!!root, root ? `Combined it with ${p.path.length} sibling hashes from the audit path: root <code>${short(hex(root))}</code>` : "The audit path is malformed"));
     const head = parseTreeHead(b64(p.sth.signingBytes));
-    const headOk = !!root && head.treeSize === p.treeSize && sameBytes(head.root, root) && head.tag === "PAM-LEDGER/tree-head/v1";
+    const headOk = !!root && head.treeSize === p.treeSize && sameBytes(head.root, root) &&
+      head.tag === "PAM-LEDGER/tree-head/v1" && head.ledgerId === p.ledgerId && head.ledgerId === WEB_LEDGER_ID;
     steps.push(step(headOk, `Read the signed checkpoint's own bytes: it covers ${int.format(head.treeSize)} entries with root <code>${short(hex(head.root))}</code>${headOk ? ", the root computed above" : ", which does NOT match"}`));
     const sig = await verifySignature(p.publicKey, p.sth.signature, b64(p.sth.signingBytes));
     steps.push(sig === null
@@ -324,10 +330,10 @@ $("slip").addEventListener("submit", async e => {
   updateSlipControls();
   try {
     const r = await api(`players/${encodeURIComponent(submittedSelection.player)}/bets`, { method: "POST", params: submittedSelection.params });
-    say($("betResult"), true, `Bet placed: ${eur(stake)} on ${esc(submittedSelection.sel)} @ ${odds(submittedSelection.odds)}. Entry #${r.seq}.`);
+    if (player === submittedSelection.player) say($("betResult"), true, `Bet placed: ${eur(stake)} on ${esc(submittedSelection.sel)} @ ${odds(submittedSelection.odds)}. Entry #${r.seq}.`);
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
-    say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
+    if (player === submittedSelection.player) say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
     if ([400, 403, 409].includes(err.status)) {
       submittedSelection.params = null;
       submittedSelection.betId = uuid();
@@ -336,7 +342,7 @@ $("slip").addEventListener("submit", async e => {
     slipSubmitting = false;
     updateSlipControls();
   }
-  refreshPlayer(); loadCustFixtures(); loadPlayers();
+  if (player === submittedSelection.player) { refreshPlayer(); loadCustFixtures(); loadPlayers(); }
 });
 
 // Five devices at once: genuinely concurrent requests from this browser.
@@ -420,7 +426,11 @@ async function refreshFixtures() {
       <td class="num">${odds(f.odds.HOME)} / ${odds(f.odds.DRAW)} / ${odds(f.odds.AWAY)}</td>
       <td class="num">${int.format(f.openBets)}</td><td class="num">${eur(f.staked)}</td>
       <td class="num liab">${eur(f.liability.HOME)} / ${eur(f.liability.DRAW)} / ${eur(f.liability.AWAY)}</td>
-      <td>${f.result ? (f.needsSettlement ? `<span class="settle"><span class="pill mut">${esc(f.result)}</span><button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume settlement</button></span>` : `<span class="pill mut">${esc(f.result)}</span>`) : `<span class="settle">${["HOME", "DRAW", "AWAY", "VOID"].map(r => `<button type="button" data-settle="${esc(f.id)}" data-result="${r}">${r[0] + r.slice(1).toLowerCase()}</button>`).join("")}</span>`}</td></tr>`).join("");
+      <td>${!f.result
+        ? `<span class="settle">${["HOME", "DRAW", "AWAY", "VOID"].map(r => `<button type="button" data-settle="${esc(f.id)}" data-result="${r}">${r[0] + r.slice(1).toLowerCase()}</button>`).join("")}</span>`
+        : f.result !== "LEGACY_UNRESOLVED" && !f.settlementComplete
+          ? `<span class="settle"><span class="pill mut">${esc(f.result)} · settlement pending</span><button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume</button></span>`
+          : `<span class="pill mut">${esc(f.result)}</span>`}</td></tr>`).join("");
 }
 $("fixtureTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-settle]");
@@ -441,24 +451,27 @@ views.operator = {
 };
 
 // ============================== regulator ==============================
-const sigCache = new Map(); // "size:root" -> true/false/null, verified in this browser
+const sigCache = new Map(); // Exact signed bytes and key -> true/false/null, verified in this browser
 let publicKey = null;
+const checkpointKey = c => `${hex(b64(c.signingBytes))}:${c.signature}:${publicKey}`;
 
 async function refreshCheckpoints() {
   const r = await api("regulator/checkpoints");
   publicKey = r.publicKey;
   for (const c of r.checkpoints) {
-    const k = c.treeSize + ":" + c.rootHash;
+    const k = checkpointKey(c);
     if (!sigCache.has(k)) {
       const head = parseTreeHead(b64(c.signingBytes));
-      const consistentFields = head.treeSize === c.treeSize && hex(head.root) === c.rootHash;
+      const consistentFields = head.tag === "PAM-LEDGER/tree-head/v1" && head.ledgerId === c.ledgerId &&
+        head.ledgerId === WEB_LEDGER_ID && head.treeSize === c.treeSize &&
+        hex(head.root) === c.rootHash && hex(head.chainHead) === c.chainHead;
       const sig = await verifySignature(publicKey, c.signature, b64(c.signingBytes));
       sigCache.set(k, sig === null ? null : sig && consistentFields);
     }
   }
   $("sthTable").innerHTML = `<tr><th class="num">Entries covered</th><th>Merkle root</th><th>Signed</th><th>Signature (checked here)</th></tr>` +
     r.checkpoints.slice(0, 50).map(c => {
-      const v = sigCache.get(c.treeSize + ":" + c.rootHash);
+      const v = sigCache.get(checkpointKey(c));
       return `<tr><td class="num">${int.format(c.treeSize)}</td><td><code>${short(c.rootHash)}</code></td><td>${timeOf(c.time)}</td>
         <td>${v === null ? `<span class="pill mut">no Ed25519 in browser</span>` : v ? `<span class="pill ok">valid</span>` : `<span class="pill bad">invalid</span>`}</td></tr>`;
     }).join("");
@@ -505,15 +518,19 @@ $("consForm").addEventListener("submit", async e => {
   try {
     const r = await api(`proof/consistency?from=${from}&to=${to}`);
     const a = parseTreeHead(b64(r.from.signingBytes)), b = parseTreeHead(b64(r.to.signingBytes));
-    const fieldsOk = a.treeSize === from && b.treeSize === to && a.tag === "PAM-LEDGER/tree-head/v1" && b.tag === a.tag && a.ledgerId === b.ledgerId;
-    const ok = fieldsOk && await consistent(from, to, a.root, b.root, r.proof.map(fromHex));
+    const fieldsOk = a.tag === "PAM-LEDGER/tree-head/v1" && b.tag === "PAM-LEDGER/tree-head/v1" &&
+      a.ledgerId === b.ledgerId && a.ledgerId === r.ledgerId && a.ledgerId === WEB_LEDGER_ID &&
+      a.treeSize === from && b.treeSize === to &&
+      hex(a.root) === r.from.rootHash && hex(b.root) === r.to.rootHash &&
+      hex(a.chainHead) === r.from.chainHead && hex(b.chainHead) === r.to.chainHead;
+    const proofOk = fieldsOk && await consistent(from, to, a.root, b.root, r.proof.map(fromHex));
     const sa = await verifySignature(r.publicKey, r.from.signature, b64(r.from.signingBytes));
     const sb = await verifySignature(r.publicKey, r.to.signature, b64(r.to.signingBytes));
-    const sigs = sa === null || sb === null ? null : sa && sb;
-    const verified = ok && sigs === true;
-    $("consResult").innerHTML = `<div class="verdict ${verified ? "ok" : "bad"}">${verified ? `The ${int.format(from)}-entry ledger is an exact prefix of the ${int.format(to)}-entry ledger: nothing was changed or removed in between.` : sigs === null ? "Verification incomplete: this browser could not check the checkpoint signatures." : "Consistency proof or signature verification FAILED."}</div>
-      <ol class="steps">${step(ok, `Rebuilt both signed roots from ${r.proof.length} proof hashes in this browser`)}
-      ${sigs === null ? "<li>This browser has no Ed25519 support to check the two signatures.</li>" : step(sigs, `Both checkpoint signatures ${sigs ? "valid" : "INVALID"}`)}</ol>`;
+    const sigs = sa === true && sb === true;
+    const ok = proofOk && sigs;
+    $("consResult").innerHTML = `<div class="verdict ${ok ? "ok" : "bad"}">${ok ? `The ${int.format(from)}-entry ledger is an exact prefix of the ${int.format(to)}-entry ledger: nothing was changed or removed in between.` : "Consistency verification FAILED or incomplete."}</div>
+      <ol class="steps">${step(proofOk, `Rebuilt both signed roots from ${r.proof.length} proof hashes in this browser`)}
+      ${sa === null || sb === null ? "<li>This browser has no Ed25519 support to check the two signatures.</li>" : step(sigs, `Both checkpoint signatures ${sigs ? "valid" : "INVALID"}`)}</ol>`;
   } catch (err) { $("consResult").innerHTML = `<div class="verdict bad">${errText(err)}</div>`; }
 });
 $("inclForm").addEventListener("submit", e => { e.preventDefault(); verifyEntry(Number($("inclSeq").value), $("inclResult")); });

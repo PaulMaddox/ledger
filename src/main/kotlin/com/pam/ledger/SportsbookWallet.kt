@@ -1,6 +1,6 @@
 package com.pam.ledger
 
-import java.util.concurrent.CompletionException
+import java.util.concurrent.CompletableFuture
 
 /*
  * ============================================================================
@@ -88,32 +88,14 @@ class SportsbookWallet(private val ledger: Ledger) {
     }
 
     /**
-     * Await the original submission without timing out or abandoning it on interruption.
-     * The book holds a fixture lock until this outcome is definitive; retry admission
-     * failures must never release that lock while an earlier submission is still pending.
+     * Submit a placement without cancelling it when a caller stops waiting.
+     * The returned future completes only when the ledger has a definitive outcome.
      */
-    internal fun placeBetUntilDefinitive(playerId: String, betId: String, stake: Long, currency: String, selection: String): Receipt = try {
-        ledger.submit(placementRequest(playerId, betId, stake, currency, selection)).join()
-    } catch (e: CompletionException) {
-        throw (e.cause as? LedgerException ?: e)
-    }
+    fun placeBetAsync(playerId: String, betId: String, stake: Long, currency: String, selection: String = "") =
+        ledger.submit(placementRequest(playerId, betId, stake, currency, selection))
 
-    private fun placementRequest(playerId: String, betId: String, stake: Long, currency: String, selection: String): TransactionRequest {
-        require(stake > 0) { "stake must be positive" }
-        return TransactionRequest(
-            idempotencyKey = placementKey(betId),
-            kind = "BET_PLACED",
-            postings = listOf(
-                Posting(Accounts.cash(playerId, currency), currency, -stake),
-                Posting(Accounts.openBets(playerId, currency), currency, stake),
-            ),
-            metadata = buildMap {
-                put("betId", betId)
-                put("playerId", playerId)
-                if (selection.isNotEmpty()) put("selection", selection)
-            },
-        )
-    }
+    /** True once this bet's placement has committed. */
+    fun hasBetPlacement(betId: String) = ledger.findByIdempotencyKey(placementKey(betId)) != null
 
     /** Bet won: return [payout] (stake included) to the player. */
     fun settleWin(betId: String, payout: Long) = settle(betId, "BET_WON", payout)
@@ -157,6 +139,23 @@ class SportsbookWallet(private val ledger: Ledger) {
     }
 
     private data class Placement(val seq: Long, val playerId: String, val stake: Long, val currency: String)
+
+    private fun placementRequest(playerId: String, betId: String, stake: Long, currency: String, selection: String): TransactionRequest {
+        require(stake > 0) { "stake must be positive" }
+        return TransactionRequest(
+            idempotencyKey = placementKey(betId),
+            kind = "BET_PLACED",
+            postings = listOf(
+                Posting(Accounts.cash(playerId, currency), currency, -stake),
+                Posting(Accounts.openBets(playerId, currency), currency, stake),
+            ),
+            metadata = buildMap {
+                put("betId", betId)
+                put("playerId", playerId)
+                if (selection.isNotEmpty()) put("selection", selection)
+            },
+        )
+    }
 
     /** Reconstruct the bet from its placement entry, the single source of truth. */
     private fun placement(betId: String): Placement {

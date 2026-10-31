@@ -42,10 +42,11 @@ test("entry decoder preserves Long precision and rejects malformed records", () 
 test("verified panel renders canonical bytes, not altered JSON entry fields", async () => {
   const bytes = entryBytes();
   const root = Buffer.from(await webcrypto.subtle.digest("SHA-256", Buffer.concat([Buffer.from([0]), bytes])));
-  const message = Buffer.concat([str("PAM-LEDGER/tree-head/v1"), str("test-ledger"), i64(1), root, Buffer.alloc(32), i64(1000000)]);
+  const message = Buffer.concat([str("PAM-LEDGER/tree-head/v1"), str("sportsbook-web"), i64(1), root, Buffer.alloc(32), i64(1000000)]);
   const keys = await webcrypto.subtle.generateKey("Ed25519", true, ["sign", "verify"]);
   const signature = await webcrypto.subtle.sign("Ed25519", keys.privateKey, message);
   const response = {
+    ledgerId: "sportsbook-web",
     entryBytes: bytes.toString("base64"), leafHash: root.toString("hex"), treeSize: 1, path: [],
     publicKey: Buffer.from(await webcrypto.subtle.exportKey("spki", keys.publicKey)).toString("base64"),
     sth: { signingBytes: message.toString("base64"), signature: Buffer.from(signature).toString("base64"), keyId: "test" },

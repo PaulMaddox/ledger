@@ -9,7 +9,6 @@ import com.pam.ledger.SignedTreeHead
 import com.pam.ledger.EntryCodec
 import java.nio.file.Files
 import java.nio.file.Path
-import java.nio.file.StandardCopyOption
 import java.security.PublicKey
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -32,27 +31,28 @@ class Audit(
 
     // ---- Checkpoint history: every signed tree head, oldest first ----
 
-    // The history is the checkpoints journal itself, tailed: every signed head ever persisted
-    // is read exactly once, in order, however quickly they are signed. (Sampling only the
-    // latest checkpoint would miss heads signed between samples.)
     private val history = ArrayList<SignedTreeHead>()
-    private var tailOffset = 0L // guarded by `history`
+    private var checkpointOffset = 0L // guarded by `history`
     private val poller = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "sth-history").apply { isDaemon = true } }
 
     init {
-        refresh()
-        poller.scheduleAtFixedRate({ runCatching { refresh() } }, 500, 500, TimeUnit.MILLISECONDS)
+        refreshHistory()
+        poller.scheduleAtFixedRate({ runCatching { refreshHistory() } }, 0, 250, TimeUnit.MILLISECONDS)
     }
 
-    /** Read any checkpoint records appended since the last read. */
-    private fun refresh() = synchronized(history) {
-        tailOffset = Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE), tailOffset) { history += SignedTreeHead.decode(it) }.validBytes
+    private fun refreshHistory() = synchronized(history) {
+        checkpointOffset = Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE), checkpointOffset) {
+            history += SignedTreeHead.decode(it)
+        }.validBytes
     }
 
-    fun checkpoints(): List<SignedTreeHead> = synchronized(history) { refresh(); history.toList() }
+    fun checkpoints(): List<SignedTreeHead> {
+        refreshHistory()
+        return synchronized(history) { history.toList() }
+    }
 
     /** Sign a checkpoint now. It is persisted before this returns, so the history includes it. */
-    fun checkpointNow(): SignedTreeHead = ledger.checkpoint().also { refresh() }
+    fun checkpointNow(): SignedTreeHead = ledger.checkpoint().also { refreshHistory() }
 
     /** A checkpoint covering entry [seq]: the latest one if it does, otherwise a fresh one. */
     fun checkpointCovering(seq: Long): SignedTreeHead {
@@ -60,22 +60,52 @@ class Audit(
         return if (latest != null && latest.head.treeSize > seq) latest else checkpointNow()
     }
 
-    fun checkpointOfSize(size: Long): SignedTreeHead? = synchronized(history) { refresh(); history.lastOrNull { it.head.treeSize == size } }
+    fun checkpointOfSize(size: Long): SignedTreeHead? {
+        refreshHistory()
+        return synchronized(history) { history.lastOrNull { it.head.treeSize == size } }
+    }
 
     // ---- Snapshot and independent audit ----
 
-    /**
-     * Copy the ledger's files to a new folder. The checkpoints file is copied FIRST:
-     * a checkpoint is written only after the entries it covers are fsynced, so copying
-     * entries second guarantees every copied checkpoint's entries are in the copy.
-     */
-    fun snapshot(): Path {
+    /** Copy one signed prefix so no concurrent append can escape its checkpoint. */
+    private fun snapshot(treeSize: Long): Path {
         val copy = Files.createTempDirectory("pam-ledger-snapshot")
-        for (name in listOf(Ledger.CHECKPOINTS_FILE, Ledger.ENTRIES_FILE)) {
-            val source = directory.resolve(name)
-            if (Files.exists(source)) Files.copy(source, copy.resolve(name), StandardCopyOption.REPLACE_EXISTING)
+        try {
+            val checkpoints = checkpoints().filter { it.head.treeSize <= treeSize }.map { it.encode() }
+            writeRecords(copy.resolve(Ledger.CHECKPOINTS_FILE), checkpoints)
+            copyEntryPrefix(copy.resolve(Ledger.ENTRIES_FILE), treeSize)
+            return copy
+        } catch (t: Throwable) {
+            copy.toFile().deleteRecursively()
+            throw t
         }
-        return copy
+    }
+
+    private fun copyEntryPrefix(destination: Path, treeSize: Long) {
+        val (journal, _) = Journal.openForAppend(destination) {}
+        val batch = ArrayList<ByteArray>(1_000)
+        var copied = 0L
+        try {
+            Journal.scanReadOnly(directory.resolve(Ledger.ENTRIES_FILE)) { record ->
+                if (copied < treeSize) {
+                    batch += record
+                    copied++
+                    if (batch.size == 1_000) {
+                        journal.appendBatch(batch)
+                        batch.clear()
+                    }
+                }
+            }
+            check(copied == treeSize) { "ledger snapshot ended before its signed head" }
+            if (batch.isNotEmpty()) journal.appendBatch(batch)
+        } finally {
+            journal.close()
+        }
+    }
+
+    private fun writeRecords(path: Path, records: List<ByteArray>) {
+        val (journal, _) = Journal.openForAppend(path) {}
+        journal.use { out -> records.chunked(1_000).forEach(out::appendBatch) }
     }
 
     data class AuditResult(val report: LedgerVerifier.Report, val millis: Long, val note: String)
@@ -84,8 +114,8 @@ class Audit(
     fun fullAudit(): AuditResult {
         val started = System.nanoTime()
         // Anchor everything committed so far: unsigned history would (rightly) fail the audit.
-        checkpointNow()
-        val dir = snapshot()
+        val checkpoint = checkpointNow()
+        val dir = snapshot(checkpoint.head.treeSize)
         try {
             val report = LedgerVerifier.verify(dir, ledgerId, trustedKeys)
             return AuditResult(report, (System.nanoTime() - started) / 1_000_000, "Independent audit of a snapshot of the live ledger.")
@@ -101,36 +131,23 @@ class Audit(
      *
      *  - "edit":     inflate one deposit tenfold in place (a careless forger);
      *  - "rewrite":  inflate it and recompute every later hash (a careful forger);
-     *  - "truncate": delete the newest five signed entries (a rollback to hide a recent payout).
+     *  - "truncate": delete the newest five entries (a rollback to hide a recent payout).
      */
     fun tamper(mode: String): AuditResult {
         require(mode in setOf("edit", "rewrite", "truncate")) { "mode must be edit, rewrite or truncate" }
-        val sth = checkpointNow()
-        val dir = snapshot()
+        val checkpoint = checkpointNow() // the tamper must alter history covered by this signed head
+        val dir = snapshot(checkpoint.head.treeSize)
         try {
             val path = dir.resolve(Ledger.ENTRIES_FILE)
             val records = ArrayList<ByteArray>()
-            Journal.scanReadOnly(path) {
-                if (records.size.toLong() < sth.head.treeSize) records += it
-            }
-            require(records.size.toLong() == sth.head.treeSize) { "snapshot is missing signed entries" }
-            // The simulator can append while files are copied. Attack exactly this signed
-            // prefix, not an unsigned suffix; discard newer checkpoints from the copy too.
-            val checkpointsPath = dir.resolve(Ledger.CHECKPOINTS_FILE)
-            val checkpoints = ArrayList<ByteArray>()
-            Journal.scanReadOnly(checkpointsPath) {
-                if (SignedTreeHead.decode(it).head.treeSize <= sth.head.treeSize) checkpoints += it
-            }
-            Files.delete(checkpointsPath)
-            val (checkpointJournal, _) = Journal.openForAppend(checkpointsPath) {}
-            checkpointJournal.use { it.appendBatch(checkpoints) }
+            Journal.scanReadOnly(path) { records += it }
             require(records.size >= 6) { "the ledger needs a few more entries first" }
             fun body(r: ByteArray) = r.copyOfRange(0, r.size - 32)
 
             val note = when (mode) {
                 "truncate" -> {
                     repeat(5) { records.removeAt(records.size - 1) }
-                    "Deleted the newest 5 signed entries from a copy of the journal, as if to hide recent payouts."
+                    "Deleted the newest 5 entries from a copy of the journal, as if to hide recent payouts."
                 }
                 else -> {
                     // The victim: the most recent deposit outside the newest few entries.
