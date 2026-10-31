@@ -116,6 +116,9 @@ jobs:
       - name: Check the guide
         run: node scripts/check-guide.mjs
 
+      - name: Check console browser regressions
+        run: node scripts/check-web.mjs
+
   setup:
     # Proves the README's one-command setup and one-command demo work, by running
     # them exactly as documented on fresh Ubuntu and Windows machines.

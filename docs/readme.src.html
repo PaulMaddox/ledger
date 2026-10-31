@@ -540,7 +540,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     </figure>
     <figure class="shot">
       <a href="screenshots/customer-verify.png"><img src="screenshots/customer-verify.png" alt="An entry verified in the browser: leaf hash, audit path, signed root and Ed25519 signature all checked" loading="lazy"></a>
-      <figcaption><b>Verified in the browser.</b> The browser hashes the entry, walks the Merkle proof and checks the signature itself.</figcaption>
+      <figcaption><b>Verified in the browser.</b> The browser decodes and displays the canonical entry bytes, with exact minor-unit amounts, then hashes them, walks the Merkle proof and checks the signature itself.</figcaption>
     </figure>
   </div>
   <figure class="shot wide">

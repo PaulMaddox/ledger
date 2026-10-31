@@ -101,6 +101,29 @@ function parseTreeHead(bytes) {
   return { tag: str(), ledgerId: str(), treeSize: long(), root: dig(), chainHead: dig(), timestampMicros: long() };
 }
 
+/** Decode EntryCodec v1 without losing precision in signed 64-bit amounts. */
+function parseEntry(bytes) {
+  const v = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let o = 0;
+  const need = n => { if (n < 0 || n > bytes.length - o) throw new Error("Truncated entry bytes"); };
+  const i32 = () => { need(4); const n = v.getInt32(o); o += 4; return n; };
+  const long = () => { need(8); const n = v.getBigInt64(o); o += 8; return n; };
+  const raw = n => { need(n); const b = bytes.slice(o, o + n); o += n; return b; };
+  const str = (max = 65536) => {
+    const n = i32();
+    if (n < 0 || n > max) throw new Error("Entry string length out of range");
+    return new TextDecoder("utf-8", { fatal: true }).decode(raw(n));
+  };
+  const count = () => { const n = i32(); if (n < 0 || n > 64) throw new Error("Entry count out of range"); return n; };
+  if (i32() !== 0x50414d4c || raw(1)[0] !== 1) throw new Error("Unsupported entry format");
+  const seq = long(), timestampMicros = long(), prevChainHash = hex(raw(32)), txId = hex(raw(16));
+  const key = str(), kind = str();
+  const postings = Array.from({ length: count() }, () => ({ account: str(), currency: str(16), amount: long() }));
+  const metadata = Array.from({ length: count() }, () => ({ key: str(), value: str() }));
+  if (o !== bytes.length) throw new Error("Trailing entry bytes");
+  return { seq, timestampMicros, prevChainHash, txId, key, kind, postings, metadata };
+}
+
 /** Ed25519 signature check with WebCrypto. Returns true/false, or null if this browser lacks Ed25519. */
 async function verifySignature(publicKeyB64, signatureB64, messageBytes) {
   try {
@@ -121,8 +144,9 @@ async function verifyEntry(seq, target) {
     const p = await api(`proof/inclusion?seq=${seq}`);
     const steps = [];
     const bytes = b64(p.entryBytes);
+    const e = parseEntry(bytes);
     const leaf = await leafHash(bytes);
-    const leafOk = hex(leaf) === p.leafHash;
+    const leafOk = hex(leaf) === p.leafHash && e.seq === BigInt(seq);
     steps.push(step(leafOk, `Hashed the entry's ${bytes.length} canonical bytes here: leaf <code>${short(hex(leaf))}</code>${leafOk ? "" : " does not match the server's"}`));
     const root = await inclusionRoot(leaf, seq, p.treeSize, p.path.map(fromHex));
     steps.push(step(!!root, root ? `Combined it with ${p.path.length} sibling hashes from the audit path: root <code>${short(hex(root))}</code>` : "The audit path is malformed"));
@@ -134,12 +158,11 @@ async function verifyEntry(seq, target) {
       ? `<li>This browser has no Ed25519 support, so the signature could not be checked here (the server reports it ${p.sth.verified ? "valid" : "invalid"}).</li>`
       : step(sig, `Checked the Ed25519 signature on those bytes with the ledger's public key (key ${esc(p.sth.keyId)}): ${sig ? "valid" : "INVALID"}`));
     const ok = leafOk && !!root && headOk && sig === true;
-    const e = p.entry;
     target.innerHTML = `
-      <div class="panel-head"><h2>Entry #${seq}: ${esc(e.kind)}</h2><button type="button" onclick="this.closest('.panel').hidden=true">Close</button></div>
+      <div class="panel-head"><h2>Entry #${e.seq}: ${esc(e.kind)}</h2><button type="button" onclick="this.closest('.panel').hidden=true">Close</button></div>
       <div class="verdict ${ok ? "ok" : "bad"}">${ok ? "Verified in this browser: this entry is part of the signed ledger, unaltered." : "Verification FAILED."}</div>
-      <dl class="kv"><dt>key</dt><dd>${esc(e.key)}</dd><dt>time</dt><dd>${esc(e.time)}</dd>
-        ${e.postings.map(x => `<dt>${esc(x.account)}</dt><dd class="${x.amount > 0 ? "pos" : "neg"}">${x.amount > 0 ? "+" : ""}${eur(x.amount)}</dd>`).join("")}</dl>
+      <dl class="kv"><dt>key</dt><dd>${esc(e.key)}</dd><dt>time</dt><dd>${esc(new Date(Number(e.timestampMicros / 1000n)).toISOString())}</dd>
+        ${e.postings.map(x => `<dt>${esc(x.account)}</dt><dd class="${x.amount > 0n ? "pos" : "neg"}">${x.amount > 0n ? "+" : ""}${int.format(x.amount)} ${esc(x.currency)} minor units</dd>`).join("")}</dl>
       <ol class="steps">${steps.join("")}</ol>`;
   } catch (e) {
     target.innerHTML = `<div class="verdict bad">${errText(e)}</div>`;

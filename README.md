@@ -66,7 +66,8 @@ ledger, so anything done in one view shows up in the others.
 - **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
   automated. "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance to show that exactly one gets through. Any entry can be **verified in the browser**:
-  it hashes the entry itself, walks the Merkle proof, and checks the Ed25519 signature with
+  it decodes and displays the canonical bytes (amounts in exact minor units), hashes them,
+  walks the Merkle proof, and checks the Ed25519 signature with
   WebCrypto, rather than trusting the server.
 - **Operator.** Revenue, exposure, throughput and open-bet charts, per-fixture liability,
   settlement buttons, and a live transaction feed.
@@ -148,6 +149,7 @@ Then:
 ```
 python3 scripts/build-readme.py   # rebuild docs/index.html (Windows: python instead of python3)
 node scripts/check-guide.mjs      # headless check of the guide
+node scripts/check-web.mjs        # console browser regression checks (no dependencies)
 ```
 
 ### Setting up by hand
