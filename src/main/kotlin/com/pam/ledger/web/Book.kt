@@ -392,11 +392,11 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         throw e
     }
 
-    private companion object {
-        const val FIXTURES_FILE = "demo-fixtures.properties"
-        const val LEGACY_UNRESOLVED = "LEGACY_UNRESOLVED"
+    companion object {
+        internal const val FIXTURES_FILE = "demo-fixtures.properties"
+        private const val LEGACY_UNRESOLVED = "LEGACY_UNRESOLVED"
 
-        val TEAMS = listOf(
+        private val TEAMS = listOf(
             "Falcons", "Harbour City", "Northgate", "Riverside", "Old Town", "Westbrook",
             "Kingsport", "Lakeview", "Ashford", "Millbrook", "Sandhaven", "Redcliff",
         )

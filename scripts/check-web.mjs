@@ -47,7 +47,7 @@ function pollingContext() {
     if (!elements.has(id)) {
       let html = "";
       const el = {
-        value: "", controls: [], addEventListener() {},
+        value: "", className: "", controls: [], addEventListener() {},
         contains(active) { return this.controls.includes(active); },
         querySelectorAll(selector) { return this.controls.filter(b => b.matches(selector)); },
         get innerHTML() { return html; },
@@ -58,9 +58,10 @@ function pollingContext() {
             const data = Object.fromEntries([...attributes.matchAll(/data-([\w-]+)="([^"]*)"/g)].map(([, key, val]) =>
               [key, val.replace(/&(amp|lt|gt|quot|#39);/g, (_, entity) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[entity]))]));
             return {
+              disabled: /\bdisabled\b/.test(attributes),
               getAttribute: name => data[name.slice(5)] ?? null,
               matches: selector => [...selector.matchAll(/\[data-([\w-]+)\]/g)].every(([, key]) => key in data),
-              focus(options) { document.activeElement = this; this.focusOptions = options; },
+              focus(options) { if (!this.disabled) { document.activeElement = this; this.focusOptions = options; } },
             };
           });
         },
@@ -138,6 +139,30 @@ test("customer refresh does not transfer focus to another customer's control", a
     await s.c.refreshPlayer();
     assert.equal(s.document.activeElement, s.document.body);
   }
+});
+
+test("authorized Chaos Monkey polling retains scenario focus but does not focus stopped controls", async () => {
+  const s = pollingContext();
+  const data = {
+    available: true, history: [],
+    scenarios: ["retries", "checksum"].map(id => ({ id, name: id, description: "Main-store experiment" })),
+  };
+  s.responses["/api/chaos"] = data;
+  vm.runInContext('let current = "chaos";', s.c);
+  vm.runInContext(source.slice(source.indexOf("let stopChaos"), source.indexOf('$("chaosScenarios").addEventListener')), s.c);
+  s.element("chaosConfirmation").value = "CHAOS ON MAIN STORE";
+  await s.c.refreshChaos();
+  s.element("chaosScenarios").controls[1].focus();
+  data.scenarios.reverse();
+  await s.c.refreshChaos();
+  assert.equal(s.document.activeElement.getAttribute("data-chaos"), "checksum");
+  assert.equal(s.document.activeElement.focusOptions.preventScroll, true);
+
+  data.available = false;
+  data.reason = "Recovery refused; reset required";
+  await s.c.refreshChaos();
+  assert.equal(s.document.activeElement, s.document.body);
+  assert.ok(s.element("chaosScenarios").controls.every(b => b.disabled));
 });
 
 test("polling restores the current focus, not where it was before the response arrived", async () => {

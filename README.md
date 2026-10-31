@@ -99,20 +99,41 @@ ledger, so anything done in one view shows up in the others.
   in-flight placement's definitive result, including during queue overload.
 - **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
   with signature caching bound to the exact evidence, display commitments and public key,
-  consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
-  corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
-  catching each, even while the simulator appends new entries. Audit snapshots reread
+  consistency and inclusion proofs and a per-customer audit trail. Audit snapshots reread
   checkpoint records from disk through the captured checkpoint's position instead of
   trusting cached copies or unverified tree sizes. Player audits compare posting replays
   with immutable engine account states at each account's own last sequence.
   Signing times are decoded from the signed bytes.
   Checkpoint history and its read offset advance together only after a successful scan.
+- **Administrator.** Live CPU, heap and host memory, available filesystem space, journal size,
+  physical process storage I/O (Linux only), durably committed transactions/sec, platform
+  threads, garbage collection and read-model lag. Unsupported counters are labelled unavailable.
+  Clearing storage requires typing `CLEAR DEMO STORAGE`; it stops and drains services,
+  permanently deletes only the demo journals, torn-tail quarantine files and fixtures, then seeds a fresh demo.
+  The signing key, lock files and unrelated files remain. This unauthenticated, demo-only
+  reset is an explicit exception to append-only storage, never a production ledger operation.
+- **Chaos Monkey.** Seven bounded experiments against the **main data store**: torn writes, CRC corruption,
+  signed-history rollback, duplicate retry storms, multi-device double spending, conflicting
+  settlement and signing-service outage/fail-stop. Type `CHAOS ON MAIN STORE` before
+  each run. Every run stops and drains the simulator and ledger services; money races
+  create real, visible customers and bets, while storage attacks mutate the main journals
+  under their directory lock. The tamper lab edits deposits, rewrites the chain or rolls
+  back signed entries in that same store. Recovery genuinely attempts to reopen and
+  verify storage, except after the signer outage, which intentionally leaves services stopped.
+  Torn-write recovery preserves committed history; corruption and rollback should refuse
+  to reopen. Damaged files and results remain for inspection, without automatic restore.
+  Administrator reset is available even when the ledger is stopped or the app restarts
+  on corrupt storage. Use it to start again. History retains the last 30 experiments
+  in memory until reset or app restart. These are demo-only, owner-approved exceptions
+  to append-only storage, never production operations.
 
 | Operator | Customer |
 |---|---|
 | ![Operator view](docs/screenshots/operator.png) | ![Customer view](docs/screenshots/customer.png) |
 | **Regulator** | **Verified in the browser** |
 | ![Regulator view](docs/screenshots/regulator.png) | ![An entry verified in the browser](docs/screenshots/customer-verify.png) |
+| **Administrator** | **Chaos Monkey** |
+| ![Administrator performance dashboard](docs/screenshots/administrator.png) | ![Chaos Monkey failure experiments](docs/screenshots/chaos.png) |
 
 Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
 ledger lives in a fresh temporary folder each run; with it, the ledger, signing key, fixture
@@ -147,7 +168,8 @@ To listen on the LAN, explicitly allow the hostname or IP address users will acc
 IP addresses (without schemes, ports or wildcards). IPv6 wildcard binding uses `--host ::`.
 Loopback access stays available with wildcard binding; other hosts and cross-origin
 mutations remain blocked. Framing is forbidden by CSP and X-Frame-Options to prevent
-clickjacking. Exposing this unauthenticated demo lets reachable users move money.
+clickjacking. Exposing this unauthenticated demo lets reachable users move money,
+damage the main store with Chaos Monkey, and permanently clear demo history with Administrator reset.
 Following a link from the README or guide is allowed while Host validation remains enforced.
 Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
 requires a secure context with WebCrypto (HTTPS or localhost).

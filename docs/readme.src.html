@@ -520,6 +520,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="web-console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
+  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code> for customer wallets, operator dashboards, browser-verified proofs, simulation, Administrator performance graphs and Chaos Monkey experiments on the main demo store. Four views share one live ledger, so anything done in one appears in the others. These screenshots are captured from the running console by <code>scripts/capture-screenshots.py</code>.</p>
+  <p class="prose">The Administrator reset is a confirmed, demo-only exception to append-only storage: after draining every service, it removes demo journals, torn-tail quarantine files and fixture state, retains the signing key, and seeds a fresh demo. Chaos Monkey attacks the main demo store only after confirmation and service drain; damage and failed recovery remain available for inspection until reset. Never expose these operations in production.</p>
   <p class="prose">The five-device test captures its customer before loading the balance, aborts if selection changes before betting, and never displays late results in another customer's view.</p>
   <p class="prose">Startup failures close acquired services and release the ledger's writer lock before reporting the original error.</p>
   <p class="prose">Automated customer IDs use locale-independent ASCII digits so browser tiles, events and ledger accounts refer to the same customers.</p>
@@ -541,38 +543,47 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Independent audit snapshots reread checkpoint records from byte zero through the captured checkpoint's position. Unverified tree sizes cannot exclude tampered history. Player audits reconcile posting replays with immutable engine account states at each account's own last sequence.</p>
   <p class="prose">Checkpoint signing times in the table and proof selectors come from the signed timestamp, never the separate JSON time field.</p>
   <p class="prose">Checkpoint history and its scan offset are published together only after a successful scan, so a corrupt later record cannot duplicate earlier history on retries.</p>
-  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code>. Four views share one live ledger, so anything done in one appears in the others. These screenshots are captured from the running console by <code>scripts/capture-screenshots.py</code>.</p>
   <p class="prose">Use <code>--data &lt;folder&gt;</code> to retain the ledger, signing key, fixture definitions and results across restarts. Legacy bets whose fixture result was never saved are frozen instead of being assigned a guessed outcome. The demo has no authentication; the server rejects cross-origin browser mutations and invalid hosts.</p>
   <p class="prose">The server never relies on browser validation. API POST bodies are bounded to 16 KiB, including chunked requests; URIs to 8,192 characters; and combined query/body forms to 32 fields. Nonempty bodies require UTF-8 URL-encoded forms. Malformed encoding, malformed fields and duplicate decoded names are rejected. New deposits and placements require player IDs that fit their escrow account names (235 characters for three-letter currencies); new nonblank bet IDs are limited to 245 characters so settlement keys also fit. These admission checks leave byte formats and historical replay rules unchanged; older, longer cash accounts can still withdraw. Amounts are positive whole minor units within the supported Long range; odds and cash-out prices come from the book. Simulator actions, settings, booleans and event cursors are validated before mutation, and web deposits cannot use internal <code>sim-seed-</code> references.</p>
-  <p class="prose">For LAN access, use <code>--host 0.0.0.0 --allowed-host ledger.example</code> (or <code>--host ::</code> for IPv6 wildcard binding). The bind address and allowed request hosts are separate. Repeat <code>--allowed-host</code> for exact hostnames or IP addresses without schemes, ports or wildcards; loopback access remains available. This exposes an unauthenticated demo to anyone who can reach it.</p>
+  <p class="prose">For LAN access, use <code>--host 0.0.0.0 --allowed-host ledger.example</code> (or <code>--host ::</code> for IPv6 wildcard binding). The bind address and allowed request hosts are separate. Repeat <code>--allowed-host</code> for exact hostnames or IP addresses without schemes, ports or wildcards; loopback access remains available. This unauthenticated demo can be reached by anyone you allow onto the network.</p>
   <p class="prose">Following a link from another site can open the console, while Host validation and mutation origin checks stay enforced. CSP and X-Frame-Options forbid framing to prevent clickjacking. Production still needs authenticated roles, per-action authorization, confirmed payment integration and request-rate/concurrency limits. Request IDs work on LAN HTTP origins; browser cryptographic verification requires WebCrypto in a secure context (HTTPS or localhost).</p>
   <p class="prose">The repository includes a GitHub Actions deployment for the existing <code>ledger</code> AKS cluster in Sweden Central. Follow <code>deploy/README.md</code> for the one-time Azure OIDC, registry and namespace setup. Pushes to main test the container and deploy one ledger instance on a persistent Azure disk, with an Azure public DNS name and automatic HTTPS from Caddy. Updates briefly interrupt service; this remains an unauthenticated synthetic-money demo, not a production wallet. The proxy preserves Host, Origin and Referer; <code>--public-origin https://&lt;hostname&gt;</code> accepts only the configured HTTPS origin without trusting forwarding headers. Ledger data and signing keys stay on the cluster's in-region disk, not in the image.</p>
   <figure class="shot wide">
     <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>
-    <figcaption><b>Simulator.</b> 500 automated customers by default, with start, pause, resume and stop. Each tile streams one customer's latest actions, green when accepted and red when the ledger refuses.</figcaption>
+    <figcaption><b>Simulator.</b> Automated customers and their live activity.</figcaption>
   </figure>
   <div class="shots">
     <figure class="shot">
       <a href="screenshots/operator.png"><img src="screenshots/operator.png" alt="Operator view: revenue, exposure and throughput tiles and charts, fixtures with liability and settle buttons, and a live feed" loading="lazy"></a>
-      <figcaption><b>Operator.</b> Revenue, exposure and throughput, per-fixture liability with resumable settlement, and the live feed. Settlement waits for the original pending placements, even during queue overload.</figcaption>
+      <figcaption><b>Operator.</b> Revenue, exposure, throughput and settlement.</figcaption>
     </figure>
     <figure class="shot">
       <a href="screenshots/customer.png"><img src="screenshots/customer.png" alt="Customer view: balances, wallet, five-devices test, fixtures to bet on, bets and history" loading="lazy"></a>
-      <figcaption><b>Customer.</b> Wallet, betting and cash-out for any customer, and a five-devices-at-once double-spend test. Each slip blocks duplicate submissions and retains its identity, player and stake for uncertain-response retries.</figcaption>
+      <figcaption><b>Customer.</b> Wallet, bets and the five-device race.</figcaption>
     </figure>
     <figure class="shot">
       <a href="screenshots/regulator.png"><img src="screenshots/regulator.png" alt="Regulator view: signed checkpoints verified in the browser, and a passed independent audit" loading="lazy"></a>
-      <figcaption><b>Regulator.</b> Checkpoint signatures checked in the browser, with cached verdicts bound to the evidence, displayed commitments and public key, and a full independent audit.</figcaption>
+      <figcaption><b>Regulator.</b> Signed checkpoints and an independent audit.</figcaption>
     </figure>
     <figure class="shot">
       <a href="screenshots/customer-verify.png"><img src="screenshots/customer-verify.png" alt="An entry verified in the browser: leaf hash, audit path, signed root and Ed25519 signature all checked" loading="lazy"></a>
-      <figcaption><b>Verified in the browser.</b> The browser decodes and displays the canonical entry bytes, with exact minor-unit amounts, then hashes them, walks the Merkle proof and checks the signature itself.</figcaption>
+      <figcaption><b>Verified in the browser.</b> Hashes, Merkle proof and signature checked locally.</figcaption>
     </figure>
   </div>
   <figure class="shot wide">
-    <a href="screenshots/regulator-tamper.png"><img src="screenshots/regulator-tamper.png" alt="Tamper lab: a rewritten history caught by the signed checkpoint" loading="lazy"></a>
-    <figcaption><b>Tamper lab.</b> A copy is bounded to a captured signed checkpoint before attacking it, even while the simulator runs. Recomputing every hash still cannot conceal the rewritten signed history.</figcaption>
+    <a href="screenshots/chaos-tamper.png"><img src="screenshots/chaos-tamper.png" alt="Chaos Monkey tamper lab: a rewritten history caught by the signed checkpoint" loading="lazy"></a>
+    <figcaption><b>Tamper lab.</b> Main-store history rewritten, recovery refused.</figcaption>
   </figure>
+  <div class="shots">
+    <figure class="shot">
+      <a href="screenshots/administrator.png"><img src="screenshots/administrator.png" alt="Administrator view: CPU, memory, storage, I/O and transaction throughput charts" loading="lazy"></a>
+      <figcaption><b>Administrator.</b> Live server performance and a protected demo reset.</figcaption>
+    </figure>
+    <figure class="shot">
+      <a href="screenshots/chaos.png"><img src="screenshots/chaos.png" alt="Chaos Monkey view: authorized main-store failures, recovery results and manual reset" loading="lazy"></a>
+      <figcaption><b>Chaos Monkey.</b> Main-store failures; reset to start again.</figcaption>
+    </figure>
+  </div>
 </section>
 
 <!-- ======================= REGULATORS ======================= -->

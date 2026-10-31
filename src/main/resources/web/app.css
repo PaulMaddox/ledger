@@ -45,7 +45,7 @@ button, input, select { font: inherit; color: inherit; }
 .brand b { display: block; font-size: 1rem; }
 .brand span { display: block; font: .72rem var(--f-mono); color: var(--console-muted); }
 .mark { width: 22px; height: 22px; border-radius: 5px; background: linear-gradient(135deg, var(--c-ok), #1c6a54); box-shadow: 0 0 12px rgba(79,213,143,.35); }
-.personas { display: flex; gap: 4px; }
+.personas { display: flex; gap: 4px; flex-wrap: wrap; }
 .personas a { color: var(--console-muted); text-decoration: none; padding: 7px 14px; border-radius: 7px; font-weight: 600; display: flex; gap: 8px; align-items: center; }
 .personas a:hover { color: var(--console-ink); background: var(--console-panel); }
 .personas a[aria-selected="true"] { color: var(--console-ink); background: var(--console-panel); box-shadow: inset 0 -2px 0 var(--c-ok); }
@@ -160,6 +160,21 @@ button:disabled { opacity: .45; cursor: default; }
 .tamper button { display: grid; gap: 4px; text-align: left; padding: 12px; font-weight: 500; }
 .tamper button b { font-size: .95rem; }
 .tamper button span { color: var(--muted); font-size: .82rem; }
+
+/* ---------- administrator and chaos experiments ---------- */
+.danger-zone { border-color: var(--bad); }
+button.danger { color: var(--bad); border-color: var(--bad); justify-self: start; }
+button.danger:hover { background: color-mix(in srgb, var(--bad) 8%, var(--panel)); }
+.chaos-scenario { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 12px; align-items: center; padding: 14px 0; border-bottom: 1px solid var(--rule); }
+.chaos-scenario:first-child { padding-top: 0; }
+.chaos-scenario p { color: var(--muted); margin-top: 4px; }
+.experiment-history { display: grid; gap: 12px; }
+.experiment-history article { border-bottom: 1px solid var(--rule); padding-bottom: 12px; display: grid; gap: 4px; }
+#view-chaos a { color: var(--accent); }
+@media (max-width: 600px) {
+  .chaos-scenario { grid-template-columns: minmax(0, 1fr); }
+  .chaos-scenario button { justify-self: start; }
+}
 
 /* ---------- simulator ---------- */
 .simcontrols { grid-template-columns: minmax(0, 1fr); }
