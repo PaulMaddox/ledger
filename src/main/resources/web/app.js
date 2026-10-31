@@ -236,8 +236,11 @@ let walletSubmitting = false;
 let fixturesCache = [];
 
 function updateSlipControls() {
+  const unresolved = !!selection?.params;
   $("slip").querySelector('button[type="submit"]').disabled = slipSubmitting;
-  $("slipStake").disabled = !!selection?.params;
+  $("slipStake").disabled = unresolved;
+  $("slipCancel").disabled = unresolved;
+  $("custFixtures").querySelectorAll("[data-fx]").forEach(b => { b.disabled = unresolved; });
 }
 
 async function loadPlayers() {
@@ -347,10 +350,11 @@ async function loadCustFixtures() {
     <div class="fx"><div class="teams">${esc(f.home)} v ${esc(f.away)} <span>${esc(f.id)}</span></div>
       <div class="prices">${["HOME", "DRAW", "AWAY"].map(s => `<button type="button" data-fx="${esc(f.id)}" data-sel="${s}" aria-pressed="${selection && selection.fixture === f.id && selection.sel === s}"><span>${s.toLowerCase()}</span><b>${odds(f.odds[s])}</b></button>`).join("")}</div>
     </div>`).join("") || `<p class="hint">No open fixtures. The operator can add one.</p>`;
+  updateSlipControls();
 }
 $("custFixtures").addEventListener("click", e => {
   const b = e.target.closest("[data-fx]");
-  if (!b) return;
+  if (!b || selection?.params) return;
   const f = fixturesCache.find(x => x.id === b.dataset.fx);
   selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: `${f.home} v ${f.away}`, betId: uuid(), params: null };
   $("slipText").innerHTML = `<b>${esc(selection.sel)}</b> in ${esc(selection.label)} @ <b>${odds(selection.odds)}</b>`;
@@ -358,7 +362,10 @@ $("custFixtures").addEventListener("click", e => {
   updateSlipControls();
   loadCustFixtures();
 });
-$("slipCancel").addEventListener("click", () => { selection = null; $("slip").hidden = true; loadCustFixtures(); });
+$("slipCancel").addEventListener("click", () => {
+  if (selection?.params) return;
+  selection = null; $("slip").hidden = true; loadCustFixtures();
+});
 $("slip").addEventListener("submit", async e => {
   e.preventDefault();
   if (!selection || slipSubmitting) return;

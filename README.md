@@ -80,7 +80,9 @@ ledger, so anything done in one view shows up in the others.
   Definitive bet rejections unlock the stake for correction, and late cash-out replies
   cannot overwrite another selected customer's result.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
-  uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
+  uncertain response with the same player and stake. Price changes and Cancel are blocked
+  while placement is pending or uncertain, until acceptance or a definitive rejection.
+  "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance of the customer captured at launch, cancelling if the selection changes before betting,
   to show that exactly one gets through. Any entry can be **verified in the browser**:
   it decodes and displays the canonical bytes (amounts in exact minor units), hashes them,
