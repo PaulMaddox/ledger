@@ -199,6 +199,45 @@ class WebAppTest {
     }
 
     @Test
+    fun `configured HTTPS proxy origin allows mutations without trusting forwarding headers`() {
+        val app = LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir(), publicOrigin = "https://ledger.example"))
+        try {
+            val accepted = rawRequest(app, "ledger.example", "POST", "https://ledger.example")
+            assertTrue(accepted.startsWith("HTTP/1.1 200"), accepted)
+            assertEquals(200, call(app, "GET", "overview").first)
+            for (origin in listOf("http://ledger.example", "https://attacker.example", "https://ledger.example:8443", "https://ledger.example/path")) {
+                val refused = rawRequest(app, "ledger.example", "POST", origin)
+                assertTrue(refused.startsWith("HTTP/1.1 403") && refused.contains("cross_origin"), refused)
+            }
+            for (host in listOf("attacker.example", "ledger.example:80", "ledger.example:8443")) {
+                val refused = rawRequest(app, host)
+                assertTrue(refused.startsWith("HTTP/1.1 403") && refused.contains("invalid_host"), refused)
+            }
+            val spoofed = call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "spoof"),
+                mapOf("Origin" to "https://ledger.example", "X-Forwarded-Host" to "ledger.example", "X-Forwarded-Proto" to "https"))
+            assertEquals(403, spoofed.first)
+            val missing = rawRequest(app, "ledger.example", "POST")
+            assertTrue(missing.startsWith("HTTP/1.1 403"), missing)
+        } finally { app.close() }
+    }
+
+    @Test
+    fun `public origin options reject non HTTPS and non origin URLs`() {
+        assertEquals("https://ledger.example:8443", parseArgs(arrayOf("--public-origin", "https://ledger.example:8443")).publicOrigin)
+        for (invalid in listOf("http://ledger.example", "https://ledger.example/", "https://user@ledger.example",
+            "https://ledger.example?x=1", "https://ledger.example#fragment", "https://*.example",
+            "https://0.0.0.0", "https://ledger.example:0", "https://ledger.example:65536")) {
+            assertFailsWith<IllegalArgumentException> { parseArgs(arrayOf("--public-origin", invalid)) }
+        }
+        val app = LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir(), publicOrigin = "https://ledger.example:8443"))
+        try {
+            val accepted = rawRequest(app, "ledger.example:8443", "POST", "https://ledger.example:8443")
+            assertTrue(accepted.startsWith("HTTP/1.1 200"), accepted)
+            assertTrue(rawRequest(app, "ledger.example").startsWith("HTTP/1.1 403"))
+        } finally { app.close() }
+    }
+
+    @Test
     fun `customer API moves money, refuses overspending, and replays retried bets`() = withApp { app ->
         assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 2500, "ref" to "t-dep")).first)
 
