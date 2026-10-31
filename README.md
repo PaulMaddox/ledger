@@ -79,6 +79,8 @@ ledger, so anything done in one view shows up in the others.
   different money movements.
   Definitive bet rejections unlock the stake for correction, and late cash-out replies
   cannot overwrite another selected customer's result.
+  Polling preserves keyboard focus on surviving customer picker, cash-out, history
+  verification and fixture-price buttons, and on operator settlement controls.
   Each slip keeps one bet ID, blocks overlapping submissions, and retries an
   uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
   balance of the customer captured at launch, cancelling if the selection changes before betting,

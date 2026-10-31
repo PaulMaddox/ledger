@@ -533,6 +533,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
   <p class="prose">Money crosses the web API as decimal strings of minor units. Browser input parsing and formatting use exact integer arithmetic, so large balances and decimal amounts do not pass through floating-point rounding.</p>
   <p class="prose">An uncertain customer deposit or withdrawal retains its original player, amount and idempotency reference; retrying cannot silently turn it into a different money movement.</p>
   <p class="prose">The operator fixture list keeps every unfinished fixture visible and limits only completed history to the latest 30 entries.</p>
+  <p class="prose">Customer and operator polling preserves keyboard focus by customer, bet, entry or fixture/result identity when the same control still exists, without scrolling or restarting keyboard navigation.</p>
   <p class="prose">Customer bet lists read the newest 40 placements from that customer's entry index, rather than scanning all customers' bets.</p>
   <p class="prose">Operator statistics read current-open indexes; settled history and empty fixture buckets do not accumulate in their refresh path.</p>
   <p class="prose">Independent audit snapshots reread checkpoint records from byte zero through the captured checkpoint's position. Unverified tree sizes cannot exclude tampered history. Player audits reconcile posting replays with immutable engine account states at each account's own last sequence.</p>
