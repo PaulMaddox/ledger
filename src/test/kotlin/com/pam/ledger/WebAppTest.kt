@@ -395,7 +395,33 @@ class WebAppTest {
         }
     }
 
-    /** A pending placement must retain the fixture lock past the normal 30-second timeout. */
+    /** Customer queries use only that customer's index and stop at the requested limit. */
+    @Test
+    fun `customer bet history returns the newest forty with current settlements`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("alice", 1000, "EUR", "alice-fund")
+            wallet.deposit("bob", 1000, "EUR", "bob-fund")
+            repeat(100) { i ->
+                wallet.placeBet("bob", "bob-$i", 1, "EUR", "F1|HOME|200")
+                if (i < 60) {
+                    wallet.placeBet("alice", "alice-$i", 1, "EUR", "F1|HOME|200")
+                    if (i % 2 == 0) wallet.settleLoss("alice-$i")
+                }
+            }
+            ReadModel(ledger).use { model ->
+                model.catchUp()
+                val recent = model.betsForPlayer("alice", 40)
+                assertEquals((20..59).map { "alice-$it" }, recent.map { it.betId })
+                assertEquals(20, recent.count { !it.isOpen })
+                assertEquals(60, model.betsForPlayer("alice").size)
+                assertTrue(model.betsForPlayer("absent", 40).isEmpty())
+                assertTrue(model.betsForPlayer("alice", 0).isEmpty())
+            }
+        }
+    }
+
+    /** A pending placement must retain its settlement guard past the normal 30-second timeout. */
     @Test
     fun `queue overload cannot release a pending placement before settlement`() {
         val blocked = CountDownLatch(1)

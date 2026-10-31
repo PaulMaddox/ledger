@@ -123,7 +123,13 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     // ---- Queries (all return copies, safe to use after the lock is released) ----
 
     fun seqsForPlayer(player: String): List<Long> = synchronized(lock) { byPlayer[player]?.toList() ?: emptyList() }
-    fun betsForPlayer(player: String): List<BetView> = synchronized(lock) { bets.values.filter { it.playerId == player } }
+    fun betsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<BetView> = synchronized(lock) {
+        require(limit >= 0) { "bet limit must be non-negative" }
+        byPlayer[player].orEmpty().asReversed().asSequence().mapNotNull { seq ->
+            val entry = ledger.entry(seq).entry
+            if (entry.kind == "BET_PLACED") entry.metadata["betId"]?.let(bets::get) else null
+        }.take(limit).toList().asReversed()
+    }
     fun allBets(): List<BetView> = synchronized(lock) { bets.values.toList() }
     fun openBetsForPlayer(player: String): List<BetView> = synchronized(lock) {
         openBetsByPlayer[player].orEmpty().mapNotNull(bets::get)
