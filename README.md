@@ -184,6 +184,11 @@ deployment does not change the rendered UI.
 
 ## Running
 
+The regulatory stress test retains every screen's balance reads with lossless
+run-length compression and checks them against replayed ledger history. Repeated
+reads keep their counts and order without exhausting the test heap; failed tests
+also stop their background workers.
+
 | | Ubuntu | Windows |
 |---|---|---|
 | Run the demo | `./gradlew run` | `.\gradlew.bat run` |

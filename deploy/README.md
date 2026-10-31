@@ -117,9 +117,11 @@ The Docker build includes the generated About guide from `src/main/resources`
 and the PNGs from `docs/screenshots`, which Gradle packages into the application.
 The About-page HTTP regression must pass in the container as well as locally.
 
-The regulatory stress test retains all balance observations as evidence; the test
-JVM has a 2 GiB maximum heap so container builds do not exhaust Gradle's default
-512 MiB heap. This is test-only configuration, not a change to ledger rules.
+The regulatory stress test retains every balance observation in lossless
+run-length-compressed sequences per screen, including the count and order of
+repeated reads. It checks every observed value against replayed ledger history
+and stops its workers even after a failure. The test JVM has a 2 GiB maximum heap.
+This is test-only evidence storage and cleanup, not a change to ledger rules.
 
 Azure infrastructure is deployed once, not on every merge. A later infrastructure
 change is made in Bicep and reapplied through the same portal flow. The GitHub
