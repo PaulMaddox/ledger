@@ -1,5 +1,8 @@
 package com.pam.ledger
 
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
+
 /*
  * ============================================================================
  *  SPORTSBOOK WALLET: the PAM-facing API on top of the generic ledger
@@ -46,33 +49,37 @@ class SportsbookWallet(private val ledger: Ledger) {
 
     /** Credit a confirmed deposit. [paymentRef] is the PSP's unique id, so webhook redeliveries are no-ops. */
     fun deposit(playerId: String, amount: Long, currency: String, paymentRef: String): Receipt {
+        return ledger.append(depositRequest(playerId, amount, currency, paymentRef))
+    }
+
+    private fun depositRequest(playerId: String, amount: Long, currency: String, paymentRef: String): TransactionRequest {
         require(amount > 0) { "deposit must be positive" }
-        return ledger.append(
-            TransactionRequest(
-                idempotencyKey = "deposit:$paymentRef",
-                kind = "DEPOSIT",
-                postings = listOf(
-                    Posting(Accounts.pspClearing(currency), currency, -amount),
-                    Posting(Accounts.cash(playerId, currency), currency, amount),
-                ),
-                metadata = mapOf("playerId" to playerId, "paymentRef" to paymentRef),
+        return TransactionRequest(
+            idempotencyKey = "deposit:$paymentRef",
+            kind = "DEPOSIT",
+            postings = listOf(
+                Posting(Accounts.pspClearing(currency), currency, -amount),
+                Posting(Accounts.cash(playerId, currency), currency, amount),
             ),
+            metadata = mapOf("playerId" to playerId, "paymentRef" to paymentRef),
         )
     }
 
     /** Debit a withdrawal. Fails with [InsufficientFundsException] rather than overdrawing. */
     fun withdraw(playerId: String, amount: Long, currency: String, withdrawalId: String): Receipt {
+        return ledger.append(withdrawalRequest(playerId, amount, currency, withdrawalId))
+    }
+
+    private fun withdrawalRequest(playerId: String, amount: Long, currency: String, withdrawalId: String): TransactionRequest {
         require(amount > 0) { "withdrawal must be positive" }
-        return ledger.append(
-            TransactionRequest(
-                idempotencyKey = "withdrawal:$withdrawalId",
-                kind = "WITHDRAWAL",
-                postings = listOf(
-                    Posting(Accounts.cash(playerId, currency), currency, -amount),
-                    Posting(Accounts.pspClearing(currency), currency, amount),
-                ),
-                metadata = mapOf("playerId" to playerId, "withdrawalId" to withdrawalId),
+        return TransactionRequest(
+            idempotencyKey = "withdrawal:$withdrawalId",
+            kind = "WITHDRAWAL",
+            postings = listOf(
+                Posting(Accounts.cash(playerId, currency), currency, -amount),
+                Posting(Accounts.pspClearing(currency), currency, amount),
             ),
+            metadata = mapOf("playerId" to playerId, "withdrawalId" to withdrawalId),
         )
     }
 
@@ -82,22 +89,34 @@ class SportsbookWallet(private val ledger: Ledger) {
      * [InsufficientFundsException]. There is no window for a double spend.
      */
     fun placeBet(playerId: String, betId: String, stake: Long, currency: String, selection: String = ""): Receipt {
-        require(stake > 0) { "stake must be positive" }
-        return ledger.append(
-            TransactionRequest(
-                idempotencyKey = placementKey(betId),
-                kind = "BET_PLACED",
-                postings = listOf(
-                    Posting(Accounts.cash(playerId, currency), currency, -stake),
-                    Posting(Accounts.openBets(playerId, currency), currency, stake),
-                ),
-                metadata = buildMap {
-                    put("betId", betId)
-                    put("playerId", playerId)
-                    if (selection.isNotEmpty()) put("selection", selection)
-                },
-            ),
-        )
+        return ledger.append(placementRequest(playerId, betId, stake, currency, selection))
+    }
+
+    /**
+     * Submit a placement without cancelling it when a caller stops waiting.
+     * The returned future completes only when the ledger has a definitive outcome.
+     */
+    fun placeBetAsync(playerId: String, betId: String, stake: Long, currency: String, selection: String = "") =
+        ledger.submit(placementRequest(playerId, betId, stake, currency, selection))
+
+    /** True once this bet's placement has committed. */
+    fun hasBetPlacement(betId: String) = ledger.findByIdempotencyKey(placementKey(betId)) != null
+
+    /** Whether a confirmed deposit reference already exists, regardless of its original amount. */
+    internal fun hasDeposit(paymentRef: String) = ledger.findByIdempotencyKey("deposit:$paymentRef") != null
+
+    /** Simulator writes wait for their original future before publishing an accepted/refused event. */
+    internal fun depositDefinitive(playerId: String, amount: Long, currency: String, ref: String) =
+        awaitDefinitive(depositRequest(playerId, amount, currency, ref))
+    internal fun withdrawDefinitive(playerId: String, amount: Long, currency: String, ref: String) =
+        awaitDefinitive(withdrawalRequest(playerId, amount, currency, ref))
+    internal fun cashOutDefinitive(betId: String, amount: Long) =
+        awaitDefinitive(settlementRequest(betId, "BET_CASHED_OUT", amount))
+
+    private fun awaitDefinitive(request: TransactionRequest): Receipt = try {
+        ledger.submit(request).join()
+    } catch (e: CompletionException) {
+        throw (e.cause as? RuntimeException ?: e)
     }
 
     /** Bet won: return [payout] (stake included) to the player. */
@@ -120,7 +139,9 @@ class SportsbookWallet(private val ledger: Ledger) {
 
     // ---------------------------------------------------------------------
 
-    private fun settle(betId: String, kind: String, payout: Long): Receipt {
+    private fun settle(betId: String, kind: String, payout: Long): Receipt = ledger.append(settlementRequest(betId, kind, payout))
+
+    private fun settlementRequest(betId: String, kind: String, payout: Long): TransactionRequest {
         require(payout >= 0) { "payout cannot be negative" }
         val p = placement(betId)
         val cur = p.currency
@@ -131,17 +152,32 @@ class SportsbookWallet(private val ledger: Ledger) {
             if (payout > 0) add(Posting(Accounts.cash(p.playerId, cur), cur, payout))
             if (houseDelta != 0L) add(Posting(Accounts.revenue(cur), cur, houseDelta))
         }
-        return ledger.append(
-            TransactionRequest(
-                idempotencyKey = settlementKey(betId), // ONE key for every outcome: exactly-once
-                kind = kind,
-                postings = postings,
-                metadata = mapOf("betId" to betId, "playerId" to p.playerId, "placementSeq" to p.seq.toString()),
-            ),
+        return TransactionRequest(
+            idempotencyKey = settlementKey(betId), // ONE key for every outcome: exactly-once
+            kind = kind,
+            postings = postings,
+            metadata = mapOf("betId" to betId, "playerId" to p.playerId, "placementSeq" to p.seq.toString()),
         )
     }
 
     private data class Placement(val seq: Long, val playerId: String, val stake: Long, val currency: String)
+
+    private fun placementRequest(playerId: String, betId: String, stake: Long, currency: String, selection: String): TransactionRequest {
+        require(stake > 0) { "stake must be positive" }
+        return TransactionRequest(
+            idempotencyKey = placementKey(betId),
+            kind = "BET_PLACED",
+            postings = listOf(
+                Posting(Accounts.cash(playerId, currency), currency, -stake),
+                Posting(Accounts.openBets(playerId, currency), currency, stake),
+            ),
+            metadata = buildMap {
+                put("betId", betId)
+                put("playerId", playerId)
+                if (selection.isNotEmpty()) put("selection", selection)
+            },
+        )
+    }
 
     /** Reconstruct the bet from its placement entry, the single source of truth. */
     private fun placement(betId: String): Placement {

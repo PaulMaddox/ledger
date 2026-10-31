@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ledger Console</title>
+<link rel="stylesheet" href="/app.css">
+</head>
+<body>
+<!--
+  Ledger Console: a single-page dashboard over the running ledger.
+  Four views (customer, operator, regulator, simulator) share one header.
+  All behaviour lives in app.js; all data comes from /api/* on the same server.
+-->
+<header class="topbar">
+  <div class="brand">
+    <span class="mark" aria-hidden="true"></span>
+    <div><b>Ledger Console</b><span id="ledgerId">sportsbook-web</span></div>
+  </div>
+  <nav class="personas" role="tablist" aria-label="Persona">
+    <a href="#customer" role="tab" data-view="customer">Customer</a>
+    <a href="#operator" role="tab" data-view="operator">Operator</a>
+    <a href="#regulator" role="tab" data-view="regulator">Regulator</a>
+    <a href="#simulator" role="tab" data-view="simulator">Simulator <span class="simdot" id="simDot" title="Simulator state"></span></a>
+  </nav>
+  <div class="tip" id="tip">
+    <div><span>entries</span><b id="tipEntries">0</b></div>
+    <div><span>chain head</span><b id="tipChain">–</b></div>
+    <div><span>signed up to</span><b id="tipSigned">–</b></div>
+  </div>
+</header>
+<div class="demo-note">Demonstration only: no authentication. The tabs switch views, they do not control access.</div>
+
+<main>
+<!-- ============================== CUSTOMER ============================== -->
+<section class="view" id="view-customer" hidden>
+  <div class="cust">
+    <aside class="panel picker">
+      <h2>Customers</h2>
+      <label class="sr" for="playerSearch">Find a customer</label>
+      <input id="playerSearch" type="search" placeholder="Find a customer, e.g. alice or sim-00042" autocomplete="off">
+      <div class="playerlist" id="playerList"></div>
+      <p class="hint" id="playerCount"></p>
+    </aside>
+
+    <div class="cust-main">
+      <div class="panel account">
+        <div>
+          <div class="eyebrow" id="accAutomated">Customer</div>
+          <h1 id="accName">–</h1>
+        </div>
+        <div class="balances">
+          <div><span>Cash</span><b id="accCash">–</b></div>
+          <div><span>In open bets</span><b id="accEscrow">–</b></div>
+          <div><span>Ledger entries</span><b id="accEntries">–</b></div>
+        </div>
+      </div>
+
+      <div class="grid2">
+        <div class="panel">
+          <h2>Wallet</h2>
+          <form class="row" id="depositForm">
+            <label for="depAmount">Amount (€)</label>
+            <input id="depAmount" type="number" min="0.01" step="0.01" value="50.00">
+            <button type="submit" class="primary">Deposit</button>
+            <button type="button" id="withdrawBtn">Withdraw</button>
+          </form>
+          <div class="result" id="walletResult" aria-live="polite"></div>
+        </div>
+        <div class="panel">
+          <h2>Five devices at once</h2>
+          <p class="hint">Fires five simultaneous bets, each for the customer's <em>entire</em> cash balance, as if from five phones. The single writer lets exactly one through.</p>
+          <button type="button" id="raceBtn" class="primary">Bet everything from 5 devices</button>
+          <div class="race" id="raceResult" aria-live="polite"></div>
+        </div>
+      </div>
+
+      <div class="panel">
+        <div class="panel-head"><h2>Place a bet</h2><span class="hint">Select a price, then a stake.</span></div>
+        <div class="fixtures-cust" id="custFixtures"></div>
+        <form class="row slip" id="slip" hidden>
+          <span id="slipText"></span>
+          <label for="slipStake">Stake (€)</label>
+          <input id="slipStake" type="number" min="0.01" step="0.01" value="10.00">
+          <button type="submit" class="primary">Place bet</button>
+          <button type="button" id="slipCancel">Cancel</button>
+        </form>
+        <div class="result" id="betResult" aria-live="polite"></div>
+      </div>
+
+      <div class="grid2">
+        <div class="panel">
+          <h2>Bets</h2>
+          <div class="tablewrap"><table class="tbl" id="betTable"></table></div>
+        </div>
+        <div class="panel">
+          <div class="panel-head"><h2>History</h2><span class="hint">Verify any entry yourself, in this browser.</span></div>
+          <div class="tablewrap"><table class="tbl" id="historyTable"></table></div>
+        </div>
+      </div>
+      <div class="panel proofpanel" id="custProof" hidden></div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== OPERATOR ============================== -->
+<section class="view" id="view-operator" hidden>
+  <div class="kpis" id="kpis"></div>
+  <div class="grid3">
+    <div class="panel chart"><div class="panel-head"><h2>Throughput</h2><span class="hint">entries per second</span></div><svg id="chTps" viewBox="0 0 400 160" preserveAspectRatio="none" role="img" aria-label="Entries per second"></svg></div>
+    <div class="panel chart"><div class="panel-head"><h2>Gross gaming revenue</h2><span class="hint">house:revenue:EUR</span></div><svg id="chGgr" viewBox="0 0 400 160" preserveAspectRatio="none" role="img" aria-label="Gross gaming revenue"></svg></div>
+    <div class="panel chart"><div class="panel-head"><h2>Exposure</h2><span class="hint">payouts above stakes on open bets</span></div><svg id="chExp" viewBox="0 0 400 160" preserveAspectRatio="none" role="img" aria-label="Exposure"></svg></div>
+  </div>
+  <div class="grid-op">
+    <div class="panel">
+      <div class="panel-head"><h2>Fixtures</h2><button type="button" id="addFixture">Add fixture</button></div>
+      <div class="tablewrap"><table class="tbl" id="fixtureTable"></table></div>
+      <div class="result" id="settleResult" aria-live="polite"></div>
+    </div>
+    <div class="side">
+      <div class="panel">
+        <h2>Transactions by type</h2>
+        <div id="kindBars" class="bars"></div>
+      </div>
+      <div class="panel">
+        <h2>Live feed</h2>
+        <div class="feed" id="feed"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ============================== REGULATOR ============================== -->
+<section class="view" id="view-regulator" hidden>
+  <div class="grid2">
+    <div class="panel">
+      <div class="panel-head"><h2>Signed checkpoints</h2><button type="button" id="signNow">Sign a checkpoint now</button></div>
+      <p class="hint">Each checkpoint commits to every entry before it. Signatures are checked here in your browser with the ledger's public key, not taken on trust.</p>
+      <div class="tablewrap"><table class="tbl" id="sthTable"></table></div>
+    </div>
+    <div class="panel">
+      <h2>Independent audit</h2>
+      <p class="hint">Replays every entry from a snapshot of the journal files and re-checks every hash, signature and balance rule, as a regulator's own tooling would.</p>
+      <button type="button" id="auditBtn" class="primary">Run a full audit</button>
+      <div id="auditResult" class="report" aria-live="polite"></div>
+    </div>
+  </div>
+  <div class="grid2">
+    <div class="panel">
+      <h2>Prove history was never rewritten</h2>
+      <p class="hint">A consistency proof shows the older checkpoint is an exact prefix of the newer one.</p>
+      <form class="row" id="consForm">
+        <label for="consFrom">From checkpoint</label><select id="consFrom"></select>
+        <label for="consTo">to</label><select id="consTo"></select>
+        <button type="submit" class="primary">Verify</button>
+      </form>
+      <div id="consResult" class="report" aria-live="polite"></div>
+    </div>
+    <div class="panel">
+      <h2>Prove one entry</h2>
+      <p class="hint">An inclusion proof shows an entry is in a signed checkpoint, using about log₂(n) hashes.</p>
+      <form class="row" id="inclForm">
+        <label for="inclSeq">Entry #</label><input id="inclSeq" type="number" min="0" value="0">
+        <button type="submit" class="primary">Verify</button>
+      </form>
+      <div id="inclResult" class="report" aria-live="polite"></div>
+    </div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Player audit</h2><span class="hint">Balances recomputed entry by entry, then reconciled against the ledger.</span></div>
+    <form class="row" id="paForm">
+      <label for="paPlayer">Customer</label><input id="paPlayer" value="alice" autocomplete="off">
+      <button type="submit" class="primary">Audit</button>
+    </form>
+    <div id="paResult"></div>
+  </div>
+  <div class="panel">
+    <div class="panel-head"><h2>Tamper lab</h2><span class="hint">Each attack is made on a copy of the journal. The live ledger is never touched.</span></div>
+    <div class="tamper">
+      <button type="button" data-tamper="edit"><b>Edit in place</b><span>Inflate a deposit tenfold, leave the hashes alone</span></button>
+      <button type="button" data-tamper="rewrite"><b>Rewrite history</b><span>Inflate a deposit and recompute every later hash</span></button>
+      <button type="button" data-tamper="truncate"><b>Roll back</b><span>Delete the newest five entries</span></button>
+    </div>
+    <div id="tamperResult" class="report" aria-live="polite"></div>
+  </div>
+</section>
+
+<!-- ============================== SIMULATOR ============================== -->
+<section class="view" id="view-simulator" hidden>
+  <div class="panel simcontrols">
+    <form class="simform" id="simForm">
+      <div class="field"><label for="simCustomers">Automated customers</label><input id="simCustomers" type="number" min="1" max="20000" value="500"></div>
+      <div class="field"><label for="simRate">Operations per customer per minute</label><input id="simRate" type="number" min="1" max="600" value="60"></div>
+      <div class="field check"><input id="simAuto" type="checkbox" checked><label for="simAuto">Settle and open fixtures automatically</label></div>
+      <div class="buttons">
+        <button type="button" class="primary" id="simStart">Start</button>
+        <button type="button" id="simPause">Pause</button>
+        <button type="button" id="simStop">Stop</button>
+        <button type="submit" id="simApply">Apply settings</button>
+      </div>
+    </form>
+    <div class="simstats" id="simStats"></div>
+  </div>
+  <div class="panel wallpanel">
+    <div class="panel-head">
+      <h2>Customers, live</h2>
+      <div class="wallfilters">
+        <label class="sr" for="wallSearch">Find a customer</label>
+        <input id="wallSearch" type="search" placeholder="Filter, e.g. 00042" autocomplete="off">
+        <span class="seg" role="group" aria-label="Show">
+          <button type="button" data-wall="all" aria-pressed="true">All</button>
+          <button type="button" data-wall="refused" aria-pressed="false">Last action refused</button>
+        </span>
+      </div>
+    </div>
+    <p class="hint" id="wallNote"></p>
+    <div class="wall" id="wall"></div>
+  </div>
+</section>
+</main>
+<script src="/app.js"></script>
+</body>
+</html>

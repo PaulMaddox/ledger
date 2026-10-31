@@ -101,14 +101,22 @@ internal class Journal private constructor(
         }
 
         /** Read-only scan for offline verification. Never modifies anything. */
-        fun scanReadOnly(path: Path, onRecord: (ByteArray) -> Unit): ScanResult {
-            if (!Files.exists(path)) return ScanResult(0, 0, 0)
-            return FileChannel.open(path, READ).use { scan(it, onRecord) }
+        fun scanReadOnly(path: Path, onRecord: (ByteArray) -> Unit): ScanResult = scanReadOnly(path, 0L, onRecord)
+
+        /**
+         * Read-only scan starting at byte [from], which must be a record boundary (0, or the
+         * validBytes of an earlier scan). Lets a reader tail a growing journal, reading each
+         * record exactly once. A record still being written appears as a torn tail and is
+         * simply picked up by the next scan.
+         */
+        fun scanReadOnly(path: Path, from: Long, onRecord: (ByteArray) -> Unit): ScanResult {
+            if (!Files.exists(path)) return ScanResult(0, from, 0)
+            return FileChannel.open(path, READ).use { scan(it, onRecord, from) }
         }
 
-        private fun scan(ch: FileChannel, onRecord: (ByteArray) -> Unit): ScanResult {
+        private fun scan(ch: FileChannel, onRecord: (ByteArray) -> Unit, start: Long = 0L): ScanResult {
             val size = ch.size()
-            var pos = 0L
+            var pos = start
             var count = 0
             val header = ByteBuffer.allocate(HEADER)
             val crc = CRC32C()

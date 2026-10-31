@@ -23,7 +23,7 @@ rewrite) over the real source code.
 ## Quick start
 
 You need [Git](https://git-scm.com) to get the code. Everything else is installed by one
-command. Then one more runs the demo.
+command. Then one more runs the demo, or the web console.
 
 **Ubuntu** (22.04 or newer):
 
@@ -31,6 +31,7 @@ command. Then one more runs the demo.
 git clone https://github.com/PaulMaddox/ledger.git && cd ledger
 ./scripts/setup.sh     # installs JDK 21 if needed, then does a first build
 ./gradlew run          # runs the demo
+./gradlew web          # or: the web console, at http://localhost:8080
 ```
 
 **Windows** (10 or 11), in PowerShell:
@@ -39,6 +40,7 @@ git clone https://github.com/PaulMaddox/ledger.git && cd ledger
 git clone https://github.com/PaulMaddox/ledger.git; cd ledger
 powershell -ExecutionPolicy Bypass -File scripts\setup.ps1   # installs JDK 21 with winget if needed, then does a first build
 .\gradlew.bat run                                             # runs the demo
+.\gradlew.bat web                                             # or: the web console, at http://localhost:8080
 ```
 
 `-ExecutionPolicy Bypass` applies to that one run only: Windows blocks unsigned scripts
@@ -49,11 +51,91 @@ libraries are downloaded by the Gradle wrapper (`gradlew`) into your user folder
 first build, which needs internet access and takes a few minutes. Both setup scripts are
 safe to run again, and CI runs these exact commands on fresh Ubuntu and Windows machines.
 
+## Web console
+
+`./gradlew web` (Windows: `.\gradlew.bat web`) starts the ledger with a browser dashboard at
+<http://localhost:8080>. It has a view for each persona, all working against the same live
+ledger, so anything done in one view shows up in the others.
+
+![Simulator: 500 automated customers, each tile streaming its latest actions](docs/screenshots/simulator.png)
+
+- **Simulator.** Choose how many automated customers to run (500 by default) and how active
+  they are, then start, pause, resume or stop them. Each customer gets a tile streaming its
+  latest bets, deposits, withdrawals and cash-outs, green when accepted and red when the
+  ledger refuses. Counters and events belong to one run; late workers cannot pollute a restart.
+  Automatic rounds retry unfinished fixtures using their already-recorded result, without
+  starting duplicate settlement tasks.
+  Select a tile to open that customer.
+  Seed deposits are stable across retries and restarts; existing seed references are not funded again.
+  Betting selects from a current-open fixture index rather than sorting completed fixture history.
+  Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
+  Customer IDs always use ASCII digits, independent of the host locale.
+  Resizing the simulator wall preserves retained customers' activity, balances and refusal state.
+- **Customer.** Deposit, withdraw, bet on fixtures and cash out for any customer, human or
+  automated. The latest 40 bets are read from that customer's indexed history, not a global scan.
+  API monetary values are decimal strings in minor units, and browser inputs are parsed
+  without floating-point rounding. Wallet actions retain the original customer, amount
+  and idempotency reference after an uncertain response, so retries cannot silently become
+  different money movements.
+  Definitive bet rejections unlock the stake for correction, and late cash-out replies
+  cannot overwrite another selected customer's result.
+  Each slip keeps one bet ID, blocks overlapping submissions, and retries an
+  uncertain response with the same player and stake. "Bet everything from 5 devices" fires five simultaneous bets for the whole
+  balance of the customer captured at launch, cancelling if the selection changes before betting,
+  to show that exactly one gets through. Any entry can be **verified in the browser**:
+  it decodes and displays the canonical bytes (amounts in exact minor units), hashes them,
+  walks the Merkle proof, and checks the Ed25519 signature with
+  WebCrypto, rather than trusting the server.
+- **Operator.** Revenue, exposure, throughput and open-bet charts with exact cumulative
+  money totals, per-fixture liability,
+  backed by current-open indexes that discard settled bets and empty fixture buckets,
+  settlement buttons (all unfinished fixtures remain visible), and a live transaction feed.
+  Settlement waits for each original
+  in-flight placement's definitive result, including during queue overload.
+- **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
+  with signature caching bound to the exact evidence, display commitments and public key,
+  consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
+  corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
+  catching each, even while the simulator appends new entries. Audit snapshots reread
+  checkpoint records from disk through the captured checkpoint's position instead of
+  trusting cached copies or unverified tree sizes. Player audits compare posting replays
+  with immutable engine account states at each account's own last sequence.
+  Signing times are decoded from the signed bytes.
+  Checkpoint history and its read offset advance together only after a successful scan.
+
+| Operator | Customer |
+|---|---|
+| ![Operator view](docs/screenshots/operator.png) | ![Customer view](docs/screenshots/customer.png) |
+| **Regulator** | **Verified in the browser** |
+| ![Regulator view](docs/screenshots/regulator.png) | ![An entry verified in the browser](docs/screenshots/customer-verify.png) |
+
+Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
+ledger lives in a fresh temporary folder each run; with it, the ledger, signing key, fixture
+definitions and results survive restarts. Fixture state is flushed before fixtures or
+settlements are published, and startup reconciles it with recorded bets; missing or
+contradictory results stay unresolved rather than being guessed. The console is a **demonstration
+with no authentication**: the tabs are a view switch, not access control. Browser mutations
+are restricted to same-origin requests and valid Host names; by default it listens on
+localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so the project
+still has no runtime dependencies beyond the JDK.
+Failed startup closes all acquired services and releases the writer lock, allowing a retry on the same data directory.
+
+To listen on the LAN, explicitly allow the hostname or IP address users will access:
+`./gradlew web --args="--host 0.0.0.0 --allowed-host ledger.example --allowed-host 192.0.2.10"`.
+`--host` selects the bind address; repeat `--allowed-host` for additional exact hostnames or
+IP addresses (without schemes, ports or wildcards). IPv6 wildcard binding uses `--host ::`.
+Loopback access stays available with wildcard binding; other hosts and cross-origin
+mutations remain blocked. Exposing this unauthenticated demo lets reachable users move money.
+Following a link from the README or guide is allowed while Host validation remains enforced.
+Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
+requires a secure context with WebCrypto (HTTPS or localhost).
+
 ## Running
 
 | | Ubuntu | Windows |
 |---|---|---|
 | Run the demo | `./gradlew run` | `.\gradlew.bat run` |
+| Run the web console | `./gradlew web` | `.\gradlew.bat web` |
 | Run all tests | `./gradlew test` | `.\gradlew.bat test` |
 | Run one test class | `./gradlew test --tests "com.pam.ledger.MultiDeviceWalletTest"` | `.\gradlew.bat test --tests "com.pam.ledger.MultiDeviceWalletTest"` |
 
@@ -110,6 +192,7 @@ Then:
 ```
 python3 scripts/build-readme.py   # rebuild docs/index.html (Windows: python instead of python3)
 node scripts/check-guide.mjs      # headless check of the guide
+node scripts/check-web.mjs        # console browser regression checks (no dependencies)
 ```
 
 ### Setting up by hand
@@ -133,9 +216,12 @@ src/main/kotlin/com/pam/ledger/
   Signing.kt           signed tree heads, pluggable signer (HSM/KMS)
   Hashes.kt, EntryCodec.kt, Validation.kt, Model.kt, Errors.kt, AppendOnlyList.kt
   LedgerVerifier.kt    offline auditor
+  web/                 web console server: read model, book, simulator, regulator tools, HTTP API
+src/main/resources/web/  web console front end (index.html, app.js, app.css; no libraries)
 src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1–R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt
+  WebAppTest.kt              web console API, simulator, and bets racing settlement
 docs/
   readme.src.html      template for the interactive guide
   index.html           built guide, served by GitHub Pages (python3 scripts/build-readme.py)
@@ -143,6 +229,8 @@ scripts/
   setup.sh, setup.ps1  one-command developer setup for Ubuntu and Windows
   build-readme.py       builds docs/index.html from the template and real sources
   check-guide.mjs      headless check: debugger anchors, cloud data, test links
+  capture-screenshots.py  regenerates docs/screenshots/ from the running web console
+docs/screenshots/      web console screenshots used here and in the guide
 ```
 
 ## Before production

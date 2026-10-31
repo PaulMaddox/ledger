@@ -53,4 +53,5 @@ echo "==> First build: downloads Gradle and the libraries (a few minutes the fir
 
 echo
 echo "Ready. Run the demo with:   ./gradlew run"
+echo "Run the web console with:   ./gradlew web     (then open http://localhost:8080)"
 echo "Run the tests with:         ./gradlew test"

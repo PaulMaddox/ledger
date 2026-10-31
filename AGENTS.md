@@ -23,9 +23,12 @@ src/main/kotlin/com/pam/ledger/
   EntryCodec.kt, Hashes.kt   canonical byte format and domain-separated hashing
   Model.kt, Validation.kt, Errors.kt, AppendOnlyList.kt, LedgerVerifier.kt
   demo/Demo.kt
+  web/                   web console: read model, book, simulator, regulator tools, HTTP API
+src/main/resources/web/  web console front end: index.html, app.js, app.css (no libraries)
 src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1-R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
+  WebAppTest.kt              web console API, simulator, bets racing settlement
 docs/
   readme.src.html        SOURCE of the interactive guide (edit this)
   index.html             BUILT guide served by GitHub Pages (never edit by hand)
@@ -33,6 +36,8 @@ scripts/
   setup.sh, setup.ps1    one-command developer setup (Ubuntu, Windows); keep README in step
   build-readme.py        builds docs/index.html, embedding the real Kotlin sources and tests
   check-guide.mjs        headless check of the built guide
+  capture-screenshots.py regenerates docs/screenshots/ from the running web console
+docs/screenshots/        web console screenshots, used by README.md and the guide
 ```
 
 ## Commands
@@ -40,6 +45,7 @@ scripts/
 ```
 ./gradlew test                       # full test suite (JUnit 5); gradlew.bat on Windows
 ./gradlew run                        # demo: concurrent betting, audit, proofs
+./gradlew web                        # web console at http://localhost:8080
 python3 scripts/build-readme.py      # rebuild docs/index.html after ANY source or guide change
 node scripts/check-guide.mjs         # must print four PASS lines
 ```
@@ -94,6 +100,39 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 - New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`)
   and the suite run several times; an intermittent failure is a real bug.
 - Keep error types in the sealed `LedgerException` hierarchy.
+
+## Keeping the documentation in step
+
+Documentation is part of every change, not a follow-up. In the same pull request as any
+change it describes:
+
+- **README.md** must describe what the code now does: commands, features, layout.
+- **The guide** (`docs/readme.src.html`, then rebuild `docs/index.html`) must match the code.
+- **Screenshots** must be regenerated when the visible UI changes (layout, styles,
+  wording, or displayed content). Backend or API changes alone do not require new
+  screenshots when the rendered UI is unchanged:
+
+  ```
+  ./gradlew web --args="--port 18080"     # terminal 1: a fresh ledger
+  python3 scripts/capture-screenshots.py  # terminal 2 (needs Playwright: see the script)
+  ```
+
+  Then look at every image before committing: screenshots have caught real bugs here,
+  such as every view showing at once. Commit the updated files in `docs/screenshots/`.
+- A PR that changes behaviour without updating these is incomplete. Say in the PR
+  description which documents and screenshots were updated, or why none needed to be.
+
+## Changing the web console
+
+- The web layer is a **client** of the ledger. Every money movement goes through
+  `SportsbookWallet` (or `Book`, which uses it); never write ledger state any other way.
+- Dashboards read from `ReadModel`, which tails the ledger. Never base a money decision on
+  it: balances shown to users come from the ledger itself.
+- Placing a bet and settling its fixture are coordinated by the per-fixture lock in `Book`.
+  Keep it, and keep the race test in `WebAppTest`.
+- Keep the front end dependency-free (no frameworks, CDNs or build step) and keep the
+  in-browser verification honest: the browser must compute the hashes and check the
+  signature itself, never just display the server's verdict.
 
 ## Changing the guide
 

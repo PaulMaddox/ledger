@@ -17,6 +17,15 @@ kotlin { jvmToolchain(21) }
 
 application { mainClass.set("com.pam.ledger.demo.DemoKt") }
 
+// The ledger web console: ./gradlew web  (Windows: .\gradlew.bat web)
+// Options go after --args, e.g. ./gradlew web --args="--port 9090 --data build/web-ledger"
+tasks.register<JavaExec>("web") {
+    group = "application"
+    description = "Runs the ledger web console on http://localhost:8080"
+    classpath = sourceSets["main"].runtimeClasspath
+    mainClass.set("com.pam.ledger.web.WebAppKt")
+}
+
 tasks.test {
     useJUnitPlatform()
     testLogging {

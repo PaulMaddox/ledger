@@ -63,4 +63,5 @@ if ($LASTEXITCODE -ne 0) { throw "The first build failed (exit code $LASTEXITCOD
 
 Write-Host ''
 Write-Host 'Ready. Run the demo with:   .\gradlew.bat run'
+Write-Host 'Run the web console with:   .\gradlew.bat web     (then open http://localhost:8080)'
 Write-Host 'Run the tests with:         .\gradlew.bat test'
