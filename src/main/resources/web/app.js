@@ -53,6 +53,18 @@ async function api(path, { method = "GET", params } = {}) {
 const say = (el, ok, html) => { el.className = el.className.replace(/\b(ok|bad)\b/g, "").trim() + (ok === null ? "" : ok ? " ok" : " bad"); el.innerHTML = html; };
 const errText = e => esc(e.message || String(e));
 
+/** Polling must not restart keyboard navigation when the same control still exists. */
+function renderControls(el, html, keys) {
+  const selector = keys.map(k => `[data-${k}]`).join("");
+  const active = document.activeElement;
+  const identity = el.contains(active) && active.matches(selector) ? keys.map(k => active.getAttribute(`data-${k}`)) : null;
+  el.innerHTML = html;
+  if (identity) {
+    const replacement = Array.from(el.querySelectorAll(selector)).find(b => keys.every((k, i) => b.getAttribute(`data-${k}`) === identity[i]));
+    replacement?.focus({ preventScroll: true });
+  }
+}
+
 // ============================== crypto: verification in the browser ==============================
 // These mirror Hashes.kt and MerkleVerify (RFC 9162). The server supplies evidence;
 // every check below is computed here, so the verdict does not rely on the server.
@@ -246,8 +258,8 @@ function updateSlipControls() {
 async function loadPlayers() {
   const q = $("playerSearch").value;
   const r = await api("players?q=" + encodeURIComponent(q));
-  $("playerList").innerHTML = r.players.map(p =>
-    `<button type="button" data-player="${esc(p.id)}" aria-current="${p.id === player}"><span>${esc(p.id)}</span><span class="amt">${eur(p.cash)}</span></button>`).join("");
+  renderControls($("playerList"), r.players.map(p =>
+    `<button type="button" data-player="${esc(p.id)}" aria-current="${p.id === player}"><span>${esc(p.id)}</span><span class="amt">${eur(p.cash)}</span></button>`).join(""), ["player"]);
   $("playerCount").textContent = r.total > r.players.length ? `Showing ${r.players.length} of ${int.format(r.total)}. Search to narrow.` : `${int.format(r.total)} customers`;
 }
 $("playerList").addEventListener("click", e => {
@@ -277,19 +289,19 @@ async function refreshPlayer() {
   $("accCash").textContent = eur(p.cash);
   $("accEscrow").textContent = eur(p.openBets);
   $("accEntries").textContent = int.format(p.entries);
-  $("betTable").innerHTML = `<tr><th>Bet</th><th>Pick</th><th class="num">Stake</th><th class="num">Returns</th><th></th></tr>` +
+  renderControls($("betTable"), `<tr><th>Bet</th><th>Pick</th><th class="num">Stake</th><th class="num">Returns</th><th></th></tr>` +
     (p.bets.length ? p.bets.map(b => `<tr>
       <td>${esc(b.fixture)}</td><td>${esc(b.selection)} @ ${odds(b.odds)}</td><td class="num">${eur(b.stake)}</td>
       <td class="num">${b.open ? `<span class="hint">to win ${eur(b.potentialPayout)}</span>` : eur(b.payout)}</td>
-      <td>${b.open ? `<button type="button" data-cashout="${esc(b.betId)}">Cash out</button>` : `<span class="pill ${b.outcome === "WON" ? "ok" : b.outcome === "LOST" ? "bad" : "mut"}">${esc(b.outcome)}</span>`}</td></tr>`).join("")
-      : `<tr><td colspan="5" class="hint">No bets yet.</td></tr>`);
-  $("historyTable").innerHTML = `<tr><th>#</th><th>Type</th><th class="num">Cash</th><th>Time</th><th></th></tr>` +
+      <td>${b.open ? `<button type="button" data-player="${esc(p.id)}" data-cashout="${esc(b.betId)}">Cash out</button>` : `<span class="pill ${b.outcome === "WON" ? "ok" : b.outcome === "LOST" ? "bad" : "mut"}">${esc(b.outcome)}</span>`}</td></tr>`).join("")
+      : `<tr><td colspan="5" class="hint">No bets yet.</td></tr>`), ["player", "cashout"]);
+  renderControls($("historyTable"), `<tr><th>#</th><th>Type</th><th class="num">Cash</th><th>Time</th><th></th></tr>` +
     p.history.map(h => {
       const cash = h.postings.find(x => x.account === `player:${p.id}:cash:EUR`);
       return `<tr><td class="num">${h.seq}</td><td>${esc(h.kind)}</td>
         <td class="num ${cash ? (BigInt(cash.amount) > 0n ? "pos" : "neg") : ""}">${cash ? (BigInt(cash.amount) > 0n ? "+" : "") + eur(cash.amount) : "–"}</td>
-        <td>${timeOf(h.time)}</td><td><button type="button" data-verify="${h.seq}">Verify</button></td></tr>`;
-    }).join("");
+        <td>${timeOf(h.time)}</td><td><button type="button" data-player="${esc(p.id)}" data-verify="${h.seq}">Verify</button></td></tr>`;
+    }).join(""), ["player", "verify"]);
 }
 $("betTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-cashout]");
@@ -346,10 +358,10 @@ async function walletAction(kind) {
 
 async function loadCustFixtures() {
   fixturesCache = await api("fixtures");
-  $("custFixtures").innerHTML = fixturesCache.filter(f => !f.result).slice(0, 9).map(f => `
+  renderControls($("custFixtures"), fixturesCache.filter(f => !f.result).slice(0, 9).map(f => `
     <div class="fx"><div class="teams">${esc(f.home)} v ${esc(f.away)} <span>${esc(f.id)}</span></div>
       <div class="prices">${["HOME", "DRAW", "AWAY"].map(s => `<button type="button" data-fx="${esc(f.id)}" data-sel="${s}" aria-pressed="${selection && selection.fixture === f.id && selection.sel === s}"><span>${s.toLowerCase()}</span><b>${odds(f.odds[s])}</b></button>`).join("")}</div>
-    </div>`).join("") || `<p class="hint">No open fixtures. The operator can add one.</p>`;
+    </div>`).join("") || `<p class="hint">No open fixtures. The operator can add one.</p>`, ["fx", "sel"]);
 }
 $("custFixtures").addEventListener("click", e => {
   const b = e.target.closest("[data-fx]");
@@ -474,7 +486,7 @@ async function refreshOperator() {
 
 async function refreshFixtures() {
   const fx = await api("fixtures");
-  $("fixtureTable").innerHTML = `<tr><th>Fixture</th><th class="num">Home / Draw / Away</th><th class="num">Open bets</th><th class="num">Staked</th><th class="num">Liability H / D / A</th><th>Result</th></tr>` +
+  renderControls($("fixtureTable"), `<tr><th>Fixture</th><th class="num">Home / Draw / Away</th><th class="num">Open bets</th><th class="num">Staked</th><th class="num">Liability H / D / A</th><th>Result</th></tr>` +
     fx.map(f => `<tr>
       <td><b>${esc(f.id)}</b> ${esc(f.home)} v ${esc(f.away)}</td>
       <td class="num">${odds(f.odds.HOME)} / ${odds(f.odds.DRAW)} / ${odds(f.odds.AWAY)}</td>
@@ -484,7 +496,7 @@ async function refreshFixtures() {
         ? `<span class="settle">${["HOME", "DRAW", "AWAY", "VOID"].map(r => `<button type="button" data-settle="${esc(f.id)}" data-result="${r}">${r[0] + r.slice(1).toLowerCase()}</button>`).join("")}</span>`
         : f.result !== "LEGACY_UNRESOLVED" && !f.settlementComplete
           ? `<span class="settle"><span class="pill mut">${esc(f.result)} · settlement pending</span><button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume</button></span>`
-          : `<span class="pill mut">${esc(f.result)}</span>`}</td></tr>`).join("");
+          : `<span class="pill mut">${esc(f.result)}</span>`}</td></tr>`).join(""), ["settle", "result"]);
 }
 $("fixtureTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-settle]");
@@ -731,10 +743,10 @@ async function simAction(action, withSettings) {
   try {
     await api("simulator", { method: "POST", params: { ...(withSettings ? simSettings() : {}), ...(action ? { action } : {}) } });
     delete $("simForm").dataset.dirty;
-  } catch (e) { alertInline(errText(e)); }
+    say($("simResult"), null, "");
+  } catch (e) { say($("simResult"), false, errText(e)); }
   refreshSim();
 }
-function alertInline(msg) { $("wallNote").innerHTML = `<span style="color:var(--c-bad)">${msg}</span>`; }
 $("simForm").addEventListener("input", () => { $("simForm").dataset.dirty = "1"; });
 $("simForm").addEventListener("submit", e => { e.preventDefault(); simAction(null, true); });
 $("simStart").addEventListener("click", () => simAction("start", true));
@@ -858,8 +870,9 @@ async function refreshChaos() {
     say($("chaosStoreStatus"), data.available ? null : false, data.available ?
       "Main store available. Each experiment stops the simulator; changes remain in the real ledger." :
       `${esc(data.reason)} <a href="#administrator">Reset the main store</a> before running another experiment.`);
-    $("chaosScenarios").innerHTML = data.scenarios.map(s =>
-      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" disabled>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join("");
+    const enabled = chaosAvailable && !chaosSubmitting && $("chaosConfirmation").value === "CHAOS ON MAIN STORE";
+    renderControls($("chaosScenarios"), data.scenarios.map(s =>
+      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" ${enabled ? "" : "disabled"}>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join(""), ["chaos"]);
     updateChaosControls();
     $("chaosHistory").innerHTML = data.history.length ? data.history.map(r =>
       `<article><div class="panel-head"><b>${esc(r.name)}</b><span class="pill ${r.passed ? "ok" : "bad"}">${r.passed ? "Expected protection observed" : "Protection failed"}</span></div><p>${esc(r.evidence)}</p><p class="hint">${esc(timeOf(r.t))} · ${r.millis} ms · ${esc(r.scope)} · ${r.available ? "reopened" : "STOPPED - reset required"}</p></article>`).join("") :
