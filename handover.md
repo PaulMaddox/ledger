@@ -17,7 +17,8 @@ Copilot's review raised 22 findings. **14 are fixed, committed and pushed.** Eac
 | `d7abe6c` | Exact payout/cash-out arithmetic; placement holds lock until definitive; retries replay after settlement; resumable settlement; persisted fixtures + no id reuse; simulator event ordering, cursor, per-customer cash-outs (4430747738, 4430747759, 4430747771, 4430747782, 4430747794, 4430747897, 4430747913, 4430747930, 4430747945, 4430747978) |
 | `cfef535` | Cross-site request protection (Host check, `X-Ledger-Console` header on POSTs, Origin check); paths decoded once (4430747804, 4430747961) |
 | `0f1a035` | Player audit pinned to each account's `lastSeq` (4430747991) |
-| next commit | Checkpoint history tails `checkpoints.journal` via new `Journal.scanReadOnly(path, from)`; burst test fails on old code (4430747872) |
+| `2eb4c24` | Checkpoint history tails `checkpoints.journal` via new `Journal.scanReadOnly(path, from)`; burst test fails on old code (4430747872) |
+| `f43009a` | (owner/Copilot) `verifyEntry` green only when `sig === true`. Partly addresses 4430747824; see item 1 below |
 
 ## Remaining: 8 findings, all in the browser and the tamper lab
 
@@ -25,7 +26,7 @@ Fix each one separately. For each: commit and push, reply on its review thread e
 
 **Verification honesty** in `src/main/resources/web/app.js` (most important):
 
-1. **4430747824**: `verifyEntry` treats `sig === null` (no Ed25519 in the browser) as success. Show green only when `sig === true`; `null` must give an amber "incomplete" verdict.
+1. **4430747824**: *partly done in `f43009a`*: green now requires `sig === true`. What remains: when `sig === null` (no Ed25519 in this browser), show an amber "incomplete: signature could not be checked here" verdict instead of red "FAILED". Then reply on the thread and resolve it.
 2. **4430747844**: the panel shows `p.entry` fields from the server, not the bytes that were verified. Decode `entryBytes` in the browser and render *those* fields. The format is documented in `EntryCodec.kt`:
    - magic `PAML` (int32), then version (u8), seq (i64), timestamp (i64)
    - prevChainHash (32 bytes), then txId (two i64)
