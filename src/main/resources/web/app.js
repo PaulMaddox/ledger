@@ -462,7 +462,8 @@ $("consForm").addEventListener("submit", async e => {
     const sa = await verifySignature(r.publicKey, r.from.signature, b64(r.from.signingBytes));
     const sb = await verifySignature(r.publicKey, r.to.signature, b64(r.to.signingBytes));
     const sigs = sa === null || sb === null ? null : sa && sb;
-    $("consResult").innerHTML = `<div class="verdict ${ok && sigs !== false ? "ok" : "bad"}">${ok ? `The ${int.format(from)}-entry ledger is an exact prefix of the ${int.format(to)}-entry ledger: nothing was changed or removed in between.` : "Consistency proof FAILED."}</div>
+    const verified = ok && sigs === true;
+    $("consResult").innerHTML = `<div class="verdict ${verified ? "ok" : "bad"}">${verified ? `The ${int.format(from)}-entry ledger is an exact prefix of the ${int.format(to)}-entry ledger: nothing was changed or removed in between.` : sigs === null ? "Verification incomplete: this browser could not check the checkpoint signatures." : "Consistency proof or signature verification FAILED."}</div>
       <ol class="steps">${step(ok, `Rebuilt both signed roots from ${r.proof.length} proof hashes in this browser`)}
       ${sigs === null ? "<li>This browser has no Ed25519 support to check the two signatures.</li>" : step(sigs, `Both checkpoint signatures ${sigs ? "valid" : "INVALID"}`)}</ol>`;
   } catch (err) { $("consResult").innerHTML = `<div class="verdict bad">${errText(err)}</div>`; }
