@@ -12,6 +12,7 @@ import com.pam.ledger.web.allowedRequestHosts
 import com.pam.ledger.TestSupport.config
 import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
+import java.io.ByteArrayInputStream
 import java.net.URI
 import java.net.Socket
 import java.net.ServerSocket
@@ -204,6 +205,63 @@ class WebAppTest {
         assertEquals(400, call(app, "POST", "regulator/tamper", mapOf("mode" to "explode")).first)
         assertEquals(404, call(app, "GET", "no/such/route").first)
         assertEquals(404, call(app, "POST", "fixtures/F999/settle", mapOf("result" to "HOME")).first)
+    }
+
+    @Test
+    fun `form bodies accept 16 KiB and reject larger encoded bodies without mutations`() = withApp { app ->
+        val limit = 16 * 1024
+        for (chunked in listOf(false, true)) {
+            val bodies = listOf(limit - 1, limit, limit + 1, limit * 4).map { size ->
+                ("padding=" + "x".repeat(size - "padding=".length)).toByteArray(Charsets.UTF_8)
+            } + ("padding=" + "€".repeat(limit / 3)).toByteArray(Charsets.UTF_8)
+            for (body in bodies) {
+                val before = call(app, "GET", "fixtures").second
+                val publisher = if (chunked) HttpRequest.BodyPublishers.ofInputStream { ByteArrayInputStream(body) }
+                    else HttpRequest.BodyPublishers.ofByteArray(body)
+                val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/api/fixtures"))
+                    .header("Origin", "http://127.0.0.1:${app.port}")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .POST(publisher).timeout(Duration.ofSeconds(5)).build()
+                val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+                assertEquals(if (body.size <= limit) 200 else 413, response.statusCode(), response.body())
+                if (body.size > limit) {
+                    assertTrue(response.body().contains("\"error\":\"payload_too_large\""), response.body())
+                    assertEquals(before, call(app, "GET", "fixtures").second)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `oversized form uploads are rejected before the client finishes streaming`() {
+        LedgerWebApp.start(WebOptions(port = 0, host = "0.0.0.0", dataDir = tempDir(),
+            allowedHosts = setOf("ledger.example"))).use { app ->
+            val before = call(app, "GET", "players/alice").second
+            for (chunked in listOf(false, true)) {
+                Socket("127.0.0.1", app.port).use { socket ->
+                    socket.soTimeout = 5_000
+                    val framing = if (chunked) "Transfer-Encoding: chunked" else "Content-Length: ${Long.MAX_VALUE}"
+                    val request = buildString {
+                        append("POST /api/players/alice/deposit?amount=1&ref=oversized HTTP/1.1\r\n")
+                        append("Host: ledger.example:${app.port}\r\nOrigin: http://ledger.example:${app.port}\r\n")
+                        append("Content-Type: application/x-www-form-urlencoded\r\n$framing\r\n\r\n")
+                        // No terminating chunk or full fixed-length body: rejection must not wait for EOF.
+                        if (chunked) {
+                            val body = "padding=" + "x".repeat(16 * 1024 + 1 - "padding=".length)
+                            append("${body.length.toString(16)}\r\n$body\r\n")
+                        }
+                    }
+                    socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+                    val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
+                    assertTrue(reader.readLine().startsWith("HTTP/1.1 413"))
+                    val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
+                    val length = headers.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+                    val body = CharArray(length) { reader.read().also { assertTrue(it >= 0) }.toChar() }.concatToString()
+                    assertTrue(body.contains("\"error\":\"payload_too_large\""), body)
+                }
+                assertEquals(before, call(app, "GET", "players/alice").second)
+            }
+        }
     }
 
     @Test

@@ -118,6 +118,10 @@ with no authentication**: the tabs are a view switch, not access control. Browse
 are restricted to same-origin requests and valid Host names; by default it listens on
 localhost. It uses the JDK's built-in HTTP server and no front-end libraries, so the project
 still has no runtime dependencies beyond the JDK.
+API POST form bodies are limited to **16 KiB (16,384 bytes)** of encoded data, before
+UTF-8 or form decoding. Larger bodies return HTTP **413** (`payload_too_large`) without
+performing the operation. Declared oversized lengths are rejected before reading; chunked
+uploads are checked with a bounded read of at most 16,385 bytes (one byte to detect overflow).
 Failed startup closes all acquired services and releases the writer lock, allowing a retry on the same data directory.
 
 To listen on the LAN, explicitly allow the hostname or IP address users will access:
