@@ -11,6 +11,7 @@ import java.nio.file.Files
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicInteger
 import kotlin.random.Random
+import kotlin.system.exitProcess
 
 /**
  * End-to-end tour: 50 players, 16 threads hammering bets concurrently, then an
@@ -76,6 +77,9 @@ fun main() {
     }
 
     println()
-    println(LedgerVerifier.verify(dir, "sportsbook-demo", listOf(signer.publicKey)))
+    val report = LedgerVerifier.verify(dir, "sportsbook-demo", listOf(signer.publicKey))
+    println(report)
     println("Ledger files are in $dir")
+    // Exit non-zero if the independent audit fails, so CI treats it as a failure.
+    if (!report.ok) exitProcess(1)
 }
