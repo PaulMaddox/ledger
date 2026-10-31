@@ -155,6 +155,25 @@ Verify addresses against the actual private endpoints before applying it. For
 PowerShell, put the array in a standard ARM parameters JSON file and pass
 `--parameters @<file>` to avoid native-command JSON quoting differences.
 
+### Temporarily testing without egress filtering
+
+For an explicitly approved network diagnostic, detach the NSG rather than delete
+its rules. NAT and private endpoints stay configured, but **general internet
+egress is permitted** while the NSG is detached:
+
+```bash
+az network vnet subnet update --subscription "$SUBSCRIPTION" -g ledger \
+  --vnet-name ledger-app-vnet -n container-apps --remove networkSecurityGroup
+
+# Restore filtering when the diagnostic is complete:
+az network vnet subnet update --subscription "$SUBSCRIPTION" -g ledger \
+  --vnet-name ledger-app-vnet -n container-apps \
+  --network-security-group ledger-app-egress
+```
+
+An unchanged app failure with filtering removed is not a reason to weaken the
+permanent policy further. Inspect the environment/ARM operation errors instead.
+
 ## GitHub Actions and Azure OIDC
 
 Bicep creates `ledger-github-deploy` and a federated credential for
