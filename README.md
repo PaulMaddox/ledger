@@ -45,12 +45,10 @@ winget install --id Python.Python.3.12        # optional: guide rebuild
 winget install --id OpenJS.NodeJS.LTS         # optional: guide check
 ```
 
-Gradle is easiest with [Scoop](https://scoop.sh) or [Chocolatey](https://chocolatey.org):
+Install Gradle 8.14.3 with [Chocolatey](https://chocolatey.org):
 
 ```powershell
-scoop install gradle                    # Scoop installs the latest Gradle
-# or
-choco install gradle --version=8.14.3   # Chocolatey, run as Administrator
+choco install gradle --version=8.14.3   # run as Administrator
 ```
 
 Alternatively, download `gradle-8.14.3-bin.zip` from
