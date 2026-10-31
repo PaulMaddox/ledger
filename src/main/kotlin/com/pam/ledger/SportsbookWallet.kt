@@ -55,13 +55,13 @@ class SportsbookWallet(private val ledger: Ledger) {
     private fun depositRequest(playerId: String, amount: Long, currency: String, paymentRef: String): TransactionRequest {
         require(amount > 0) { "deposit must be positive" }
         return TransactionRequest(
-                idempotencyKey = "deposit:$paymentRef",
-                kind = "DEPOSIT",
-                postings = listOf(
-                    Posting(Accounts.pspClearing(currency), currency, -amount),
-                    Posting(Accounts.cash(playerId, currency), currency, amount),
-                ),
-                metadata = mapOf("playerId" to playerId, "paymentRef" to paymentRef),
+            idempotencyKey = "deposit:$paymentRef",
+            kind = "DEPOSIT",
+            postings = listOf(
+                Posting(Accounts.pspClearing(currency), currency, -amount),
+                Posting(Accounts.cash(playerId, currency), currency, amount),
+            ),
+            metadata = mapOf("playerId" to playerId, "paymentRef" to paymentRef),
         )
     }
 
@@ -73,13 +73,13 @@ class SportsbookWallet(private val ledger: Ledger) {
     private fun withdrawalRequest(playerId: String, amount: Long, currency: String, withdrawalId: String): TransactionRequest {
         require(amount > 0) { "withdrawal must be positive" }
         return TransactionRequest(
-                idempotencyKey = "withdrawal:$withdrawalId",
-                kind = "WITHDRAWAL",
-                postings = listOf(
-                    Posting(Accounts.cash(playerId, currency), currency, -amount),
-                    Posting(Accounts.pspClearing(currency), currency, amount),
-                ),
-                metadata = mapOf("playerId" to playerId, "withdrawalId" to withdrawalId),
+            idempotencyKey = "withdrawal:$withdrawalId",
+            kind = "WITHDRAWAL",
+            postings = listOf(
+                Posting(Accounts.cash(playerId, currency), currency, -amount),
+                Posting(Accounts.pspClearing(currency), currency, amount),
+            ),
+            metadata = mapOf("playerId" to playerId, "withdrawalId" to withdrawalId),
         )
     }
 
@@ -153,10 +153,10 @@ class SportsbookWallet(private val ledger: Ledger) {
             if (houseDelta != 0L) add(Posting(Accounts.revenue(cur), cur, houseDelta))
         }
         return TransactionRequest(
-                idempotencyKey = settlementKey(betId), // ONE key for every outcome: exactly-once
-                kind = kind,
-                postings = postings,
-                metadata = mapOf("betId" to betId, "playerId" to p.playerId, "placementSeq" to p.seq.toString()),
+            idempotencyKey = settlementKey(betId), // ONE key for every outcome: exactly-once
+            kind = kind,
+            postings = postings,
+            metadata = mapOf("betId" to betId, "playerId" to p.playerId, "placementSeq" to p.seq.toString()),
         )
     }
 
