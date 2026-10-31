@@ -6,3 +6,6 @@ out/
 .idea/
 *.iml
 .DS_Store
+
+# The Gradle wrapper jar must be committed (everything else *.jar stays ignored).
+!gradle/wrapper/gradle-wrapper.jar

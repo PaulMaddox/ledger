@@ -614,8 +614,9 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <div><code>Hashes.kt · EntryCodec.kt</code><span>Domain-separated SHA-256 and the canonical byte format.</span></div>
     <div><code>LedgerVerifier.kt</code><span>Offline auditor that needs only the files and a public key.</span></div>
   </div>
-  <pre class="cmd">gradle test          # 27 tests: Merkle, integrity, concurrency, multi-device regulatory suite
-gradle run           # demo: 16 threads of betting, then an independent audit and proofs</pre>
+  <pre class="cmd">./gradlew test       # 27 tests: Merkle, integrity, concurrency, multi-device regulatory suite
+./gradlew run        # demo: 16 threads of betting, then an independent audit and proofs
+                     # on Windows: gradlew.bat test, gradlew.bat run</pre>
   <div class="prose" style="display:grid;gap:10px">
     <h3>Before production</h3>
     <p>Keep the signing key in an HSM or cloud KMS by implementing <code>TreeHeadSigner</code>. Publish signed tree heads somewhere you do not control, such as a regulator endpoint or a transparency log, so even the operator cannot quietly fork history. Entries are held in memory for proofs and lookups; at very large scale move them to an indexed store or tile-based Merkle storage. Changing <code>AccountPolicy</code> changes what replay accepts, so version it alongside the journal.</p>

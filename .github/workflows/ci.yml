@@ -32,18 +32,20 @@ jobs:
           distribution: temurin
           java-version: "21"
 
-      # The repository has no Gradle wrapper, so pin the Gradle version here.
+      # Fail if gradle-wrapper.jar is not an official Gradle release: a tampered
+      # wrapper jar would run arbitrary code in CI and on every developer's machine.
+      - uses: gradle/actions/wrapper-validation@v5
+
+      # Caching only; the Gradle version comes from the wrapper.
       - uses: gradle/actions/setup-gradle@v5
-        with:
-          gradle-version: "8.14.3"
 
       - name: Run the test suite
-        run: gradle test --no-daemon
+        run: ./gradlew test --no-daemon
 
       # Concurrency bugs are often intermittent, so run the whole suite a second
       # time from scratch. A test that passes once and fails once is a real bug.
       - name: Run the test suite again (catches intermittent races)
-        run: gradle test --no-daemon --rerun-tasks
+        run: ./gradlew test --no-daemon --rerun-tasks
 
       # Guard against a silent "pass" with nothing tested (for example a JUnit
       # platform misconfiguration). Counts the JUnit XML results and fails if no
@@ -65,12 +67,12 @@ jobs:
           PY
 
       - name: Build and run the demo, which ends with an independent audit
-        run: gradle run --no-daemon
+        run: ./gradlew run --no-daemon
 
       # README.md documents running the demo as a standalone program; prove it works.
       - name: Run the demo from the installed launcher, as documented in README.md
         run: |
-          gradle installDist --no-daemon
+          ./gradlew installDist --no-daemon
           build/install/pam-ledger/bin/pam-ledger
 
       - name: Keep the test reports when something fails
@@ -113,3 +115,45 @@ jobs:
       # a cloud component is missing its rationale, or a test link is broken.
       - name: Check the guide
         run: node scripts/check-guide.mjs
+
+  setup:
+    # Proves the README's one-command setup and one-command demo work, by running
+    # them exactly as documented on fresh Ubuntu and Windows machines.
+    name: One-command setup (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v5
+
+      # Ubuntu runners default to an older JDK, so setup.sh installs JDK 21 itself.
+      - name: Set up (Ubuntu), as documented
+        if: runner.os == 'Linux'
+        run: ./scripts/setup.sh
+
+      - name: Run the demo (Ubuntu), as documented
+        if: runner.os == 'Linux'
+        run: ./gradlew run
+
+      # winget is not reliably available on GitHub's Windows runners, so JDK 21 is
+      # provided here and setup.ps1 takes its "already installed" path. This tests
+      # the script and the wrapper on Windows, but not the winget install itself.
+      - name: Provide JDK 21 (Windows runner only)
+        if: runner.os == 'Windows'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up (Windows), as documented
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+
+      - name: Run the demo (Windows), as documented
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: .\gradlew.bat run

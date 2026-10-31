@@ -20,91 +20,46 @@ rewrite) over the real source code.
 | Crash-safe | Receipts issued only after fsync; torn tails quarantined, mid-file damage refused |
 | Auditable | `LedgerVerifier` re-derives everything from the files and a public key |
 
-## Developer setup
+## Quick start
 
-| Tool | Version | Needed for |
-|---|---|---|
-| JDK | 21 (Eclipse Temurin recommended) | building, tests, the demo |
-| Gradle | 8.14.x (CI uses 8.14.3) | building, tests, the demo |
-| Git | any recent | cloning |
-| Python | 3.10 or newer | only to rebuild the interactive guide |
-| Node.js | 18 or newer | only to check the interactive guide |
+You need [Git](https://git-scm.com) to get the code. Everything else is installed by one
+command. Then one more runs the demo.
 
-The repository has no Gradle wrapper, so Gradle must be installed. The ledger has no
-runtime dependencies beyond the JDK; Gradle downloads the Kotlin compiler and the test
-libraries from Maven Central on the first build, so that build needs internet access.
-
-### Windows
-
-In PowerShell, using `winget` (built into Windows 10 and 11):
-
-```powershell
-winget install --id EclipseAdoptium.Temurin.21.JDK
-winget install --id Git.Git
-winget install --id Python.Python.3.12        # optional: guide rebuild
-winget install --id OpenJS.NodeJS.LTS         # optional: guide check
-```
-
-Install Gradle 8.14.3 with [Chocolatey](https://chocolatey.org):
-
-```powershell
-choco install gradle --version=8.14.3   # run as Administrator
-```
-
-Alternatively, download `gradle-8.14.3-bin.zip` from
-[gradle.org/releases](https://gradle.org/releases/), unzip it to `C:\Gradle`, and add
-`C:\Gradle\gradle-8.14.3\bin` to your `Path`. Open a new terminal afterwards so the
-updated `Path` and `JAVA_HOME` are picked up.
-
-### Ubuntu
-
-On Ubuntu 22.04 or 24.04:
+**Ubuntu** (22.04 or newer):
 
 ```bash
-sudo apt update
-sudo apt install -y openjdk-21-jdk git python3 unzip curl zip
+git clone https://github.com/PaulMaddox/ledger.git && cd ledger
+./scripts/setup.sh     # installs JDK 21 if needed, then does a first build
+./gradlew run          # runs the demo
 ```
 
-Do not use Ubuntu's own `gradle` package, which is far too old. Install Gradle 8.14.3
-with [SDKMAN!](https://sdkman.io):
+**Windows** (10 or 11), in PowerShell:
 
-```bash
-curl -s "https://get.sdkman.io" | bash
-source "$HOME/.sdkman/bin/sdkman-init.sh"
-sdk install gradle 8.14.3
+```powershell
+git clone https://github.com/PaulMaddox/ledger.git; cd ledger
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1   # installs JDK 21 with winget if needed, then does a first build
+.\gradlew.bat run                                             # runs the demo
 ```
 
-For the optional guide check you need Node.js 18 or newer. On Ubuntu 24.04,
-`sudo apt install -y nodejs` is enough; Ubuntu 22.04's package is too old, so use
-[nvm](https://github.com/nvm-sh/nvm) or the [NodeSource](https://github.com/nodesource/distributions)
-packages there.
+`-ExecutionPolicy Bypass` applies to that one run only: Windows blocks unsigned scripts
+by default, and this does not change any setting.
 
-### Check the installation
-
-Both platforms:
-
-```
-java -version     # should report version 21
-gradle --version  # should report Gradle 8.14.x and JVM 21
-```
+The only thing installed system-wide is JDK 21. Gradle, the Kotlin compiler and the test
+libraries are downloaded by the Gradle wrapper (`gradlew`) into your user folder on the
+first build, which needs internet access and takes a few minutes. Both setup scripts are
+safe to run again, and CI runs these exact commands on fresh Ubuntu and Windows machines.
 
 ## Running
 
-From the repository root, on Windows or Ubuntu:
+| | Ubuntu | Windows |
+|---|---|---|
+| Run the demo | `./gradlew run` | `.\gradlew.bat run` |
+| Run all tests | `./gradlew test` | `.\gradlew.bat test` |
+| Run one test class | `./gradlew test --tests "com.pam.ledger.MultiDeviceWalletTest"` | `.\gradlew.bat test --tests "com.pam.ledger.MultiDeviceWalletTest"` |
 
-```
-gradle test   # the full suite: Merkle, integrity, concurrency, multi-device regulatory tests
-gradle run    # the demo
-```
+Test reports are written to `build/reports/tests/test/index.html`.
 
-Test reports are written to `build/reports/tests/test/index.html`. To run one test
-class, for example the regulatory suite:
-
-```
-gradle test --tests "com.pam.ledger.MultiDeviceWalletTest"
-```
-
-### Running the demo
+### What the demo does
 
 The demo (`src/main/kotlin/com/pam/ledger/demo/Demo.kt`) creates a fresh ledger in a
 temporary folder. It then:
@@ -113,19 +68,6 @@ temporary folder. It then:
 2. has 16 threads place and settle bets concurrently;
 3. proves one deposit with a Merkle inclusion proof, and the ledger's history with a consistency proof;
 4. runs the independent verifier over the files it wrote.
-
-`gradle run` builds and runs it in one step. To run it as a standalone program instead,
-build a distribution once and then call its launcher:
-
-```bash
-gradle installDist
-build/install/pam-ledger/bin/pam-ledger          # Ubuntu
-```
-
-```powershell
-gradle installDist
-build\install\pam-ledger\bin\pam-ledger.bat      # Windows
-```
 
 Output from a real run (yours will differ in counts, timings and hashes):
 
@@ -149,12 +91,32 @@ Bets rejected for funds are expected: the threads deliberately try to overspend,
 ledger refuses. The ledger files stay in the temporary folder so you can inspect them.
 The demo exits with a non-zero status if the audit fails, which is how CI uses it.
 
-### Rebuilding the interactive guide
+To run the demo as a standalone program instead, build a distribution once with
+`./gradlew installDist` (Windows: `.\gradlew.bat installDist`), then run
+`build/install/pam-ledger/bin/pam-ledger` (Windows: `build\install\pam-ledger\bin\pam-ledger.bat`).
+
+### Editing the interactive guide
+
+Rebuilding and checking the guide also needs Python 3.10+ and Node.js 18+. Add them by
+running the setup script with an extra option:
 
 ```
-python3 scripts/build-readme.py   # rebuild docs/index.html (on Windows: use python -X utf8 instead of python3)
+./scripts/setup.sh --with-guide-tools                                        # Ubuntu
+powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -WithGuideTools   # Windows
+```
+
+Then:
+
+```
+python3 scripts/build-readme.py   # rebuild docs/index.html (Windows: python instead of python3)
 node scripts/check-guide.mjs      # headless check of the guide
 ```
+
+### Setting up by hand
+
+The scripts only automate this: install JDK 21 (on Ubuntu `sudo apt install openjdk-21-jdk`;
+on Windows `winget install EclipseAdoptium.Temurin.21.JDK`), then run any `gradlew` command.
+Do not install Gradle separately; the wrapper fetches the exact version CI uses.
 
 Contributing, including with coding agents: read [`AGENTS.md`](AGENTS.md) first. It lists
 the invariants that must never be broken and the branch-and-pull-request workflow.
@@ -178,6 +140,7 @@ docs/
   readme.src.html      template for the interactive guide
   index.html           built guide, served by GitHub Pages (python3 scripts/build-readme.py)
 scripts/
+  setup.sh, setup.ps1  one-command developer setup for Ubuntu and Windows
   build-readme.py       builds docs/index.html from the template and real sources
   check-guide.mjs      headless check: debugger anchors, cloud data, test links
 ```
