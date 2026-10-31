@@ -4,8 +4,8 @@ A cryptographically verifiable, append-only, double-entry ledger for a sportsboo
 player account management (PAM) platform, written in Kotlin with no runtime
 dependencies beyond JDK 21.
 
-**Start with the interactive guide: [`docs/README.html`](docs/README.html).** Open it
-in a browser. It includes an architecture map, hash-chain and Merkle-proof
+**Start with the interactive guide: [paulmaddox.github.io/ledger](https://paulmaddox.github.io/ledger/).**
+It includes an architecture map, hash-chain and Merkle-proof
 playgrounds, and a step-through debugger that walks six scenarios (bet placement,
 double-spend race, cash-out vs result, redelivered webhook, power cut, history
 rewrite) over the real source code.
@@ -44,7 +44,7 @@ src/test/kotlin/com/pam/ledger/
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt
 docs/
   readme.src.html      template for the interactive guide
-  README.html          built guide (python3 scripts/build-readme.py)
+  index.html           built guide, served by GitHub Pages (python3 scripts/build-readme.py)
 ```
 
 ## Before production
