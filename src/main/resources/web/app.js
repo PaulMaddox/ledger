@@ -25,7 +25,9 @@ const uuid = () => crypto.randomUUID();
 /** Call the API. Resolves with the JSON body; rejects with {status, error, message} for non-2xx. */
 async function api(path, { method = "GET", params } = {}) {
   const body = params ? new URLSearchParams(params) : undefined;
-  const res = await fetch("/api/" + path, { method, body });
+  // The header marks requests as coming from this page; the server refuses changes without it,
+  // which is what stops other websites from submitting forms to the console.
+  const res = await fetch("/api/" + path, { method, body, headers: { "X-Ledger-Console": "1" } });
   const data = await res.json().catch(() => ({}));
   if (!res.ok) throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
   return data;

@@ -173,15 +173,42 @@ class LedgerWebApp private constructor(
 
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
 
+    /**
+     * Listening on localhost is not enough on its own: any web page the user visits can make
+     * their browser send requests here. So:
+     *  - the Host header must name this server (defeats DNS rebinding, where a hostile site's
+     *    name is re-pointed at 127.0.0.1 so the browser treats this server as same-origin);
+     *  - every POST must carry the X-Ledger-Console header, which a plain cross-site form cannot
+     *    set and a cross-site script cannot send without a CORS preflight this server never allows;
+     *  - a POST that does carry an Origin header must come from this server's own origin.
+     */
+    private fun checkRequestOrigin(ex: HttpExchange) {
+        val host = ex.requestHeaders.getFirst("Host")?.lowercase()
+        val accepted = setOf("localhost", "127.0.0.1", "[::1]", allowedHost.lowercase()).map { "$it:$port" }
+        if (host == null || host !in accepted) throw HttpError(403, "forbidden_host", "requests must address this server by its own name, e.g. http://localhost:$port/")
+        if (ex.requestMethod == "POST") {
+            if (ex.requestHeaders.getFirst("X-Ledger-Console") != "1") {
+                throw HttpError(403, "forbidden", "changes must come from the Ledger Console page itself")
+            }
+            val origin = ex.requestHeaders.getFirst("Origin")
+            if (origin != null && origin.lowercase() != "http://$host") throw HttpError(403, "forbidden_origin", "cross-origin request refused")
+        }
+        if (ex.requestMethod != "GET" && ex.requestMethod != "POST") throw HttpError(405, "method_not_allowed", "only GET and POST are supported")
+    }
+
+    /** Split the RAW path and decode each segment exactly once; "+" is literal in paths. */
+    private fun pathSegments(rawPath: String): List<String> =
+        rawPath.removePrefix("/api/").trimEnd('/').split('/').map { URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8) }
+
     private fun handle(ex: HttpExchange) {
         try {
+            checkRequestOrigin(ex)
             val uri = ex.requestURI
-            if (!uri.path.startsWith("/api/")) return serveStatic(ex, uri.path)
+            if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.rawPath)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
             if (ex.requestMethod == "POST") parseForm(ex.requestBody.readAllBytes().toString(Charsets.UTF_8), params)
-            val segments = uri.path.removePrefix("/api/").trimEnd('/').split('/').map { URLDecoder.decode(it, Charsets.UTF_8) }
-            respond(ex, 200, route(Request(ex.requestMethod, segments, params)))
+            respond(ex, 200, route(Request(ex.requestMethod, pathSegments(uri.rawPath), params)))
         } catch (e: Throwable) {
             val (status, code) = when (e) {
                 is HttpError -> e.status to e.code

@@ -25,11 +25,16 @@ import kotlin.test.assertTrue
 class WebAppTest {
     private val http = HttpClient.newHttpClient()
 
-    private fun call(app: LedgerWebApp, method: String, path: String, params: Map<String, Any> = emptyMap()): Pair<Int, String> {
+    private fun call(
+        app: LedgerWebApp, method: String, path: String, params: Map<String, Any> = emptyMap(),
+        headers: Map<String, String> = mapOf("X-Ledger-Console" to "1"),
+    ): Pair<Int, String> {
         val form = params.entries.joinToString("&") { (k, v) -> "$k=" + URLEncoder.encode(v.toString(), Charsets.UTF_8) }
         val uri = URI.create("http://127.0.0.1:${app.port}/api/$path" + if (method == "GET" && form.isNotEmpty()) "?$form" else "")
-        val req = HttpRequest.newBuilder(uri).method(method, if (method == "POST") HttpRequest.BodyPublishers.ofString(form) else HttpRequest.BodyPublishers.noBody())
-            .header("Content-Type", "application/x-www-form-urlencoded").build()
+        val builder = HttpRequest.newBuilder(uri).method(method, if (method == "POST") HttpRequest.BodyPublishers.ofString(form) else HttpRequest.BodyPublishers.noBody())
+            .header("Content-Type", "application/x-www-form-urlencoded")
+        headers.forEach { (k, v) -> builder.header(k, v) }
+        val req = builder.build()
         val res = http.send(req, HttpResponse.BodyHandlers.ofString())
         return res.statusCode() to res.body()
     }
@@ -95,6 +100,26 @@ class WebAppTest {
         assertTrue(players.contains("\"automated\":true"), players)
         val audit = call(app, "POST", "regulator/audit").second
         assertTrue(audit.contains("\"ok\":true"), audit)
+    }
+
+    /** Another website can make the user's browser send requests here; such requests must be refused. */
+    @Test
+    fun `cross-site requests cannot move money`() = withApp { app ->
+        val deposit = mapOf("amount" to 100, "ref" to "csrf-1")
+        // A plain HTML form on another site cannot add custom headers.
+        assertEquals(403, call(app, "POST", "players/alice/deposit", deposit, headers = emptyMap()).first)
+        // A script on another site gets an Origin header that is not ours.
+        assertEquals(403, call(app, "POST", "players/alice/deposit", deposit, headers = mapOf("X-Ledger-Console" to "1", "Origin" to "https://evil.example")).first)
+        // The console page itself, same origin, is allowed.
+        assertEquals(200, call(app, "POST", "players/alice/deposit", deposit, headers = mapOf("X-Ledger-Console" to "1", "Origin" to "http://127.0.0.1:${app.port}")).first)
+    }
+
+    @Test
+    fun `path segments are decoded exactly once`() = withApp { app ->
+        // "a+b" is a literal plus in a path; it must not turn into "a b".
+        call(app, "POST", "players/a+b/deposit", mapOf("amount" to 100, "ref" to "plus-1"))
+        val (_, body) = call(app, "GET", "players/a%2Bb")
+        assertTrue(body.contains("\"id\":\"a+b\"") && body.contains("\"cash\":100"), body)
     }
 
     @Test
