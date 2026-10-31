@@ -46,6 +46,9 @@ import java.time.Instant
 import java.util.Base64
 import java.util.Properties
 import java.util.concurrent.Executors
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.read
+import kotlin.concurrent.write
 import kotlin.system.exitProcess
 
 /*
@@ -178,17 +181,29 @@ internal fun replayPlayerAudit(
 
 class LedgerWebApp private constructor(
     val directory: Path,
-    private val ledger: Ledger,
     private val ledgerId: String,
-    private val wallet: SportsbookWallet,
-    private val readModel: ReadModel,
-    private val book: Book,
-    private val simulator: Simulator,
-    private val stats: Stats,
-    private val audit: Audit,
+    @Volatile private var services: Services?,
     private val allowedHosts: Set<String>,
     private val resources: List<AutoCloseable>,
 ) : AutoCloseable {
+    private class Services(
+        val ledger: Ledger, val wallet: SportsbookWallet, val readModel: ReadModel,
+        val book: Book, val simulator: Simulator, val stats: Stats, val audit: Audit,
+        val performance: Performance, val chaos: ChaosLab, val resources: List<AutoCloseable>,
+    ) : AutoCloseable {
+        override fun close() = closeResources(resources)
+    }
+
+    // This lock coordinates service lifetime, not ledger writes; the engine still has one writer.
+    private val lifecycle = ReentrantReadWriteLock(true)
+    private val active get() = services ?: throw LedgerClosedException()
+    private val ledger get() = active.ledger
+    private val wallet get() = active.wallet
+    private val readModel get() = active.readModel
+    private val book get() = active.book
+    private val simulator get() = active.simulator
+    private val stats get() = active.stats
+    private val audit get() = active.audit
     private lateinit var server: HttpServer
     val port: Int get() = server.address.port
 
@@ -204,6 +219,26 @@ class LedgerWebApp private constructor(
             val signer = Ed25519TreeHeadSigner(demoKeyPair(dir))
             val resources = ArrayList<AutoCloseable>()
             try {
+                val services = openServices(dir, signer).also(resources::add)
+                val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
+                val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
+                resources.add(AutoCloseable { server.stop(0) })
+                val app = LedgerWebApp(dir, LEDGER_ID, services, allowedHosts, resources.drop(1))
+                app.server = server
+                server.executor = executor
+                server.createContext("/") { ex -> app.handle(ex) }
+
+                server.start()
+                return app
+            } catch (failure: Throwable) {
+                closeResources(resources, failure)
+                throw failure
+            }
+        }
+
+        private fun openServices(dir: Path, signer: Ed25519TreeHeadSigner): Services {
+            val resources = ArrayList<AutoCloseable>()
+            try {
                 val ledger = Ledger.open(LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000)).also(resources::add)
                 val wallet = SportsbookWallet(ledger)
                 val readModel = ReadModel(ledger).also(resources::add)
@@ -211,19 +246,11 @@ class LedgerWebApp private constructor(
                 val simulator = Simulator(book, wallet).also(resources::add)
                 val stats = Stats(readModel).also(resources::add)
                 val audit = Audit(ledger, dir, LEDGER_ID, listOf(signer.publicKey)).also(resources::add)
-                val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
-                val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
-                resources.add(AutoCloseable { server.stop(0) })
-                val app = LedgerWebApp(dir, ledger, LEDGER_ID, wallet, readModel, book, simulator, stats, audit, allowedHosts, resources)
-                app.server = server
-                server.executor = executor
-                server.createContext("/") { ex -> app.handle(ex) }
-
-                // Fixed deposit keys make restarting demo data exactly-once.
+                val performance = Performance(ledger, readModel, dir).also(resources::add)
+                val chaos = ChaosLab(audit)
                 CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
                 if (book.fixtures().isEmpty()) repeat(6) { book.addFixture() }
-                server.start()
-                return app
+                return Services(ledger, wallet, readModel, book, simulator, stats, audit, performance, chaos, resources)
             } catch (failure: Throwable) {
                 closeResources(resources, failure)
                 throw failure
@@ -302,7 +329,20 @@ class LedgerWebApp private constructor(
             val segments = uri.rawPath.removePrefix("/api/").trimEnd('/').split('/').map {
                 URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8)
             }
-            respond(ex, 200, route(Request(ex.requestMethod, segments, params)))
+            val request = Request(ex.requestMethod, segments, params)
+            val expectedServices = services
+            fun checkGeneration() {
+                if (expectedServices == null) {
+                    throw HttpError(503, "ledger_unavailable", "demo services are stopped; restart the app if storage reset failed")
+                }
+                if (services !== expectedServices) {
+                    throw HttpError(409, "storage_reset", "demo storage changed; refresh before retrying")
+                }
+            }
+            val result = if (request.method == "POST" && segments == listOf("administrator", "clear")) {
+                lifecycle.write { checkGeneration(); clearStorage(request) }
+            } else lifecycle.read { checkGeneration(); route(request) }
+            respond(ex, 200, result)
         } catch (e: Throwable) {
             val (status, code) = when (e) {
                 is HttpError -> e.status to e.code
@@ -395,6 +435,9 @@ class LedgerWebApp private constructor(
         fun post(vararg pattern: String) = r.method == "POST" && matches(p, pattern)
         return when {
             get("overview") -> overview()
+            get("administrator") -> active.performance.view()
+            get("chaos") -> active.chaos.view()
+            post("chaos") -> active.chaos.run(r.str("scenario"))
 
             // ---- Customer ----
             get("players") -> searchPlayers(r.params["q"] ?: "")
@@ -451,6 +494,24 @@ class LedgerWebApp private constructor(
 
             else -> throw HttpError(404, "not_found", "no such endpoint: ${r.method} /api/${p.joinToString("/")}")
         }
+    }
+
+    private fun clearStorage(r: Request): Any {
+        require(r.str("confirmation") == "CLEAR DEMO STORAGE") { "type CLEAR DEMO STORAGE to confirm permanent deletion" }
+        val previous = active
+        services = null
+        previous.close()
+        // Only app-owned data files are deleted. Keep both lock inodes and unrelated user files.
+        val signer = Ed25519TreeHeadSigner(demoKeyPair(directory))
+        FileChannel.open(directory.resolve(Ledger.LOCK_FILE), CREATE, WRITE).use { channel ->
+            channel.tryLock()?.use {
+                listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE, Book.FIXTURES_FILE).forEach { name ->
+                    Files.deleteIfExists(directory.resolve(name))
+                }
+            } ?: throw IllegalStateException("storage is in use by another ledger")
+        }
+        services = openServices(directory, signer)
+        return mapOf("cleared" to true, "message" to "Demo history deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
     }
 
     private fun matches(path: List<String>, pattern: Array<out String>) =
@@ -641,7 +702,13 @@ class LedgerWebApp private constructor(
     }
 
     override fun close() {
-        closeResources(resources)
+        closeResources(listOf(AutoCloseable {
+            lifecycle.write {
+                val previous = services
+                services = null
+                previous?.close()
+            }
+        }) + resources)
     }
 }
 

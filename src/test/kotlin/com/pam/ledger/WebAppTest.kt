@@ -97,6 +97,108 @@ class WebAppTest {
     }
 
     @Test
+    fun `console keeps the tamper lab in chaos monkey instead of regulator`() = withApp { app ->
+        val page = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/")).GET().build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200, page.statusCode())
+        val html = page.body()
+        val regulator = html.substringAfter("id=\"view-regulator\"").substringBefore("</section>")
+        val chaos = html.substringAfter("id=\"view-chaos\"").substringBefore("</section>")
+        assertFalse(regulator.contains("data-tamper"), regulator)
+        for (mode in listOf("edit", "rewrite", "truncate")) {
+            assertTrue(chaos.contains("data-tamper=\"$mode\""), chaos)
+        }
+        assertTrue(chaos.contains("id=\"tamperResult\""), chaos)
+    }
+
+    @Test
+    fun `administrator exposes real host counters and committed throughput`() = withApp { app ->
+        repeat(20) { i ->
+            assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "metrics-$i")).first)
+        }
+        Thread.sleep(1_200)
+        val (status, body) = call(app, "GET", "administrator")
+        assertEquals(200, status, body)
+        listOf("processCpu", "systemCpu", "heapUsed", "heapMax", "storageTotal", "storageFree",
+            "journalBytes", "readBytesPerSec", "writeBytesPerSec", "threads", "gcMillis", "readModelLag").forEach {
+            assertTrue(body.contains("\"$it\":"), "missing $it: $body")
+        }
+        val heap = Regex("\"heapUsed\":(\\d+)").findAll(body).last().groupValues[1].toLong()
+        assertTrue(heap > 0)
+        val disk = Regex("\"journalBytes\":(\\d+)").findAll(body).last().groupValues[1].toLong()
+        assertEquals(Files.size(app.directory.resolve(Ledger.ENTRIES_FILE)) +
+            Files.size(app.directory.resolve(Ledger.CHECKPOINTS_FILE)), disk)
+        val rates = Regex("\"tps\":([0-9.E+-]+)").findAll(body).map { it.groupValues[1].toDouble() }.toList()
+        assertTrue(rates.any { it > 0 }, "committed writes must appear in throughput: $body")
+        assertFalse(body.contains("NaN") || body.contains("Infinity"), body)
+    }
+
+    @Test
+    fun `clearing demo storage requires confirmation and preserves unrelated files and signing key`() = withApp { app ->
+        val marker = app.directory.resolve("keep-me.txt")
+        Files.writeString(marker, "not ledger data")
+        val key = Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))
+        call(app, "POST", "players/alice/deposit", mapOf("amount" to 100, "ref" to "before-reset"))
+        call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "before-reset-bet"))
+        assertEquals(400, call(app, "POST", "administrator/clear", mapOf("confirmation" to "clear")).first)
+        assertTrue(call(app, "GET", "players/alice").second.contains("before-reset"))
+        assertEquals(403, call(app, "POST", "administrator/clear",
+            mapOf("confirmation" to "CLEAR DEMO STORAGE"), withOrigin = false).first)
+        assertEquals(404, call(app, "GET", "administrator/clear").first)
+        val reset = call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
+        assertEquals(200, reset.first, reset.second)
+        assertTrue(reset.second.contains("\"cleared\":true"), reset.second)
+        assertEquals("not ledger data", Files.readString(marker))
+        assertTrue(key.contentEquals(Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))))
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+        val player = call(app, "GET", "players/alice").second
+        assertTrue(player.contains("\"cash\":\"10000\""), player)
+        assertFalse(player.contains("before-reset"), player)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 100, "ref" to "after-reset")).first)
+    }
+
+    @Test
+    fun `reset drains a running simulator while requests race its lifecycle`() = withApp { app ->
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "action" to "start", "customers" to 16, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+        val outcomes = race(8) { i ->
+            if (i == 0) call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
+            else call(app, "GET", "operator")
+        }.map { it.getOrThrow() }
+        assertEquals(200, outcomes[0].first, outcomes[0].second)
+        outcomes.drop(1).forEach { (status, body) ->
+            assertTrue(status == 200 || (status == 409 && body.contains("storage_reset")) ||
+                (status == 503 && body.contains("ledger_unavailable")), "$status $body")
+        }
+        Thread.sleep(200)
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+        assertTrue(call(app, "GET", "simulator").second.contains("STOPPED"))
+        assertFalse(call(app, "GET", "players").second.contains("sim-"))
+        val audit = call(app, "POST", "regulator/audit")
+        assertEquals(200, audit.first, audit.second)
+        assertTrue(audit.second.contains("\"ok\":true"), audit.second)
+    }
+
+    @Test
+    fun `every chaos experiment observes protection without changing live balances`() = withApp { app ->
+        val before = call(app, "GET", "players/alice").second
+        for (scenario in listOf("torn-write", "checksum", "rollback", "retries", "double-spend", "settlement", "signer-outage")) {
+            val result = call(app, "POST", "chaos", mapOf("scenario" to scenario))
+            assertEquals(200, result.first, result.second)
+            assertTrue(result.second.contains("\"passed\":true"), result.second)
+            assertTrue(result.second.contains("\"evidence\":"), result.second)
+        }
+        assertEquals(before, call(app, "GET", "players/alice").second)
+        val history = call(app, "GET", "chaos")
+        assertEquals(200, history.first, history.second)
+        assertTrue(history.second.contains("\"running\":false"), history.second)
+        assertEquals(400, call(app, "POST", "chaos", mapOf("scenario" to "erase-host")).first)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
+    @Test
     fun `customer API moves money, refuses overspending, and replays retried bets`() = withApp { app ->
         assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 2500, "ref" to "t-dep")).first)
 

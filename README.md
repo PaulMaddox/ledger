@@ -94,20 +94,34 @@ ledger, so anything done in one view shows up in the others.
   in-flight placement's definitive result, including during queue overload.
 - **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
   with signature caching bound to the exact evidence, display commitments and public key,
-  consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
-  corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
-  catching each, even while the simulator appends new entries. Audit snapshots reread
+  consistency and inclusion proofs and a per-customer audit trail. Audit snapshots reread
   checkpoint records from disk through the captured checkpoint's position instead of
   trusting cached copies or unverified tree sizes. Player audits compare posting replays
   with immutable engine account states at each account's own last sequence.
   Signing times are decoded from the signed bytes.
   Checkpoint history and its read offset advance together only after a successful scan.
+- **Administrator.** Live CPU, heap and host memory, available filesystem space, journal size,
+  physical process storage I/O (Linux only), durably committed transactions/sec, platform
+  threads, garbage collection and read-model lag. Unsupported counters are labelled unavailable.
+  Clearing storage requires typing `CLEAR DEMO STORAGE`; it stops and drains services,
+  permanently deletes only the demo journals and fixtures, then seeds a fresh demo.
+  The signing key, lock files and unrelated files remain. This unauthenticated, demo-only
+  reset is an explicit exception to append-only storage, never a production ledger operation.
+- **Chaos Monkey.** Seven bounded, isolated experiments: torn writes, CRC corruption,
+  signed-history rollback, duplicate retry storms, multi-device double spending, conflicting
+  settlement and signing-service outage/fail-stop with recovery. Results include observed
+  evidence and the last 30 runs. No live money or journal is corrupted; snapshot experiments
+  add only a live checkpoint. Experiments run one at a time.
+  The tamper lab also corrupts a *copy* of a signed journal prefix by editing a deposit,
+  rewriting the hash chain or rolling back entries, and shows the verifier catching each.
 
 | Operator | Customer |
 |---|---|
 | ![Operator view](docs/screenshots/operator.png) | ![Customer view](docs/screenshots/customer.png) |
 | **Regulator** | **Verified in the browser** |
 | ![Regulator view](docs/screenshots/regulator.png) | ![An entry verified in the browser](docs/screenshots/customer-verify.png) |
+| **Administrator** | **Chaos Monkey** |
+| ![Administrator performance dashboard](docs/screenshots/administrator.png) | ![Chaos Monkey failure experiments](docs/screenshots/chaos.png) |
 
 Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
 ledger lives in a fresh temporary folder each run; with it, the ledger, signing key, fixture

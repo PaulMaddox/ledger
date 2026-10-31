@@ -121,6 +121,19 @@ class Audit(
 
     data class AuditResult(val report: LedgerVerifier.Report, val millis: Long, val note: String)
 
+    /** Give a lab a private signed snapshot, and always remove its temporary files afterwards. */
+    internal fun <T> withSnapshot(action: (Path, SignedTreeHead) -> T): T {
+        val anchor = checkpointNow()
+        val copy = snapshot(anchor)
+        try {
+            return action(copy, anchor)
+        } finally {
+            check(copy.toFile().deleteRecursively()) { "could not remove lab snapshot $copy" }
+        }
+    }
+
+    internal fun verifySnapshot(directory: Path) = LedgerVerifier.verify(directory, ledgerId, trustedKeys)
+
     /** Run the offline verifier, exactly as a regulator would, over a fresh snapshot. */
     fun fullAudit(): AuditResult {
         val started = System.nanoTime()
@@ -193,5 +206,8 @@ class Audit(
         }
     }
 
-    override fun close() { poller.shutdownNow() }
+    override fun close() {
+        poller.shutdownNow()
+        check(poller.awaitTermination(5, TimeUnit.SECONDS)) { "checkpoint history sampler did not stop" }
+    }
 }

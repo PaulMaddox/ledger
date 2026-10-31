@@ -72,15 +72,23 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int) -> 
         await close_up("customer-verify", "#custProof")
         await shot("customer")
 
-        # Regulator: a full audit and a caught history rewrite.
+        # Regulator: a full audit.
         await page.goto(url + "#regulator")
         await page.wait_for_timeout(1500)
         await page.click("#auditBtn")
         await page.wait_for_selector("#auditResult .verdict", timeout=30000)
+        await shot("regulator")
+
+        await page.goto(url + "#administrator")
+        await page.wait_for_selector("#adminKpis .kpi")
+        await shot("administrator")
+        await page.goto(url + "#chaos")
         await page.click("[data-tamper='rewrite']")
         await page.wait_for_selector("#tamperResult .verdict", timeout=30000)
-        await close_up("regulator-tamper", "#tamperResult >> xpath=..")
-        await shot("regulator")
+        await close_up("chaos-tamper", "#tamperResult >> xpath=..")
+        await page.click("[data-chaos='double-spend']")
+        await page.wait_for_selector("#chaosHistory article", timeout=30000)
+        await shot("chaos")
 
         # Leave the app as we found it.
         await page.goto(url + "#simulator")

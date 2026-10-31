@@ -75,6 +75,10 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 4. **Append-only.** Never update or delete a journal record. Corrections are new,
    compensating transactions with their own idempotency keys
    (for example `bet:{id}:resettle:{n}`).
+   The owner-approved demo-only exception is the Administrator storage reset: after
+   confirmation and draining every demo service, it deletes the demo journals and
+   fixture file and reseeds a fresh demo. Never expose this operation in production
+   or extend it to unrelated files, signing keys, or live-record editing.
 5. **The byte formats are a contract.** `EntryCodec`, `Hashes` and
    `TreeHead.signingBytes` define every hash and signature. Changing them makes every
    existing ledger fail verification. Do not "tidy" them. A real format change needs

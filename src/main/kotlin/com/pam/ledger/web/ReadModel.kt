@@ -154,5 +154,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     override fun close() {
         running = false
         poller.interrupt()
+        poller.join(5_000)
+        check(!poller.isAlive) { "read model did not stop" }
     }
 }
