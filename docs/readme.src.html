@@ -1,0 +1,840 @@
+<title>Sportsbook Ledger Internals</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Familjen+Grotesk:wght@500;600;700&family=Public+Sans:ital,wght@0,400;0,600;1,400&family=JetBrains+Mono:wght@400;600&display=swap">
+<style>
+/* Layout: a ledger notebook. Long-form explainer with one wide "debugger" workbench
+   (code left, machine state right) that collapses to a single column on phones. */
+:root{
+  --paper:#f2f5f1; --ink:#13201a; --muted:#56665e; --rule:#d3dcd6; --panel:#ffffff;
+  --code-bg:#e9eee9; --accent:#1c6a54; --accent-ink:#ffffff; --odds:#a85c17;
+  --ok:#1d7647; --bad:#b0271f; --warn:#9a6a00; --hl:rgba(28,106,84,.17); --hl-edge:#1c6a54;
+  --kw:#7a3e9d; --str:#2f6f2a; --com:#7c8a83; --num:#a85c17; --typ:#1f5c8f;
+  --f-display:"Familjen Grotesk", "Helvetica Neue", Arial, sans-serif;
+  --f-body:"Public Sans", "Segoe UI", system-ui, sans-serif;
+  --f-mono:"JetBrains Mono", ui-monospace, "SF Mono", Menlo, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark){:root:not([data-theme="light"]){
+  --paper:#0e1412; --ink:#e2eae5; --muted:#93a39a; --rule:#25312c; --panel:#141c19;
+  --code-bg:#0a0f0d; --accent:#4cc29a; --accent-ink:#06120d; --odds:#e39a55;
+  --ok:#5bd08f; --bad:#f2786d; --warn:#e8c25a; --hl:rgba(76,194,154,.17); --hl-edge:#4cc29a;
+  --kw:#c99bf0; --str:#9ad08a; --com:#6f7f78; --num:#e8a565; --typ:#7fb6ec; color-scheme:dark}}
+:root[data-theme="dark"]{
+  --paper:#0e1412; --ink:#e2eae5; --muted:#93a39a; --rule:#25312c; --panel:#141c19;
+  --code-bg:#0a0f0d; --accent:#4cc29a; --accent-ink:#06120d; --odds:#e39a55;
+  --ok:#5bd08f; --bad:#f2786d; --warn:#e8c25a; --hl:rgba(76,194,154,.17); --hl-edge:#4cc29a;
+  --kw:#c99bf0; --str:#9ad08a; --com:#6f7f78; --num:#e8a565; --typ:#7fb6ec; color-scheme:dark}
+
+*{box-sizing:border-box}
+body{background:var(--paper);color:var(--ink);font:16px/1.6 var(--f-body);
+  padding-left:max(16px, env(safe-area-inset-left, 0px));padding-right:max(16px, env(safe-area-inset-right, 0px));padding-block:0 64px}
+.wrap{max-width:1180px;margin:0 auto}
+.prose{max-width:68ch}
+h1,h2,h3{font-family:var(--f-display);line-height:1.15;text-wrap:balance;margin:0}
+h1{font-size:clamp(2rem,5vw,3.1rem);font-weight:700;letter-spacing:-.01em}
+h2{font-size:clamp(1.45rem,3vw,1.9rem);font-weight:700}
+h3{font-size:1.1rem;font-weight:600}
+p{margin:0}
+code,.mono{font-family:var(--f-mono);font-size:.88em}
+a{color:var(--accent)}
+:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.eyebrow{font:600 .74rem/1 var(--f-body);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+section{padding-block:56px 8px;border-top:1px solid var(--rule);display:grid;gap:20px}
+section:first-of-type{border-top:0}
+
+/* ---------- hero ---------- */
+header.hero{padding-block:48px 40px;display:grid;gap:22px}
+.hero .lede{font-size:1.14rem;color:var(--ink);max-width:62ch}
+.ledgerline{font-family:var(--f-mono);font-size:.82rem;color:var(--muted);display:flex;flex-wrap:wrap;gap:6px 18px}
+.ledgerline b{color:var(--ink);font-weight:600}
+.facts{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:1px;background:var(--rule);border:1px solid var(--rule)}
+.facts div{background:var(--panel);padding:14px 16px;display:grid;gap:4px}
+.facts strong{font-family:var(--f-display);font-size:1.05rem}
+.facts span{color:var(--muted);font-size:.9rem}
+.toc{display:flex;flex-wrap:wrap;gap:8px}
+.toc a{font-size:.88rem;text-decoration:none;border:1px solid var(--rule);padding:5px 11px;border-radius:999px;color:var(--ink);background:var(--panel)}
+.toc a:hover{border-color:var(--accent)}
+
+/* ---------- architecture ---------- */
+.arch{display:grid;grid-template-columns:minmax(0,1.6fr) minmax(0,1fr);gap:20px;align-items:start}
+.diagram{overflow-x:auto;border:1px solid var(--rule);background:var(--panel)}
+.diagram svg{display:block;min-width:640px;width:100%;height:auto}
+.node rect{fill:var(--panel);stroke:var(--rule);stroke-width:1.5}
+.node text{fill:var(--ink);font:600 13px var(--f-body)}
+.node .sub{fill:var(--muted);font:400 11px var(--f-mono)}
+.node{cursor:pointer}
+.node:hover rect,.node:focus rect{stroke:var(--accent)}
+.node.on rect{stroke:var(--accent);stroke-width:2.5;fill:var(--hl)}
+.node:focus{outline:none}
+.edge{stroke:var(--muted);stroke-width:1.4;fill:none}
+.edge.dash{stroke-dasharray:5 4}
+.elabel{fill:var(--muted);font:11px var(--f-mono)}
+#arrow path{fill:var(--muted)}
+.info{border-left:3px solid var(--accent);padding:4px 0 4px 16px;display:grid;gap:10px}
+.info .file{font-family:var(--f-mono);font-size:.8rem;color:var(--accent)}
+.info ul{margin:0;padding-left:18px;display:grid;gap:4px}
+
+/* ---------- playgrounds ---------- */
+.two{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,460px),1fr));gap:24px}
+.card{background:var(--panel);border:1px solid var(--rule);padding:18px;display:grid;gap:14px;min-width:0}
+.seg{display:inline-flex;border:1px solid var(--rule);border-radius:8px;overflow:hidden;flex-wrap:wrap}
+.seg button{border:0;background:transparent;color:var(--ink);font:600 .82rem var(--f-body);padding:7px 12px;cursor:pointer}
+.seg button[aria-pressed="true"]{background:var(--accent);color:var(--accent-ink)}
+.chain{display:grid;gap:8px}
+.blk{display:grid;grid-template-columns:auto minmax(0,1fr) auto;gap:4px 12px;align-items:center;border:1px solid var(--rule);padding:8px 10px;font-size:.85rem}
+.blk .seq{font-family:var(--f-mono);color:var(--muted);font-size:.78rem}
+.blk input{width:92px;font:inherit;font-family:var(--f-mono);padding:3px 6px;border:1px solid var(--rule);background:var(--paper);color:var(--ink);border-radius:4px}
+.blk .h{grid-column:1/-1;font-family:var(--f-mono);font-size:.74rem;color:var(--muted);overflow-wrap:anywhere}
+.blk.broken{border-color:var(--bad);background:color-mix(in srgb,var(--bad) 7%,var(--panel))}
+.pill{font:600 .7rem/1 var(--f-body);letter-spacing:.04em;text-transform:uppercase;padding:4px 7px;border-radius:999px;border:1px solid currentColor;white-space:nowrap}
+.pill.ok{color:var(--ok)} .pill.bad{color:var(--bad)} .pill.warn{color:var(--warn)} .pill.mut{color:var(--muted)}
+.verdict{font-size:.92rem;padding:10px 12px;border:1px solid var(--rule);background:var(--paper)}
+.verdict.bad{border-color:var(--bad)} .verdict.ok{border-color:var(--ok)}
+.mtree{overflow-x:auto}
+.mtree svg{display:block;min-width:420px;width:100%;height:auto}
+.mn rect{fill:var(--paper);stroke:var(--rule);stroke-width:1.2}
+.mn text{fill:var(--ink);font:11px var(--f-mono);text-anchor:middle}
+.mn.leaf{cursor:pointer}
+.mn.leaf:hover rect{stroke:var(--accent)}
+.mn.path rect{fill:var(--hl);stroke:var(--accent);stroke-width:2}
+.mn.sib rect{stroke:var(--odds);stroke-width:2.2;stroke-dasharray:4 3}
+.ml{stroke:var(--rule);stroke-width:1.2}
+.ml.path{stroke:var(--accent);stroke-width:2}
+.steps-list{margin:0;padding-left:20px;font-family:var(--f-mono);font-size:.78rem;display:grid;gap:3px;overflow-wrap:anywhere}
+
+/* ---------- debugger ---------- */
+.dbg{border:1px solid var(--rule);background:var(--panel);display:grid}
+.toolbar{display:flex;flex-wrap:wrap;gap:10px;align-items:center;justify-content:space-between;padding:10px 12px;border-bottom:1px solid var(--rule);background:var(--paper)}
+.scen{display:flex;flex-wrap:wrap;gap:6px}
+.scen button{font:600 .8rem var(--f-body);border:1px solid var(--rule);background:var(--panel);color:var(--ink);padding:6px 10px;border-radius:6px;cursor:pointer}
+.scen button[aria-pressed="true"]{border-color:var(--accent);background:var(--hl)}
+.ctl{display:flex;gap:6px;align-items:center;flex-wrap:wrap}
+.ctl button{font:600 .82rem var(--f-body);border:1px solid var(--rule);background:var(--panel);color:var(--ink);padding:6px 11px;border-radius:6px;cursor:pointer;min-width:40px}
+.ctl button.primary{background:var(--accent);color:var(--accent-ink);border-color:var(--accent)}
+.ctl button:disabled{opacity:.4;cursor:default}
+.ctl .count{font-family:var(--f-mono);font-size:.8rem;color:var(--muted);min-width:76px;text-align:right}
+.bench{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);min-height:640px}
+.codecol{border-right:1px solid var(--rule);display:grid;grid-template-rows:auto minmax(0,1fr);min-width:0;background:var(--code-bg)}
+.tabs{display:flex;overflow-x:auto;border-bottom:1px solid var(--rule)}
+.tabs button{font:500 .76rem var(--f-mono);border:0;border-right:1px solid var(--rule);background:transparent;color:var(--muted);padding:8px 12px;cursor:pointer;white-space:nowrap}
+.tabs button[aria-selected="true"]{color:var(--ink);background:var(--panel);box-shadow:inset 0 -2px 0 var(--accent)}
+.code{overflow:auto;height:640px;font:12.5px/1.6 var(--f-mono);position:relative}
+.code .ln{display:grid;grid-template-columns:3.4em 1.4em max-content;white-space:pre;min-width:100%}
+.code .no{color:var(--com);text-align:right;padding-right:.4em;user-select:none}
+.code .mk{color:var(--hl-edge);user-select:none;text-align:center}
+.code .ln.cur{background:var(--hl);box-shadow:inset 3px 0 0 var(--hl-edge)}
+.code .ln.cur .no{color:var(--ink);font-weight:600}
+.code .ln.cur.first .mk::before{content:"▶"}
+.code .ln.seen .mk::before{content:"·";color:var(--com)}
+.k{color:var(--kw)} .s{color:var(--str)} .c{color:var(--com);font-style:italic} .n{color:var(--num)} .t{color:var(--typ)}
+.statecol{display:grid;align-content:start;min-width:0}
+.explain{padding:14px 16px;border-bottom:1px solid var(--rule);display:grid;gap:8px}
+.explain h3{font-size:1.05rem}
+.explain .where{font-family:var(--f-mono);font-size:.74rem;color:var(--accent)}
+.explain p{font-size:.93rem}
+.pane{border-bottom:1px solid var(--rule)}
+.pane > h4{margin:0;font:600 .7rem/1 var(--f-body);letter-spacing:.1em;text-transform:uppercase;color:var(--muted);padding:9px 16px 6px}
+.pane .body{padding:0 16px 12px;font-size:.84rem;display:grid;gap:6px}
+.vars{display:grid;grid-template-columns:max-content minmax(0,1fr);gap:2px 12px;font-family:var(--f-mono);font-size:.76rem}
+.vars dt{color:var(--typ)} .vars dd{margin:0;overflow-wrap:anywhere}
+.stack{margin:0;padding:0;list-style:none;font-family:var(--f-mono);font-size:.76rem;display:grid;gap:2px}
+.stack li:first-child{color:var(--ink);font-weight:600}
+.stack li{color:var(--muted)}
+.threads{display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));gap:6px}
+.th{border:1px solid var(--rule);padding:6px 8px;display:grid;gap:3px;font-size:.78rem;background:var(--paper)}
+.th .nm{font-weight:600;display:flex;justify-content:space-between;gap:6px;align-items:center}
+.th .op{font-family:var(--f-mono);font-size:.72rem;color:var(--muted);overflow-wrap:anywhere}
+.lanes{display:grid;grid-template-columns:minmax(0,1fr) minmax(0,1fr);gap:10px}
+.chips{display:flex;flex-wrap:wrap;gap:4px;min-height:24px;align-items:center}
+.chip{font-family:var(--f-mono);font-size:.7rem;border:1px solid var(--rule);padding:3px 6px;border-radius:4px;background:var(--paper)}
+.chip.ok{border-color:var(--ok)} .chip.bad{border-color:var(--bad);color:var(--bad)} .chip.warn{border-color:var(--warn)}
+.empty{color:var(--muted);font-style:italic;font-size:.78rem}
+table.bal{border-collapse:collapse;width:100%;font-size:.78rem}
+.bal td{padding:3px 0;border-bottom:1px dashed var(--rule);font-variant-numeric:tabular-nums}
+.bal td:first-child{font-family:var(--f-mono);font-size:.72rem;overflow-wrap:anywhere;padding-right:8px}
+.bal td.amt{text-align:right;font-family:var(--f-mono);white-space:nowrap}
+.bal td.amt.neg{color:var(--muted)}
+.bal .delta{color:var(--odds);font-size:.7rem;margin-left:4px}
+.jr{display:grid;grid-template-columns:2.2em minmax(0,1fr) auto;gap:6px;align-items:center;font-size:.76rem;padding:4px 0;border-bottom:1px dashed var(--rule)}
+.jr .sq{font-family:var(--f-mono);color:var(--muted)}
+.jr .hh{font-family:var(--f-mono);font-size:.68rem;color:var(--muted);display:block}
+.headline{font-family:var(--f-mono);font-size:.72rem;display:grid;gap:2px;color:var(--muted)}
+.headline b{color:var(--ink);font-weight:600}
+.console{font-family:var(--f-mono);font-size:.72rem;display:grid;gap:2px;max-height:120px;overflow:auto}
+.console div{color:var(--muted)} .console div:last-child{color:var(--ink)}
+.banner{margin:10px 16px 0;padding:8px 10px;font-size:.84rem;border:1px solid var(--rule);background:var(--paper)}
+.banner.bad{border-color:var(--bad);color:var(--bad)} .banner.ok{border-color:var(--ok)}
+
+/* ---------- tables ---------- */
+.tblwrap{overflow-x:auto;border:1px solid var(--rule)}
+table.reg{border-collapse:collapse;width:100%;min-width:640px;font-size:.88rem;background:var(--panel)}
+.reg th,.reg td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--rule);vertical-align:top}
+.reg th{font:600 .72rem var(--f-body);letter-spacing:.08em;text-transform:uppercase;color:var(--muted);background:var(--paper)}
+.reg td:first-child{font-family:var(--f-display);font-weight:700;color:var(--accent);white-space:nowrap}
+.reg code{font-size:.78rem}
+pre.cmd{margin:0;background:var(--code-bg);border:1px solid var(--rule);padding:12px 14px;overflow-x:auto;font:12.5px/1.6 var(--f-mono)}
+.filemap{display:grid;grid-template-columns:repeat(auto-fit,minmax(min(100%,260px),1fr));gap:1px;background:var(--rule);border:1px solid var(--rule)}
+.filemap div{background:var(--panel);padding:12px 14px;display:grid;gap:4px;font-size:.88rem}
+.filemap code{color:var(--accent);font-weight:600}
+footer{margin-top:48px;color:var(--muted);font-size:.84rem}
+
+@media (max-width:900px){
+  .arch{grid-template-columns:1fr}
+  .bench{grid-template-columns:1fr;min-height:0}
+  .codecol{border-right:0;border-bottom:1px solid var(--rule)}
+  .code{height:340px}
+  .lanes{grid-template-columns:1fr}
+}
+@media (prefers-reduced-motion:reduce){*{scroll-behavior:auto!important}}
+</style>
+
+<div class="wrap">
+<header class="hero">
+  <div class="eyebrow">Kotlin · JDK 21 · zero runtime dependencies</div>
+  <h1>Sportsbook Ledger Internals</h1>
+  <p class="lede">An append-only, double-entry money ledger for a sportsbook player account platform. Every bet, deposit and payout is hash-chained, placed in a Merkle tree and periodically signed, so anyone holding the public key can prove nothing was altered, removed or invented. One writer thread orders every transaction, which makes double spends structurally impossible rather than merely unlikely.</p>
+  <div class="ledgerline"><span>seq <b>#1423</b></span><span>BET_PLACED</span><span>player:42:cash:EUR <b>−1000</b></span><span>player:42:open-bets:EUR <b>+1000</b></span><span>Σ <b>0</b></span><span>chain <b>740174cf…</b></span></div>
+  <div class="facts">
+    <div><strong>Tamper-evident</strong><span>SHA-256 chain + RFC 9162 Merkle tree + Ed25519 signed heads</span></div>
+    <div><strong>Linearizable</strong><span>Single writer, group commit, lock-free reads</span></div>
+    <div><strong>Exactly-once</strong><span>Idempotency keys make every retry safe</span></div>
+    <div><strong>Crash-safe</strong><span>Receipt only after fsync; torn writes quarantined</span></div>
+  </div>
+  <nav class="toc" aria-label="Contents">
+    <a href="#architecture">Architecture</a><a href="#chain">Hash chain</a><a href="#merkle">Merkle proofs</a><a href="#debugger">Step-through debugger</a><a href="#regulators">Regulatory tests</a><a href="#files">Files & running</a>
+  </nav>
+</header>
+
+<!-- ======================= ARCHITECTURE ======================= -->
+<section id="architecture">
+  <div class="eyebrow">How the parts fit</div>
+  <h2>Architecture</h2>
+  <p class="prose">Select a component to see what it does, where it lives and what it guarantees. Solid arrows are the write path; dashed arrows are reads and audits.</p>
+  <div class="arch">
+    <div class="diagram">
+      <svg viewBox="0 0 860 430" role="group" aria-label="Component diagram">
+        <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z"/></marker></defs>
+        <path class="edge" d="M150 60 H190" marker-end="url(#arrow)"/>
+        <path class="edge" d="M350 60 H390" marker-end="url(#arrow)"/>
+        <path class="edge" d="M550 60 H590" marker-end="url(#arrow)"/>
+        <path class="edge" d="M670 92 V170" marker-end="url(#arrow)"/>
+        <text class="elabel" x="678" y="135">batch</text>
+        <path class="edge" d="M670 230 V290" marker-end="url(#arrow)"/>
+        <text class="elabel" x="678" y="265">write + fsync</text>
+        <path class="edge" d="M590 200 H460" marker-end="url(#arrow)"/>
+        <text class="elabel" x="478" y="192">publish</text>
+        <path class="edge dash" d="M300 170 V92" marker-end="url(#arrow)"/>
+        <text class="elabel" x="308" y="135">reads</text>
+        <path class="edge" d="M750 200 H790 V290" marker-end="url(#arrow)"/>
+        <text class="elabel" x="760" y="250">sign</text>
+        <path class="edge dash" d="M590 330 H460" marker-end="url(#arrow)"/>
+        <text class="elabel" x="478" y="322">replay</text>
+        <path class="edge dash" d="M300 230 V290" marker-end="url(#arrow)"/>
+        <text class="elabel" x="308" y="265">proofs</text>
+        <path class="edge dash" d="M220 330 H150" marker-end="url(#arrow)"/>
+
+        <g class="node" tabindex="0" data-node="devices"><rect x="10" y="28" width="140" height="64" rx="6"/><text x="22" y="54">Devices & feeds</text><text class="sub" x="22" y="74">phone · PSP · odds</text></g>
+        <g class="node" tabindex="0" data-node="wallet"><rect x="190" y="28" width="160" height="64" rx="6"/><text x="202" y="54">SportsbookWallet</text><text class="sub" x="202" y="74">deposit · bet · settle</text></g>
+        <g class="node" tabindex="0" data-node="submit"><rect x="390" y="28" width="160" height="64" rx="6"/><text x="402" y="54">Ledger.submit()</text><text class="sub" x="402" y="74">caller threads</text></g>
+        <g class="node" tabindex="0" data-node="queue"><rect x="590" y="28" width="160" height="64" rx="6"/><text x="602" y="54">Bounded queue</text><text class="sub" x="602" y="74">back-pressure</text></g>
+        <g class="node" tabindex="0" data-node="writer"><rect x="590" y="170" width="160" height="60" rx="6"/><text x="602" y="195">Writer thread</text><text class="sub" x="602" y="214">the only mutator</text></g>
+        <g class="node" tabindex="0" data-node="read"><rect x="220" y="170" width="240" height="60" rx="6"/><text x="232" y="195">Read side</text><text class="sub" x="232" y="214">balances · entries · keys</text></g>
+        <g class="node" tabindex="0" data-node="journal"><rect x="590" y="290" width="160" height="70" rx="6"/><text x="602" y="316">entries.journal</text><text class="sub" x="602" y="336">CRC-framed, append-only</text></g>
+        <g class="node" tabindex="0" data-node="checkpoints"><rect x="770" y="290" width="80" height="70" rx="6"/><text x="780" y="316">STH</text><text class="sub" x="780" y="336">Ed25519</text></g>
+        <g class="node" tabindex="0" data-node="prover"><rect x="220" y="290" width="240" height="70" rx="6"/><text x="232" y="316">Merkle prover & verifier</text><text class="sub" x="232" y="336">inclusion · consistency</text></g>
+        <g class="node" tabindex="0" data-node="auditor"><rect x="10" y="290" width="140" height="70" rx="6"/><text x="22" y="316">Regulator</text><text class="sub" x="22" y="336">public key only</text></g>
+      </svg>
+    </div>
+    <div class="info" id="archInfo" aria-live="polite"></div>
+  </div>
+</section>
+
+<!-- ======================= HASH CHAIN ======================= -->
+<section id="chain">
+  <div class="eyebrow">Concept 1 of 2</div>
+  <h2>Why editing history fails</h2>
+  <p class="prose">Each entry stores the hash of the one before it, so changing any old amount breaks every link after it. A careful attacker can recompute the whole chain, which is why the ledger also signs its head. Change an amount below, then switch to the attacker's approach and watch the signed checkpoint catch it anyway.</p>
+  <div class="two">
+    <div class="card">
+      <div style="display:flex;flex-wrap:wrap;gap:10px;justify-content:space-between;align-items:center">
+        <h3>Five ledger entries</h3>
+        <div class="seg" role="group" aria-label="Tamper method">
+          <button type="button" id="modeNaive" aria-pressed="true">Edit in place</button>
+          <button type="button" id="modeAttack" aria-pressed="false">Edit and rehash</button>
+        </div>
+      </div>
+      <div class="chain" id="chainBox"></div>
+      <button type="button" class="seg" id="chainReset" style="justify-self:start;padding:6px 12px;background:var(--panel);color:var(--ink);font:600 .82rem var(--f-body);cursor:pointer">Restore original amounts</button>
+    </div>
+    <div class="card">
+      <h3>What the ledger sees on restart</h3>
+      <div id="chainVerdict" class="verdict"></div>
+      <div class="headline" id="chainCp"></div>
+      <p style="font-size:.9rem;color:var(--muted)">Replay runs these checks in <code>Replayer.apply</code> and <code>CheckpointCheck.verify</code> (Replay.kt). The signing key never lives with the data, so the attacker cannot produce a matching signature.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= MERKLE ======================= -->
+<section id="merkle">
+  <div class="eyebrow">Concept 2 of 2</div>
+  <h2>Proving one bet without the whole ledger</h2>
+  <p class="prose">The Merkle tree lets a player or regulator confirm a single entry using only log₂(n) hashes. Select a bet. The dashed amber boxes are the audit path the ledger hands over; the green boxes are what the verifier recomputes on its own, ending at the signed root.</p>
+  <div class="two">
+    <div class="card"><div class="mtree" id="mtree"></div></div>
+    <div class="card">
+      <h3 id="mTitle">Select a leaf</h3>
+      <ol class="steps-list" id="mSteps"></ol>
+      <div id="mVerdict" class="verdict"></div>
+      <p style="font-size:.9rem;color:var(--muted)">At a billion bets the proof is about 30 hashes, roughly 1 KB. See <code>MerkleVerify.inclusion</code> (Merkle.kt), which needs nothing from the operator but the proof and the signed root.</p>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= DEBUGGER ======================= -->
+<section id="debugger">
+  <div class="eyebrow">Step-through simulator</div>
+  <h2>Watch the code run</h2>
+  <p class="prose">Pick a scenario and step through it. The left pane shows the real Kotlin source with the executing line highlighted; the right pane shows each thread, the queue, the writer's batch, balances and the journal on disk as they change. Hashes are real SHA-256 over a simplified encoding, abbreviated.</p>
+  <div class="dbg">
+    <div class="toolbar">
+      <div class="scen" id="scenBtns" role="group" aria-label="Scenario"></div>
+      <div class="ctl">
+        <button type="button" id="bReset" title="Restart scenario">↺</button>
+        <button type="button" id="bBack" title="Step back">◀</button>
+        <button type="button" id="bStep" class="primary" title="Step over">Step ▶</button>
+        <button type="button" id="bRun" title="Run to end">Run</button>
+        <span class="count" id="count"></span>
+      </div>
+    </div>
+    <div class="bench">
+      <div class="codecol">
+        <div class="tabs" id="tabs" role="tablist" aria-label="Source files"></div>
+        <div class="code" id="code" tabindex="0" aria-label="Source code"></div>
+      </div>
+      <div class="statecol">
+        <div class="explain" aria-live="polite"><div class="where" id="where"></div><h3 id="stepTitle"></h3><p id="stepNote"></p></div>
+        <div id="banner"></div>
+        <div class="pane"><h4>Threads</h4><div class="body"><div class="threads" id="threads"></div></div></div>
+        <div class="pane"><h4>Call stack · variables</h4><div class="body"><ul class="stack" id="stack"></ul><dl class="vars" id="vars"></dl></div></div>
+        <div class="pane"><h4>Pipeline</h4><div class="body lanes">
+          <div><div class="eyebrow" style="margin-bottom:4px">Queue</div><div class="chips" id="queue"></div></div>
+          <div><div class="eyebrow" style="margin-bottom:4px">Writer batch</div><div class="chips" id="batch"></div></div>
+        </div></div>
+        <div class="pane"><h4>Balances · committed (staged)</h4><div class="body"><table class="bal" id="bal"></table></div></div>
+        <div class="pane"><h4>Journal on disk</h4><div class="body"><div id="journal"></div><div class="headline" id="head"></div></div></div>
+        <div class="pane" style="border-bottom:0"><h4>Log</h4><div class="body"><div class="console" id="console"></div></div></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ======================= REGULATORS ======================= -->
+<section id="regulators">
+  <div class="eyebrow">Evidence</div>
+  <h2>What the tests prove</h2>
+  <p class="prose"><code>MultiDeviceWalletTest</code> puts one player on six devices at once while a settlement feed redelivers results, three screens poll the balance and a regulator signs checkpoints. Every property is then checked against the ledger's own replayed history rather than the wallet's final numbers. In a typical run, about 13 million balance reads saw zero balances the ledger never held.</p>
+  <div class="tblwrap"><table class="reg">
+    <thead><tr><th>Property</th><th>Guarantee</th><th>How it is enforced</th><th>Tests</th></tr></thead>
+    <tbody>
+      <tr><td>R1</td><td>No double spend</td><td>One writer applies transactions in order; later requests in a batch see earlier ones through the overlay.</td><td><code>withdrawal and bet racing…</code>, <code>simultaneous full-balance withdrawals…</code>, <code>no double spend…</code></td></tr>
+      <tr><td>R2</td><td>Never negative, at any instant</td><td><code>AccountPolicy</code> checked on every posting; replay re-checks every historic balance.</td><td><code>STORM</code> replays every intermediate balance</td></tr>
+      <tr><td>R3</td><td>No phantom balances</td><td>Read structures are updated only after fsync; rejections wait for their batch to commit.</td><td><code>STORM</code>: every observed balance must appear in history</td></tr>
+      <tr><td>R4</td><td>Exactly-once</td><td>Idempotency keys with content fingerprints; one settlement key per bet for every outcome.</td><td><code>double-tapped…</code>, <code>cash-out racing settlement…</code>, <code>bet settles exactly once…</code></td></tr>
+      <tr><td>R5</td><td>Full reconciliation</td><td>Independent model built from client receipts must equal the ledger to the cent.</td><td><code>STORM</code>, <code>stress - invariants hold…</code></td></tr>
+      <tr><td>R6</td><td>Provability</td><td>Inclusion proof for every receipt; consistency proofs between checkpoints signed mid-storm.</td><td><code>STORM</code>, <code>MerkleTest</code>, <code>IntegrityTest</code></td></tr>
+    </tbody>
+  </table></div>
+</section>
+
+<!-- ======================= FILES ======================= -->
+<section id="files">
+  <div class="eyebrow">Reference</div>
+  <h2>Files and running</h2>
+  <div class="filemap">
+    <div><code>Ledger.kt</code><span>Engine: queue, writer thread, group commit, read API, recovery.</span></div>
+    <div><code>SportsbookWallet.kt</code><span>PAM API: deposits, withdrawals, bets, exactly-once settlement.</span></div>
+    <div><code>Replay.kt</code><span>Balance rules, journal replay checks, checkpoint verification.</span></div>
+    <div><code>Journal.kt</code><span>CRC-framed append-only file, fsync, torn-write recovery, directory lock.</span></div>
+    <div><code>Merkle.kt</code><span>Incremental root, inclusion and consistency proofs and verifiers.</span></div>
+    <div><code>Signing.kt</code><span>Tree heads, Ed25519 signer interface (plug in an HSM or KMS).</span></div>
+    <div><code>Hashes.kt · EntryCodec.kt</code><span>Domain-separated SHA-256 and the canonical byte format.</span></div>
+    <div><code>LedgerVerifier.kt</code><span>Offline auditor that needs only the files and a public key.</span></div>
+  </div>
+  <pre class="cmd">gradle test          # 27 tests: Merkle, integrity, concurrency, multi-device regulatory suite
+gradle run           # demo: 16 threads of betting, then an independent audit and proofs</pre>
+  <div class="prose" style="display:grid;gap:10px">
+    <h3>Before production</h3>
+    <p>Keep the signing key in an HSM or cloud KMS by implementing <code>TreeHeadSigner</code>. Publish signed tree heads somewhere you do not control, such as a regulator endpoint or a transparency log, so even the operator cannot quietly fork history. Entries are held in memory for proofs and lookups; at very large scale move them to an indexed store or tile-based Merkle storage. Changing <code>AccountPolicy</code> changes what replay accepts, so version it alongside the journal.</p>
+  </div>
+</section>
+<footer>Hashes on this page are computed in your browser with SHA-256 over a simplified encoding, so they illustrate the mechanism but will not match the Kotlin byte format exactly.</footer>
+</div>
+
+<script>
+/*__SOURCES__*/
+</script>
+<script>
+"use strict";
+/* ============================== SHA-256 (compact, synchronous) ============================== */
+const sha256hex = (() => {
+  const K = [], H0 = []; let n = 2, c = 0;
+  const prime = x => { for (let i = 2; i * i <= x; i++) if (x % i === 0) return false; return true; };
+  while (c < 64) { if (prime(n)) { if (c < 8) H0[c] = (Math.sqrt(n) % 1) * 2 ** 32 | 0; K[c] = (Math.cbrt(n) % 1) * 2 ** 32 | 0; c++; } n++; }
+  const enc = new TextEncoder();
+  return str => {
+    const msg = enc.encode(str), l = msg.length, bl = ((l + 9 + 63) >> 6) << 6;
+    const b = new Uint8Array(bl); b.set(msg); b[l] = 0x80;
+    const dv = new DataView(b.buffer); dv.setUint32(bl - 4, (l * 8) >>> 0); dv.setUint32(bl - 8, Math.floor(l * 8 / 2 ** 32));
+    const h = H0.slice(), w = new Int32Array(64);
+    for (let o = 0; o < bl; o += 64) {
+      for (let i = 0; i < 16; i++) w[i] = dv.getInt32(o + i * 4);
+      for (let i = 16; i < 64; i++) {
+        const a = w[i - 15], d = w[i - 2];
+        const s0 = (a >>> 7 | a << 25) ^ (a >>> 18 | a << 14) ^ (a >>> 3);
+        const s1 = (d >>> 17 | d << 15) ^ (d >>> 19 | d << 13) ^ (d >>> 10);
+        w[i] = (w[i - 16] + s0 + w[i - 7] + s1) | 0;
+      }
+      let [A, B, C, D, E, F, G, X] = h;
+      for (let i = 0; i < 64; i++) {
+        const S1 = (E >>> 6 | E << 26) ^ (E >>> 11 | E << 21) ^ (E >>> 25 | E << 7);
+        const t1 = (X + S1 + ((E & F) ^ (~E & G)) + K[i] + w[i]) | 0;
+        const S0 = (A >>> 2 | A << 30) ^ (A >>> 13 | A << 19) ^ (A >>> 22 | A << 10);
+        const t2 = (S0 + ((A & B) ^ (A & C) ^ (B & C))) | 0;
+        X = G; G = F; F = E; E = (D + t1) | 0; D = C; C = B; B = A; A = (t1 + t2) | 0;
+      }
+      h[0] = h[0] + A | 0; h[1] = h[1] + B | 0; h[2] = h[2] + C | 0; h[3] = h[3] + D | 0;
+      h[4] = h[4] + E | 0; h[5] = h[5] + F | 0; h[6] = h[6] + G | 0; h[7] = h[7] + X | 0;
+    }
+    return h.map(x => (x >>> 0).toString(16).padStart(8, "0")).join("");
+  };
+})();
+const short = h => h.slice(0, 8) + "…";
+const GENESIS = sha256hex("PAM-LEDGER/genesis/v1sportsbook");
+const leafH = body => sha256hex("\x00" + body);
+const nodeH = (l, r) => sha256hex("\x01" + l + r);
+const chainH = (prev, leaf) => sha256hex("PAM-LEDGER/chain/v1" + prev + leaf);
+function merkleRoot(leaves) { // RFC 9162 shape: left subtree = largest power of two below n
+  if (!leaves.length) return sha256hex("");
+  if (leaves.length === 1) return leaves[0];
+  let k = 1; while (k * 2 < leaves.length) k *= 2;
+  return nodeH(merkleRoot(leaves.slice(0, k)), merkleRoot(leaves.slice(k)));
+}
+const eur = m => (m < 0 ? "−" : "") + "€" + (Math.abs(m) / 100).toFixed(2);
+const esc = s => String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+const $ = id => document.getElementById(id);
+
+/* ============================== ARCHITECTURE ============================== */
+const ARCH = {
+  devices: ["Devices & feeds", "—", "Phones, tablets, the settlement feed and payment-provider webhooks. Any of them can retry, double-tap or redeliver.", ["Every request carries an idempotency key such as <code>bet:8812:place</code>.", "A timeout is never ambiguous: retry with the same key and the ledger replays the original receipt."]],
+  wallet: ["SportsbookWallet", "SportsbookWallet.kt", "The PAM-facing API. Turns business actions into balanced double-entry transactions.", ["Bet stakes move from cash into a per-player escrow account.", "Every outcome of a bet shares one key, <code>bet:{id}:settle</code>, so a bet resolves exactly once.", "Settlement reads the stake back from the ledger rather than trusting the caller."]],
+  submit: ["Ledger.submit()", "Ledger.kt", "Runs on the caller's thread. Hashes the request's content and offers it to the queue.", ["Returns a future that completes only after the entry is fsync'd.", "Callbacks run on a separate executor so slow client code can never stall the writer.", "A full queue for longer than the timeout yields <code>OverloadedException</code>: back-pressure, nothing written."]],
+  queue: ["Bounded queue", "Ledger.kt", "An <code>ArrayBlockingQueue</code> between many callers and one writer.", ["Bounded, so overload produces fast, explicit rejections rather than unbounded memory growth.", "Shutdown is a message in the same queue, so everything queued before it still commits."]],
+  writer: ["Writer thread", "Ledger.kt · processBatch", "The only code that changes ledger state. Drains up to 1,024 requests and commits them with a single fsync.", ["No locks, so no deadlocks and no lock-ordering bugs.", "Linearizable: each transaction sees all earlier ones, including those earlier in the same batch.", "Fail-stop: a failed write or fsync stops all further writes until restart."]],
+  read: ["Read side", "Ledger.kt · AppendOnlyList.kt", "Balances, entries and the idempotency index, readable by any thread without locks.", ["Updated only after fsync succeeds, so readers never see uncommitted money.", "Published in dependency order: entries, then indexes and balances, then the head.", "<code>AppendOnlyList</code> uses a volatile size to give readers a safe happens-before edge."]],
+  journal: ["entries.journal", "Journal.kt", "Append-only file of <code>[length | CRC32C | entry bytes + chain hash]</code> records.", ["Never updated in place.", "A torn final record (power cut) is copied to a quarantine file before truncation.", "Damage anywhere else is treated as tampering and the ledger refuses to start.", "An OS file lock stops a second process appending to the same ledger."]],
+  checkpoints: ["Signed tree heads", "Signing.kt", "Every N entries, and on demand, the writer signs (ledger id, size, Merkle root, chain head, time) with Ed25519.", ["Stops an attacker who rewrites history and recomputes every hash.", "Detects rollback: a checkpoint covering more entries than exist on disk.", "Key ids allow rotation; trusted keys are configured explicitly."]],
+  prover: ["Merkle prover & verifier", "Merkle.kt", "Builds inclusion and consistency proofs from stored leaf hashes; the verifier is stateless.", ["Inclusion: this entry is in the tree with this signed root.", "Consistency: the tree at size m is a prefix of the tree at size n, so nothing was rewritten.", "Completed subtrees are cached forever because the ledger only grows."]],
+  auditor: ["Regulator / auditor", "LedgerVerifier.kt", "Needs the journal files and the public key. Nothing from the running system.", ["Replays every entry and re-checks every rule.", "Verifies every checkpoint signature and root.", "Confirms money is conserved: each currency sums to zero."]],
+};
+function showArch(key) {
+  const [name, file, what, bullets] = ARCH[key];
+  document.querySelectorAll(".node").forEach(n => n.classList.toggle("on", n.dataset.node === key));
+  $("archInfo").innerHTML = `<h3>${name}</h3><div class="file">${file}</div><p>${what}</p><ul>${bullets.map(b => `<li>${b}</li>`).join("")}</ul>`;
+}
+document.querySelectorAll(".node").forEach(n => {
+  n.addEventListener("click", () => showArch(n.dataset.node));
+  n.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); showArch(n.dataset.node); } });
+});
+showArch("writer");
+
+/* ============================== HASH CHAIN PLAYGROUND ============================== */
+const CHAIN_ENTRIES = [
+  ["DEPOSIT", "player:42:cash:EUR", 5000], ["BET_PLACED", "player:42:open-bets:EUR", 1000],
+  ["BET_WON", "player:42:cash:EUR", 2600], ["BET_PLACED", "player:42:open-bets:EUR", 1500], ["WITHDRAWAL", "player:42:cash:EUR", 3000],
+];
+const chainOrig = CHAIN_ENTRIES.map(e => e[2]);
+let chainAmounts = chainOrig.slice(), attackMode = false;
+function computeChain(amounts) {
+  let prev = GENESIS; const out = [];
+  amounts.forEach((amt, i) => { const leaf = leafH(`${i}|${CHAIN_ENTRIES[i][0]}|${amt}`); const ch = chainH(prev, leaf); out.push({ prev, leaf, chain: ch }); prev = ch; });
+  return out;
+}
+const stored = computeChain(chainOrig);
+const signedRoot = merkleRoot(stored.map(s => s.leaf));
+function renderChain() {
+  const now = computeChain(chainAmounts);
+  // Edit in place: the stored prev/chain hashes are the originals; only the entry body changed.
+  // Edit and rehash: the attacker rewrites every stored hash to match.
+  const disk = attackMode ? now : stored.map((s, i) => ({ prev: s.prev, chain: s.chain, leaf: leafH(`${i}|${CHAIN_ENTRIES[i][0]}|${chainAmounts[i]}`) }));
+  let firstBreak = -1, running = GENESIS;
+  const html = CHAIN_ENTRIES.map((e, i) => {
+    const d = disk[i];
+    const recomputed = chainH(running, d.leaf);
+    const broken = d.prev !== running || recomputed !== d.chain;
+    if (broken && firstBreak < 0) firstBreak = i;
+    running = d.chain;
+    const edited = chainAmounts[i] !== chainOrig[i];
+    return `<div class="blk${broken ? " broken" : ""}"><span class="seq">#${i}</span>
+      <span><b>${e[0]}</b> <span class="mono" style="color:var(--muted)">${e[1]}</span></span>
+      <span style="display:flex;gap:6px;align-items:center"><label class="mono" for="amt${i}" style="font-size:.75rem">${edited ? "edited" : "minor units"}</label><input id="amt${i}" data-i="${i}" type="number" step="100" value="${chainAmounts[i]}"></span>
+      <span class="h">prev ${short(d.prev)} · leaf ${short(d.leaf)} · chain ${short(d.chain)} ${broken ? '<span class="pill bad">link broken</span>' : '<span class="pill ok">link ok</span>'}</span></div>`;
+  }).join("");
+  $("chainBox").innerHTML = html;
+  $("chainBox").querySelectorAll("input").forEach(inp => inp.addEventListener("change", ev => {
+    const v = parseInt(ev.target.value, 10); chainAmounts[+ev.target.dataset.i] = Number.isFinite(v) ? v : chainOrig[+ev.target.dataset.i]; renderChain();
+  }));
+  const rootNow = merkleRoot(disk.map(x => x.leaf));
+  const changed = chainAmounts.some((a, i) => a !== chainOrig[i]);
+  const v = $("chainVerdict");
+  if (!changed) { v.className = "verdict ok"; v.innerHTML = "<b>Ledger opens.</b> Every link verifies and the Merkle root matches the signed checkpoint."; }
+  else if (firstBreak >= 0) { v.className = "verdict bad"; v.innerHTML = `<b>TamperDetectedException:</b> entry #${firstBreak}: stored chain hash does not match recomputed hash. The ledger refuses to start.`; }
+  else { v.className = "verdict bad"; v.innerHTML = `<b>TamperDetectedException:</b> checkpoint at size 5: Merkle root does not match journal (history rewritten). The chain looked perfect, but the attacker cannot re-sign it.`; }
+  $("chainCp").innerHTML = `<span>signed checkpoint root <b>${short(signedRoot)}</b></span><span>root of journal now  <b>${short(rootNow)}</b> ${rootNow === signedRoot ? '<span class="pill ok">match</span>' : '<span class="pill bad">mismatch</span>'}</span>`;
+}
+function setMode(attack) { attackMode = attack; $("modeNaive").setAttribute("aria-pressed", String(!attack)); $("modeAttack").setAttribute("aria-pressed", String(attack)); renderChain(); }
+$("modeNaive").onclick = () => setMode(false);
+$("modeAttack").onclick = () => setMode(true);
+$("chainReset").onclick = () => { chainAmounts = chainOrig.slice(); renderChain(); };
+chainAmounts[2] = 260000; // open with an edit already made so the page shows the effect at rest
+renderChain();
+
+/* ============================== MERKLE EXPLORER ============================== */
+const M_LEAVES = ["deposit €50", "bet #8812", "bet #8813", "win #8812", "deposit €20", "bet #8820", "cash-out", "withdraw"].map(t => ({ t, h: leafH(t) }));
+const levels = [M_LEAVES.map(x => x.h)];
+while (levels[levels.length - 1].length > 1) { const p = levels[levels.length - 1], nx = []; for (let i = 0; i < p.length; i += 2) nx.push(nodeH(p[i], p[i + 1])); levels.push(nx); }
+let mSel = 2;
+function renderMerkle() {
+  const W = 640, Hh = 300, bw = 70, bh = 34, depth = levels.length - 1;
+  const pos = (lv, i) => { const n = levels[lv].length, slot = W / n; return [slot * i + slot / 2, Hh - 30 - lv * ((Hh - 60) / depth)]; };
+  const pathSet = new Set(), sibSet = new Set();
+  let idx = mSel; for (let lv = 0; lv <= depth; lv++) { pathSet.add(lv + ":" + idx); if (lv < depth) sibSet.add(lv + ":" + (idx ^ 1)); idx >>= 1; }
+  let svg = `<svg viewBox="0 0 ${W} ${Hh}" role="img" aria-label="Merkle tree of eight ledger entries">`;
+  for (let lv = 1; lv <= depth; lv++) levels[lv].forEach((_, i) => {
+    const [x, y] = pos(lv, i);
+    [0, 1].forEach(k => { const [cx, cy] = pos(lv - 1, i * 2 + k); const on = pathSet.has(lv + ":" + i) && pathSet.has((lv - 1) + ":" + (i * 2 + k)); svg += `<line class="ml${on ? " path" : ""}" x1="${x}" y1="${y + bh / 2}" x2="${cx}" y2="${cy - bh / 2}"/>`; });
+  });
+  levels.forEach((row, lv) => row.forEach((h, i) => {
+    const [x, y] = pos(lv, i); const key = lv + ":" + i;
+    const cls = `mn${lv === 0 ? " leaf" : ""}${pathSet.has(key) ? " path" : ""}${sibSet.has(key) ? " sib" : ""}`;
+    const label = lv === depth ? "root" : lv === 0 ? M_LEAVES[i].t : short(h).slice(0, 6);
+    svg += `<g class="${cls}" ${lv === 0 ? `data-leaf="${i}" tabindex="0" role="button" aria-label="Prove ${M_LEAVES[i].t}"` : ""}><rect x="${x - bw / 2}" y="${y - bh / 2}" width="${bw}" height="${bh}" rx="4"/><text x="${x}" y="${y + (lv === 0 ? -2 : 4)}">${label}</text>${lv === 0 ? `<text x="${x}" y="${y + 11}" style="fill:var(--muted)">${short(h).slice(0, 6)}</text>` : ""}</g>`;
+  }));
+  svg += "</svg>";
+  $("mtree").innerHTML = svg;
+  $("mtree").querySelectorAll("[data-leaf]").forEach(g => {
+    const go = () => { mSel = +g.dataset.leaf; renderMerkle(); };
+    g.addEventListener("click", go); g.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); go(); } });
+  });
+  // verification walk-through
+  let r = levels[0][mSel], i2 = mSel; const lines = [`start: leaf(${M_LEAVES[mSel].t}) = ${short(r)}`];
+  for (let lv = 0; lv < depth; lv++) { const sib = levels[lv][i2 ^ 1]; r = (i2 & 1) ? nodeH(sib, r) : nodeH(r, sib); lines.push(`${(i2 & 1) ? "node(sibling, r)" : "node(r, sibling)"} with ${short(sib)} → ${short(r)}`); i2 >>= 1; }
+  $("mTitle").textContent = `Proving “${M_LEAVES[mSel].t}” (leaf ${mSel} of 8)`;
+  $("mSteps").innerHTML = lines.map(l => `<li>${esc(l)}</li>`).join("");
+  const ok = r === levels[depth][0];
+  $("mVerdict").className = "verdict " + (ok ? "ok" : "bad");
+  $("mVerdict").innerHTML = `${ok ? "<b>Proof valid.</b>" : "<b>Proof invalid.</b>"} ${depth} sibling hashes rebuilt the signed root ${short(levels[depth][0])}.`;
+}
+renderMerkle();
+
+/* ============================== CODE VIEWER ============================== */
+function highlight(src) {
+  const text = esc(src);
+  const re = /(\/\*[\s\S]*?\*\/|\/\/[^\n]*|"(?:[^"\\\n]|\\.)*"|\b(?:fun|val|var|class|object|interface|data|sealed|private|internal|override|return|if|else|when|for|while|in|is|try|catch|finally|throw|import|package|companion|const|null|true|false|this|continue|break|init|open|enum|typealias)\b|@\w+|\b\d[\d_]*L?\b|\b[A-Z][A-Za-z0-9]+\b)/g;
+  return text.replace(re, m => {
+    if (m.startsWith("/*") || m.startsWith("//")) return m.split("\n").map(x => `<span class="c">${x}</span>`).join("\n");
+    if (m.startsWith('"')) return `<span class="s">${m}</span>`;
+    if (/^\d/.test(m)) return `<span class="n">${m}</span>`;
+    if (/^[A-Z]/.test(m)) return `<span class="t">${m}</span>`;
+    return `<span class="k">${m}</span>`;
+  }).split("\n");
+}
+const FILES = Object.keys(SOURCES);
+const rendered = {};
+let shownFile = null;
+function ensureFile(f) {
+  if (shownFile === f) return;
+  shownFile = f;
+  if (!rendered[f]) rendered[f] = highlight(SOURCES[f]).map((h, i) => `<div class="ln" data-l="${i + 1}"><span class="no">${i + 1}</span><span class="mk"></span><span>${h || " "}</span></div>`).join("");
+  $("code").innerHTML = rendered[f];
+  $("tabs").querySelectorAll("button").forEach(b => b.setAttribute("aria-selected", String(b.dataset.f === f)));
+}
+FILES.forEach(f => { const b = document.createElement("button"); b.type = "button"; b.setAttribute("role", "tab"); b.dataset.f = f; b.textContent = f; b.onclick = () => { ensureFile(f); markLines(); }; $("tabs").appendChild(b); });
+function findLine(f, anchor) {
+  const lines = SOURCES[f].split("\n");
+  const i = lines.findIndex(l => l.includes(anchor));
+  if (i < 0) console.warn("anchor not found", f, anchor);
+  return i + 1;
+}
+let curLoc = null; // {f, from, to}
+function markLines(scroll) {
+  const box = $("code");
+  box.querySelectorAll(".ln.cur").forEach(e => e.classList.remove("cur", "first"));
+  if (!curLoc || curLoc.f !== shownFile) return;
+  for (let l = curLoc.from; l <= curLoc.to; l++) { const el = box.querySelector(`[data-l="${l}"]`); if (el) el.classList.add("cur"); if (el && l === curLoc.from) el.classList.add("first"); }
+  if (scroll) { const el = box.querySelector(`[data-l="${curLoc.from}"]`); if (el) box.scrollTop = Math.max(0, el.offsetTop - box.clientHeight / 3); }
+}
+
+/* ============================== SIMULATION MODEL ============================== */
+const A = {
+  cash: p => `player:${p}:cash:EUR`, bets: p => `player:${p}:open-bets:EUR`,
+  rev: "house:revenue:EUR", psp: "house:psp-clearing:EUR",
+};
+function fresh() {
+  return { threads: {}, queue: [], batch: [], overlay: {}, accounts: {}, journal: [], idem: {},
+    head: { size: 0, chain: GENESIS, root: sha256hex("") }, tip: null, cps: [], log: [], vars: {}, stack: [], banner: null };
+}
+function th(s, id, name, status, op) { s.threads[id] = { name, status, op: op ?? s.threads[id]?.op ?? "" }; }
+function log(s, m) { s.log.push(m); }
+function seal(s, kind, key, postings) {
+  const t = s.tip || { seq: s.head.size, chain: s.head.chain };
+  const leaf = leafH(JSON.stringify([t.seq, kind, key, postings]));
+  const chain = chainH(t.chain, leaf);
+  s.tip = { seq: t.seq + 1, chain };
+  return { seq: t.seq, kind, key, postings, prev: t.chain, leaf, chain, st: "staged" };
+}
+const durable = s => s.journal.filter(j => j.st === "fsynced");
+function refreshHead(s) { const d = durable(s); s.head = { size: d.length, chain: d.length ? d[d.length - 1].chain : GENESIS, root: merkleRoot(d.map(j => j.leaf)) }; }
+function apply(map, postings) { for (const [a, amt] of postings) map[a] = (map[a] || 0) + amt; }
+function seed(s, kind, key, postings) { const e = seal(s, kind, key, postings); e.st = "fsynced"; s.journal.push(e); apply(s.accounts, postings); s.idem[key] = e.seq; s.tip = null; refreshHead(s); return e; }
+function stage(s, kind, key, postings, owner) {
+  const e = seal(s, kind, key, postings); e.owner = owner;
+  for (const [a, amt] of postings) s.overlay[a] = (s.overlay[a] ?? s.accounts[a] ?? 0) + amt;
+  s.staged = (s.staged || []).concat([e]);
+  return e;
+}
+function writeBatch(s) { (s.staged || []).forEach(e => { e.st = "written"; s.journal.push(e); }); }
+function fsyncBatch(s) { s.journal.forEach(e => { if (e.st === "written") e.st = "fsynced"; }); }
+function publish(s) {
+  (s.staged || []).forEach(e => { s.idem[e.key] = e.seq; });
+  Object.assign(s.accounts, s.overlay); s.overlay = {}; refreshHead(s); s.tip = null;
+}
+function batchMark(s, label, verdict) { const b = s.batch.find(x => x.label === label); if (b) b.verdict = verdict; }
+
+/* A step = where the "program counter" is + what it does to the world. */
+function S(file, anchor, span, title, note, fx, extra = {}) { return { file, anchor, span, title, note, fx, ...extra }; }
+const W = "SportsbookWallet.kt", L = "Ledger.kt", R = "Replay.kt", J = "Journal.kt", M = "Model.kt", V = "Validation.kt";
+
+const SCENARIOS = [
+{ id: "bet", name: "Place a bet",
+  intro: "Alice has €50.00. Her phone places a €10.00 bet on Arsenal to win. Follow it from the button press to a durable receipt.",
+  setup(s) { seed(s, "DEPOSIT", "deposit:psp-771", [[A.psp, -5000], [A.cash("alice"), 5000]]); th(s, "phone", "Alice · phone", "idle", "—"); th(s, "writer", "Writer thread", "parked", "queue.take()"); signCp(s); },
+  steps: [
+    S(W, "fun placeBet(", 3, "The phone calls placeBet", "The wallet is a thin layer: it turns “bet €10 on Arsenal” into a balanced double-entry transaction. Amounts are Long minor units, so €10.00 is 1000.",
+      s => { th(s, "phone", "Alice · phone", "running", "placeBet(alice, B-8812, 1000)"); }, { stack: ["SportsbookWallet.placeBet", "Phone.onTapPlaceBet"], vars: { playerId: '"alice"', betId: '"B-8812"', stake: "1000  (€10.00)", currency: '"EUR"' } }),
+    S(W, "idempotencyKey = placementKey(betId)", 7, "Build the request", "The idempotency key is derived from the bet id, so a double tap or a retry after a timeout carries the same key. Postings: cash −1000, escrow +1000. They sum to zero.",
+      s => {}, { stack: ["SportsbookWallet.placeBet"], vars: { idempotencyKey: '"bet:B-8812:place"', kind: '"BET_PLACED"', "postings[0]": "player:alice:cash:EUR  −1000", "postings[1]": "player:alice:open-bets:EUR  +1000" } }),
+    S(V, "for ((currency, sum) in sums)", 1, "Validate the double-entry rule", "TransactionRequest's constructor runs Validation.checkTransaction. Each currency's postings must sum to exactly zero, computed with overflow-checked addition. Money can only move, never appear.",
+      s => {}, { stack: ["Validation.checkTransaction", "TransactionRequest.<init>", "SportsbookWallet.placeBet"], vars: { "sums[EUR]": "−1000 + 1000 = 0 ✓" } }),
+    S(L, "val fingerprint = EntryCodec.requestFingerprint", 1, "Fingerprint on the caller's thread", "A SHA-256 of the request's business content. It lets the writer tell an honest retry (same key, same content) from a conflicting reuse. Computing it here keeps work off the single writer.",
+      s => {}, { stack: ["Ledger.submit", "Ledger.append", "SportsbookWallet.placeBet"], vars: { fingerprint: short(sha256hex("BET_PLACED|alice|1000")) } }),
+    S(L, "if (!queue.offer(cmd", 3, "Offer to the bounded queue", "If the queue stayed full for the whole timeout, the caller would get OverloadedException with nothing written. Here there is room.",
+      s => { s.queue.push("bet:B-8812:place"); th(s, "phone", "Alice · phone", "waiting", "future.get()"); log(s, "phone: enqueued bet:B-8812:place"); }, { stack: ["Ledger.submit"], vars: { "queue.size": "1 / 65536" } }),
+    S(L, "return internal.whenCompleteAsync", 1, "The phone now waits on a future", "The future completes only after fsync. Callbacks run on a separate executor, so a slow client cannot stall the writer, and cancelling it cannot cancel the commit.",
+      s => {}, { stack: ["Ledger.append → future.get()"], vars: {} }),
+    S(L, "val first = try { queue.take()", 4, "The writer wakes and drains a batch", "take() blocks until there is work; drainTo grabs everything else waiting, up to 1,024. Under load, batches grow and one fsync is shared by all of them.",
+      s => { s.batch = s.queue.map(l => ({ label: l, verdict: "pending" })); s.queue = []; th(s, "writer", "Writer thread", "running", "processBatch(1)"); }, { stack: ["Ledger.runWriter"], vars: { "batch.size": "1" } }),
+    S(L, "val committedSeq = idempotency[req.idempotencyKey]", 1, "Already committed?", "The idempotency index is checked first. This key is new, so processing continues.",
+      s => {}, { stack: ["Ledger.processBatch", "Ledger.runWriter"], vars: { key: '"bet:B-8812:place"', committedSeq: "null" } }),
+    S(R, "val newBalance = try {", 9, "Accounting.stage: check the balances", "The new balance is computed with Math.addExact against the overlay (committed state plus anything earlier in this batch). Player accounts may not go negative. 5000 − 1000 = 4000, so it passes.",
+      s => {}, { stack: ["Accounting.stage", "Ledger.processBatch"], vars: { "cash.balance": "5000", "cash.newBalance": "4000 ✓ ≥ 0", "escrow.newBalance": "1000" } }),
+    S(L, "timestamp = maxOf(timestamp, nowMicros())", 12, "Assign a place in history", "The writer assigns the sequence number and a timestamp that never goes backwards, then seals the entry. The previous chain hash is embedded inside the entry itself.",
+      s => { const e = stage(s, "BET_PLACED", "bet:B-8812:place", [[A.cash("alice"), -1000], [A.bets("alice"), 1000]], "phone"); s.vars.e = e; batchMark(s, "bet:B-8812:place", "staged"); },
+      { stack: ["Ledger.processBatch"], varsFn: s => ({ seq: String(s.staged[0].seq), prevChainHash: short(s.staged[0].prev) }) }),
+    S(M, "val leaf = Hashes.leaf(encoded)", 2, "Seal: leaf hash and chain hash", "leaf = SHA-256(0x00 ‖ canonical bytes) becomes a Merkle leaf. chain = SHA-256(tag ‖ prev ‖ leaf) links it to everything before it.",
+      s => {}, { stack: ["SealedEntry.of", "SealedEntry.seal", "Ledger.processBatch"], varsFn: s => ({ leaf: short(s.staged[0].leaf), chain: short(s.staged[0].chain) }) }),
+    S(J, "while (buf.hasRemaining()) channel.write", 1, "Write the batch to the journal", "One buffer holds every record of the batch, each framed as [length | CRC32C | bytes]. The data is in the OS page cache but not yet guaranteed on disk.",
+      s => { writeBatch(s); log(s, "writer: wrote 1 record"); }, { stack: ["Journal.appendBatch", "Ledger.processBatch"], vars: { bytes: "≈ 230" } }),
+    S(J, "channel.force(true)", 1, "fsync", "force(true) flushes data and file metadata. After this returns the entry survives a power cut. One fsync covers the whole batch: that is group commit.",
+      s => { fsyncBatch(s); log(s, "writer: fsync ok"); }, { stack: ["Journal.appendBatch", "Ledger.processBatch"], vars: {} }),
+    S(L, "entries.add(s.sealed)", 13, "Publish to readers, in order", "Entries first, then the idempotency index and balances, then the head. A reader that sees a balance can always resolve the entry behind it. Nothing was visible before fsync.",
+      s => { publish(s); }, { stack: ["Ledger.processBatch"], varsFn: s => ({ "head.size": String(s.head.size), "head.root": short(s.head.root) }) }),
+    S(L, "val receipt = s.sealed.receipt(replayed = false)", 4, "Complete the future", "Only now does the phone get its receipt: sequence number, leaf hash and chain hash. With the leaf hash it can later ask for an inclusion proof against any signed checkpoint.",
+      s => { s.staged.forEach(e => batchMark(s, e.key, "ok")); th(s, "phone", "Alice · phone", "ok", `receipt seq #${s.staged[0].seq}`); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, `phone: receipt #${s.staged[0].seq}`); s.staged = []; s.batch = []; },
+      { stack: ["Phone.onBetConfirmed"], varsFn: s => ({ "receipt.replayed": "false" }) }),
+  ] },
+
+{ id: "race", name: "Double spend race",
+  intro: "Alice has exactly €10.00. At the same instant her phone bets €10.00 and her tablet withdraws €10.00. Only one can win.",
+  setup(s) { seed(s, "DEPOSIT", "deposit:psp-772", [[A.psp, -1000], [A.cash("alice"), 1000]]); th(s, "phone", "Alice · phone", "idle", "—"); th(s, "tablet", "Alice · tablet", "idle", "—"); th(s, "writer", "Writer thread", "parked", "queue.take()"); signCp(s); },
+  steps: [
+    S(W, "fun placeBet(", 3, "Phone: placeBet €10", "Both devices read €10.00 on screen. With locks you would need to hold the right lock across the read and the write. Here nothing is locked at all.",
+      s => { th(s, "phone", "Alice · phone", "running", "placeBet(1000)"); }, { stack: ["SportsbookWallet.placeBet  [phone]"], vars: { stake: "1000" } }),
+    S(W, "fun withdraw(", 3, "Tablet: withdraw €10, simultaneously", "A different thread, a different request, the same money.",
+      s => { th(s, "tablet", "Alice · tablet", "running", "withdraw(1000)"); }, { stack: ["SportsbookWallet.withdraw  [tablet]"], vars: { amount: "1000" } }),
+    S(L, "if (!queue.offer(cmd", 3, "Both land in the queue", "The queue imposes one order. Whichever offer wins is processed first; the race is decided here and only here.",
+      s => { s.queue.push("bet:P1:place", "withdrawal:W1"); th(s, "phone", "Alice · phone", "waiting", "future.get()"); th(s, "tablet", "Alice · tablet", "waiting", "future.get()"); }, { stack: ["Ledger.submit  [phone, tablet]"], vars: { "queue.size": "2" } }),
+    S(L, "val first = try { queue.take()", 4, "Writer drains both into one batch", "Both requests will share a single fsync, but they are still processed strictly one after the other.",
+      s => { s.batch = s.queue.map(l => ({ label: l, verdict: "pending" })); s.queue = []; th(s, "writer", "Writer thread", "running", "processBatch(2)"); }, { stack: ["Ledger.runWriter"], vars: { "batch.size": "2" } }),
+    S(R, "val newBalance = try {", 9, "Request 1, the bet: 1000 − 1000 = 0", "Allowed. The overlay now records the staged balance of 0, invisible to readers but visible to the next request in this batch.",
+      s => { stage(s, "BET_PLACED", "bet:P1:place", [[A.cash("alice"), -1000], [A.bets("alice"), 1000]], "phone"); batchMark(s, "bet:P1:place", "staged"); }, { stack: ["Accounting.stage", "Ledger.processBatch"], vars: { "lookup(cash)": "1000 (committed)", newBalance: "0 ✓" } }),
+    S(R, "throw InsufficientFundsException", 1, "Request 2, the withdrawal: 0 − 1000 < 0", "The lookup goes to the overlay first, so it sees the bet's effect. Rejected. This is the line that makes the double spend impossible.",
+      s => { batchMark(s, "withdrawal:W1", "rejected"); }, { stack: ["Accounting.stage", "Ledger.processBatch"], vars: { "lookup(cash)": "0 (overlay, staged)", newBalance: "−1000 ✗" } }),
+    S(L, "rejections += cmd.future to e", 1, "The rejection is held back", "The refusal depends on the bet, which is not yet durable. If the fsync failed, the tablet would have been refused because of a bet that never happened. So rejections wait for the batch outcome.",
+      s => {}, { stack: ["Ledger.processBatch"], vars: { "rejections.size": "1" } }),
+    S(J, "channel.force(true)", 1, "Write and fsync the batch", "Only the bet is written. The rejected withdrawal leaves no trace on disk.",
+      s => { writeBatch(s); fsyncBatch(s); log(s, "writer: 1 record fsynced"); }, { stack: ["Journal.appendBatch"], vars: {} }),
+    S(L, "accounts.putAll(overlay)", 3, "Publish", "Readers on any device now see €0.00 cash and €10.00 in open bets.",
+      s => { publish(s); }, { stack: ["Ledger.processBatch"], vars: {} }),
+    S(L, "val receipt = s.sealed.receipt(replayed = false)", 4, "Phone gets its receipt", "The bet is placed.",
+      s => { batchMark(s, "bet:P1:place", "ok"); th(s, "phone", "Alice · phone", "ok", "receipt #1"); log(s, "phone: bet accepted"); }, { stack: ["Ledger.processBatch"], vars: {} }),
+    S(L, "rejections.forEach { (f, e)", 1, "Tablet gets InsufficientFundsException", "Delivered after the commit, so the reason it cites is a durable fact. In the test suite this race runs thousands of times; exactly one side ever wins.",
+      s => { th(s, "tablet", "Alice · tablet", "rejected", "InsufficientFunds"); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, "tablet: InsufficientFundsException(balance=0, requested=1000)"); s.staged = []; s.batch = []; }, { stack: ["Ledger.processBatch"], vars: {} }),
+  ] },
+
+{ id: "settle", name: "Cash-out vs result",
+  intro: "Bob's €10.00 bet B7 is open. He taps Cash out for €6.00 on his phone at the moment the feed reports the bet WON, paying €25.00. Both use the key bet:B7:settle.",
+  setup(s) { seed(s, "DEPOSIT", "deposit:psp-9", [[A.psp, -3000], [A.cash("bob"), 3000]]); seed(s, "BET_PLACED", "bet:B7:place", [[A.cash("bob"), -1000], [A.bets("bob"), 1000]]); th(s, "phone", "Bob · phone", "idle", "—"); th(s, "feed", "Settlement feed", "idle", "—"); th(s, "writer", "Writer thread", "parked", "queue.take()"); signCp(s); },
+  steps: [
+    S(W, "private fun settle(", 3, "Both call settle()", "cashOut and settleWin share one private settle function and one idempotency key. That shared key is the whole exactly-once mechanism.",
+      s => { th(s, "phone", "Bob · phone", "running", "cashOut(B7, 600)"); th(s, "feed", "Settlement feed", "running", "settleWin(B7, 2500)"); }, { stack: ["SportsbookWallet.settle  [phone, feed]"], vars: { key: '"bet:B7:settle"' } }),
+    S(W, "val sealed = ledger.findByIdempotencyKey(placementKey", 1, "Read the stake from the ledger", "The stake, player and currency come from the placement entry, not from the caller. A buggy feed cannot release more escrow than was actually staked.",
+      s => {}, { stack: ["SportsbookWallet.placement", "SportsbookWallet.settle"], vars: { "placement.seq": "1", stake: "1000", player: '"bob"' } }),
+    S(W, "val houseDelta", 6, "Build the postings", "Cash-out: escrow −1000, cash +600, revenue +400. Win: escrow −1000, cash +2500, revenue −1500. Different content, same key, so different fingerprints.",
+      s => {}, { stack: ["SportsbookWallet.settle"], vars: { "cashout.houseDelta": "+400", "win.houseDelta": "−1500" } }),
+    S(L, "if (!queue.offer(cmd", 3, "Both enqueued; the phone got there first", "",
+      s => { s.queue.push("settle B7 · CASH_OUT", "settle B7 · WON"); th(s, "phone", "Bob · phone", "waiting", "future.get()"); th(s, "feed", "Settlement feed", "waiting", "future.get()"); }, { stack: ["Ledger.submit"], vars: { "queue.size": "2" } }),
+    S(L, "val first = try { queue.take()", 4, "One batch, two settlements", "",
+      s => { s.batch = s.queue.map(l => ({ label: l, verdict: "pending" })); s.queue = []; th(s, "writer", "Writer thread", "running", "processBatch(2)"); }, { stack: ["Ledger.runWriter"], vars: {} }),
+    S(L, "timestamp = maxOf(timestamp, nowMicros())", 12, "Cash-out is staged", "Not in the committed index, not earlier in the batch, balances fine. It is sealed and registered in stagedByKey.",
+      s => { stage(s, "BET_CASHED_OUT", "bet:B7:settle", [[A.bets("bob"), -1000], [A.cash("bob"), 600], [A.rev, 400]], "phone"); batchMark(s, "settle B7 · CASH_OUT", "staged"); }, { stack: ["Ledger.processBatch"], vars: { "stagedByKey[bet:B7:settle]": "CASH_OUT" } }),
+    S(L, "val sibling = stagedByKey[req.idempotencyKey]", 4, "The WON result finds a sibling", "Same key earlier in this batch with a different fingerprint: IdempotencyConflictException, deferred until the cash-out is durable. Had the content matched, it would piggy-back as a replay instead.",
+      s => { batchMark(s, "settle B7 · WON", "conflict"); }, { stack: ["Ledger.processBatch"], vars: { "sibling.fingerprint": "cash-out", "cmd.fingerprint": "won ≠" } }),
+    S(J, "channel.force(true)", 1, "fsync the cash-out", "",
+      s => { writeBatch(s); fsyncBatch(s); }, { stack: ["Journal.appendBatch"], vars: {} }),
+    S(L, "entries.add(s.sealed)", 13, "Publish and answer both", "The phone gets its receipt. The feed gets the conflict, and the key it collided with is now visible in the ledger, which is exactly what the regulatory STORM test asserts.",
+      s => { publish(s); batchMark(s, "settle B7 · CASH_OUT", "ok"); th(s, "phone", "Bob · phone", "ok", "cashed out €6.00"); th(s, "feed", "Settlement feed", "rejected", "IdempotencyConflict"); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, "feed: IdempotencyConflictException(bet:B7:settle)"); s.staged = []; s.batch = []; }, { stack: ["Ledger.processBatch"], vars: {} }),
+    S(L, "val committedSeq = idempotency[req.idempotencyKey]", 9, "Later: the feed redelivers WON", "Now the key is in the committed index. The fingerprint still differs, so it is refused again. The bet can never be paid twice or paid both ways.",
+      s => { th(s, "feed", "Settlement feed", "rejected", "IdempotencyConflict (redelivery)"); log(s, "feed: redelivery refused"); }, { stack: ["Ledger.processBatch"], vars: { committedSeq: "2", "same fingerprint?": "no" } }),
+  ] },
+
+{ id: "replay", name: "Webhook redelivered",
+  intro: "The payment provider confirmed Carol's €25.00 deposit, but its webhook times out and is delivered again. Carol must be credited once.",
+  setup(s) { seed(s, "DEPOSIT", "deposit:psp-881", [[A.psp, -2500], [A.cash("carol"), 2500]]); th(s, "psp", "PSP webhook", "idle", "—"); th(s, "writer", "Writer thread", "parked", "queue.take()"); signCp(s); },
+  steps: [
+    S(W, "fun deposit(", 14, "The redelivery arrives", "The key is derived from the provider's own reference, so every redelivery of the same payment carries the same key.",
+      s => { th(s, "psp", "PSP webhook", "running", "deposit(carol, 2500, psp-881)"); }, { stack: ["SportsbookWallet.deposit"], vars: { idempotencyKey: '"deposit:psp-881"' } }),
+    S(L, "if (!queue.offer(cmd", 3, "Enqueued as usual", "",
+      s => { s.queue.push("deposit:psp-881"); th(s, "psp", "PSP webhook", "waiting", "future.get()"); }, { stack: ["Ledger.submit"], vars: {} }),
+    S(L, "val first = try { queue.take()", 4, "Writer picks it up", "",
+      s => { s.batch = s.queue.map(l => ({ label: l, verdict: "pending" })); s.queue = []; th(s, "writer", "Writer thread", "running", "processBatch(1)"); }, { stack: ["Ledger.runWriter"], vars: {} }),
+    S(L, "val committedSeq = idempotency[req.idempotencyKey]", 6, "Found, with a matching fingerprint", "This is an honest retry. The writer completes the future with the original receipt, marked replayed = true. Nothing is written, nothing is fsync'd, no money moves.",
+      s => { batchMark(s, "deposit:psp-881", "replayed"); th(s, "psp", "PSP webhook", "ok", "receipt #0 (replayed)"); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, "psp: replayed receipt #0, balance unchanged"); s.batch = []; }, { stack: ["Ledger.processBatch"], vars: { committedSeq: "0", "fingerprint match": "yes", replayed: "true" } }),
+  ] },
+
+{ id: "crash", name: "Power cut",
+  intro: "Dan's €15.00 bet is being written when the power fails, before fsync completes. What happens on restart?",
+  setup(s) { seed(s, "DEPOSIT", "deposit:psp-5", [[A.psp, -4000], [A.cash("dan"), 4000]]); seed(s, "BET_PLACED", "bet:D1:place", [[A.cash("dan"), -500], [A.bets("dan"), 500]]); signCp(s); th(s, "phone", "Dan · phone", "waiting", "placeBet(1500) → future.get()"); th(s, "writer", "Writer thread", "running", "processBatch(1)"); stage(s, "BET_PLACED", "bet:D2:place", [[A.cash("dan"), -1500], [A.bets("dan"), 1500]], "phone"); s.batch = [{ label: "bet:D2:place", verdict: "staged" }]; },
+  steps: [
+    S(J, "while (buf.hasRemaining()) channel.write", 1, "Half the record reaches the disk", "The write was in progress. The frame header promises 230 bytes, but only about 100 made it.",
+      s => { writeBatch(s); s.journal[s.journal.length - 1].st = "torn"; }, { stack: ["Journal.appendBatch", "Ledger.processBatch"], vars: { "frame.len": "230", "bytes on disk": "≈ 100" } }),
+    S(J, "channel.force(true)", 1, "Power fails before fsync returns", "The phone never received a receipt, because receipts are only issued after fsync. From its point of view the outcome is unknown.",
+      s => { s.banner = ["bad", "⚡ Power lost. Process killed."]; th(s, "phone", "Dan · phone", "rejected", "connection lost"); th(s, "writer", "Writer thread", "dead", "—"); s.overlay = {}; s.batch = []; s.tip = null; s.staged = []; }, { stack: ["Journal.appendBatch"], vars: {} }),
+    S(L, "fun open(config: LedgerConfig)", 1, "Restart: Ledger.open", "Memory is gone. Everything is rebuilt from the journal, and every byte is verified on the way in.",
+      s => { s.banner = ["", "Restarting…"]; th(s, "writer", "Writer thread", "starting", "recovery"); s.accounts = {}; }, { stack: ["Ledger.open"], vars: {} }),
+    S(J, "if (end > size) return ScanResult", 1, "Scan finds a record running past end of file", "Only the final record can be torn. A bad record anywhere else would be corruption, and the ledger would refuse to start.",
+      s => {}, { stack: ["Journal.scan", "Journal.openForAppend", "Ledger.open"], vars: { "end": "pos + 8 + 230", "size": "pos + 100", verdict: "torn tail" } }),
+    S(J, "quarantine(ch, path, scan.validBytes)", 2, "Quarantine, then truncate", "The torn bytes are copied to entries.journal.torn-<millis> for forensics before the file is cut back to the last good record. Evidence is never destroyed.",
+      s => { s.journal = s.journal.filter(j => j.st !== "torn"); log(s, "recovery: 100 torn bytes quarantined"); }, { stack: ["Journal.openForAppend", "Ledger.open"], vars: {} }),
+    S(R, "if (entry.prevChainHash != chain)", 5, "Replay verifies every surviving entry", "Sequence, chain link, stored hash, timestamps, unique keys and every balance rule, entry by entry.",
+      s => { s.journal.forEach(e => apply(s.accounts, e.postings)); refreshHead(s); }, { stack: ["Replayer.apply", "Journal.scan", "Ledger.open"], varsFn: s => ({ "entries replayed": String(s.head.size) }) }),
+    S(L, "CheckpointCheck.verify(sth, config", 1, "Checkpoints still verify", "The signed checkpoint covers 2 entries and 2 are on disk. The lost bet was never covered, which is consistent: it was never acknowledged.",
+      s => { s.banner = ["ok", "Ledger open. 2 entries, checkpoint verified, 100 torn bytes quarantined."]; th(s, "writer", "Writer thread", "parked", "queue.take()"); }, { stack: ["CheckpointCheck.verify", "Ledger.open"], vars: { "checkpoint.size": "2", "journal.size": "2" } }),
+    S(W, "fun placeBet(", 3, "The phone retries with the same key", "Same key, bet:D2:place. It is not in the index, so it commits normally. Had the record fully reached disk before the crash, the retry would have received the original receipt instead. Either way Dan's bet exists exactly once.",
+      s => { th(s, "phone", "Dan · phone", "ok", "retry → receipt #2"); stage(s, "BET_PLACED", "bet:D2:place", [[A.cash("dan"), -1500], [A.bets("dan"), 1500]], "phone"); writeBatch(s); fsyncBatch(s); publish(s); s.staged = []; s.banner = null; log(s, "phone: retry committed as #2"); }, { stack: ["SportsbookWallet.placeBet"], vars: { idempotencyKey: '"bet:D2:place"' } }),
+  ] },
+
+{ id: "attack", name: "History rewrite",
+  intro: "An insider with disk access changes Eve's €20.00 withdrawal to €2.00 and recomputes every hash after it, producing a perfectly self-consistent chain.",
+  setup(s) {
+    seed(s, "DEPOSIT", "deposit:psp-31", [[A.psp, -5000], [A.cash("eve"), 5000]]);
+    seed(s, "WITHDRAWAL", "withdrawal:E1", [[A.cash("eve"), -2000], [A.psp, 2000]]);
+    seed(s, "BET_PLACED", "bet:E9:place", [[A.cash("eve"), -1000], [A.bets("eve"), 1000]]);
+    signCp(s); th(s, "writer", "Writer thread", "stopped", "—"); th(s, "attacker", "Insider", "running", "editing entries.journal");
+  },
+  steps: [
+    S(R, "if (entry.prevChainHash != chain)", 1, "The forged file", "Entry #1 now says −200. The attacker recomputed #1's chain hash and every one after it, then fixed every CRC.",
+      s => { const old = s.journal; let prev = GENESIS; s.journal = old.map((e, i) => { const postings = i === 1 ? [[A.cash("eve"), -200], [A.psp, 200]] : e.postings; const leaf = leafH(JSON.stringify([e.seq, e.kind, e.key, postings])); const chain = chainH(prev, leaf); prev = chain; return { ...e, postings, leaf, prev: e.seq ? old[e.seq - 1].chain : GENESIS, chain, st: "forged" }; }); let p = GENESIS; s.journal.forEach(e => { e.prev = p; p = e.chain; }); th(s, "attacker", "Insider", "ok", "chain recomputed"); log(s, "attacker: rewrote entry #1 and rehashed #1..#2"); }, { stack: ["(offline edit)"], vars: { "entry#1.amount": "−2000 → −200" } }),
+    S(L, "fun open(config: LedgerConfig)", 1, "Restart", "",
+      s => { th(s, "writer", "Writer thread", "starting", "recovery"); }, { stack: ["Ledger.open"], vars: {} }),
+    S(R, "if (entry.prevChainHash != chain)", 5, "Replay: every link checks out", "Because everything was recomputed, the chain checks pass. A hash chain alone cannot stop someone who can rewrite all of it.",
+      s => { s.accounts = {}; s.journal.forEach(e => apply(s.accounts, e.postings)); }, { stack: ["Replayer.apply", "Ledger.open"], vars: { "links": "3 / 3 ✓" } }),
+    S(R, "if (sth.head.rootHash != prover.root(size))", 1, "The signed checkpoint disagrees", "The checkpoint signed before the edit commits to the original Merkle root. The forged journal produces a different root, and the attacker cannot sign a new checkpoint without the private key, which lives in the HSM.",
+      s => { const root = merkleRoot(s.journal.map(e => e.leaf)); s.vars2 = root; }, { stack: ["CheckpointCheck.verify", "Ledger.open"], varsFn: s => ({ "signed root": short(s.cps[0].root), "journal root": short(merkleRoot(s.journal.map(e => e.leaf))) + " ✗" }) }),
+    S(R, "TamperDetectedException(\"checkpoint at size", 1, "TamperDetectedException: the ledger refuses to start", "No balance is served from a ledger that cannot prove its history. The offline LedgerVerifier reaches the same verdict from the files and the public key alone.",
+      s => { s.banner = ["bad", "TamperDetectedException: checkpoint at size 3: Merkle root does not match journal (history rewritten)"]; th(s, "writer", "Writer thread", "refused", "TamperDetected"); th(s, "attacker", "Insider", "rejected", "caught"); }, { stack: ["CheckpointCheck.verify", "Ledger.open"], vars: {} }),
+  ] },
+];
+function signCp(s) { s.cps.push({ size: s.head.size, root: s.head.root }); }
+
+/* ============================== DEBUGGER CONTROLLER ============================== */
+let scen = SCENARIOS[0], history = [], pos = 0, timer = null;
+function build() {
+  const s0 = fresh(); scen.setup(s0); s0.log.push("— " + scen.name + " —");
+  history = [s0];
+  scen.steps.forEach(st => { const s = structuredClone(history[history.length - 1]); st.fx(s); history.push(s); });
+}
+function selectScenario(id) {
+  scen = SCENARIOS.find(x => x.id === id); stop(); build(); pos = 0;
+  $("scenBtns").querySelectorAll("button").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.id === id)));
+  render(true);
+}
+SCENARIOS.forEach(sc => { const b = document.createElement("button"); b.type = "button"; b.dataset.id = sc.id; b.textContent = sc.name; b.onclick = () => selectScenario(sc.id); $("scenBtns").appendChild(b); });
+function stop() { if (timer) { clearInterval(timer); timer = null; } $("bRun").textContent = "Run"; }
+$("bStep").onclick = () => { stop(); if (pos < scen.steps.length) { pos++; render(true); } };
+$("bBack").onclick = () => { stop(); if (pos > 0) { pos--; render(true); } };
+$("bReset").onclick = () => { stop(); pos = 0; render(true); };
+$("bRun").onclick = () => {
+  if (timer) { stop(); return; }
+  if (pos >= scen.steps.length) pos = 0;
+  $("bRun").textContent = "Pause";
+  timer = setInterval(() => { if (pos >= scen.steps.length) { stop(); return; } pos++; render(true); }, 1500);
+};
+document.addEventListener("keydown", e => {
+  if (!$("debugger").contains(document.activeElement) && document.activeElement !== document.body) return;
+  if (e.key === "ArrowRight" || e.key === "F10") { e.preventDefault(); $("bStep").click(); }
+  if (e.key === "ArrowLeft") { e.preventDefault(); $("bBack").click(); }
+});
+
+const STATUS = { idle: "mut", running: "warn", waiting: "warn", ok: "ok", rejected: "bad", parked: "mut", dead: "bad", starting: "warn", stopped: "mut", refused: "bad" };
+function render(scroll) {
+  const s = history[pos], step = pos > 0 ? scen.steps[pos - 1] : null;
+  $("count").textContent = `step ${pos} / ${scen.steps.length}`;
+  $("bBack").disabled = pos === 0; $("bStep").disabled = pos === scen.steps.length;
+
+  // code pane
+  const target = step || scen.steps[0];
+  const from = findLine(target.file, target.anchor);
+  curLoc = step ? { f: target.file, from, to: from + target.span - 1 } : null;
+  ensureFile(target.file); markLines(true);
+  if (!step) { const el = $("code").querySelector(`[data-l="${from}"]`); if (el) $("code").scrollTop = Math.max(0, el.offsetTop - $("code").clientHeight / 3); }
+
+  $("where").textContent = step ? `${target.file}:${from}` : "ready";
+  $("stepTitle").textContent = step ? step.title : scen.name;
+  $("stepNote").textContent = step ? (step.note || "") : scen.intro + " Press Step or use the → key.";
+  $("banner").innerHTML = s.banner ? `<div class="banner ${s.banner[0]}">${esc(s.banner[1])}</div>` : "";
+
+  $("threads").innerHTML = Object.values(s.threads).map(t => `<div class="th"><div class="nm">${esc(t.name)}<span class="pill ${STATUS[t.status] || "mut"}">${t.status}</span></div><div class="op">${esc(t.op)}</div></div>`).join("");
+  const stack = step?.stack || [];
+  $("stack").innerHTML = stack.length ? stack.map(f => `<li>${esc(f)}</li>`).join("") : `<li class="empty">no frame</li>`;
+  const vars = step ? (step.varsFn ? step.varsFn(s) : step.vars || {}) : {};
+  $("vars").innerHTML = Object.entries(vars).map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+
+  $("queue").innerHTML = s.queue.length ? s.queue.map(q => `<span class="chip">${esc(q)}</span>`).join("") : `<span class="empty">empty</span>`;
+  const V = { pending: "", staged: "warn", ok: "ok", rejected: "bad", conflict: "bad", replayed: "ok" };
+  $("batch").innerHTML = s.batch.length ? s.batch.map(b => `<span class="chip ${V[b.verdict]}">${esc(b.label)} · ${b.verdict}</span>`).join("") : `<span class="empty">idle</span>`;
+
+  const accts = [...new Set([...Object.keys(s.accounts), ...Object.keys(s.overlay)])].sort((a, b) => (a.startsWith("player") ? 0 : 1) - (b.startsWith("player") ? 0 : 1) || a.localeCompare(b));
+  $("bal").innerHTML = accts.length ? accts.map(a => {
+    const c = s.accounts[a] || 0, o = s.overlay[a];
+    return `<tr><td>${a}</td><td class="amt${c < 0 ? " neg" : ""}">${eur(c)}${o !== undefined && o !== c ? `<span class="delta">→ ${eur(o)}</span>` : ""}</td></tr>`;
+  }).join("") : `<tr><td class="empty">no accounts</td></tr>`;
+
+  const J = { fsynced: ["ok", "fsynced"], written: ["warn", "written"], torn: ["bad", "torn"], forged: ["bad", "forged"] };
+  $("journal").innerHTML = s.journal.length ? s.journal.map(e => `<div class="jr"><span class="sq">#${e.seq}</span><span>${e.kind} <span class="mono" style="font-size:.7rem">${esc(e.key)}</span><span class="hh">chain ${short(e.chain)}</span></span><span class="pill ${J[e.st][0]}">${J[e.st][1]}</span></div>`).join("") : `<span class="empty">empty</span>`;
+  $("head").innerHTML = `<span>head.size <b>${s.head.size}</b> · chain <b>${short(s.head.chain)}</b> · root <b>${short(s.head.root)}</b></span>` + (s.cps.length ? `<span>signed checkpoint covers <b>${s.cps[s.cps.length - 1].size}</b> · root <b>${short(s.cps[s.cps.length - 1].root)}</b></span>` : "");
+  $("console").innerHTML = s.log.map(l => `<div>${esc(l)}</div>`).join("");
+  $("console").scrollTop = 1e6;
+}
+selectScenario("bet");
+</script>
