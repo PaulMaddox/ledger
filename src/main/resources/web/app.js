@@ -279,11 +279,12 @@ $("slipCancel").addEventListener("click", () => { selection = null; $("slip").hi
 $("slip").addEventListener("submit", async e => {
   e.preventDefault();
   if (!selection) return;
+  const submittedSelection = selection;
   const stake = toMinor($("slipStake").value);
   try {
-    const r = await api(`players/${encodeURIComponent(player)}/bets`, { method: "POST", params: { fixture: selection.fixture, selection: selection.sel, stake, betId: uuid() } });
-    say($("betResult"), true, `Bet placed: ${eur(stake)} on ${esc(selection.sel)} @ ${odds(selection.odds)}. Entry #${r.seq}.`);
-    selection = null; $("slip").hidden = true;
+    const r = await api(`players/${encodeURIComponent(player)}/bets`, { method: "POST", params: { fixture: submittedSelection.fixture, selection: submittedSelection.sel, stake, betId: uuid() } });
+    say($("betResult"), true, `Bet placed: ${eur(stake)} on ${esc(submittedSelection.sel)} @ ${odds(submittedSelection.odds)}. Entry #${r.seq}.`);
+    if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
   }
