@@ -396,6 +396,30 @@ class WebAppTest {
         }
     }
 
+    /** Old random seed payloads are recognized rather than regenerated after reopening. */
+    @Test
+    fun `simulator restart skips committed legacy seed deposits`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(dir, signer)).use { ledger ->
+            SportsbookWallet(ledger).deposit("sim-00001", 1, "EUR", "sim-seed-sim-00001")
+        }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                Simulator(Book(wallet, model), wallet).use { simulator ->
+                    simulator.configure(1, 600, false)
+                    simulator.start()
+                    Thread.sleep(1000)
+                    simulator.stop()
+                    assertEquals(0L, simulator.rejectedOther.get())
+                    assertTrue(simulator.eventPage(0).events.none { it.op == "SEED" })
+                    assertEquals(1L, ledger.findByIdempotencyKey("deposit:sim-seed-sim-00001")!!.entry.postings.first { it.amount > 0 }.amount)
+                }
+            }
+        }
+    }
+
     /** Delayed workers from a stopped run must not publish into the next run. */
     @Test
     fun `immediate simulator restart isolates late workers and events`() {

@@ -97,6 +97,9 @@ class SportsbookWallet(private val ledger: Ledger) {
     /** True once this bet's placement has committed. */
     fun hasBetPlacement(betId: String) = ledger.findByIdempotencyKey(placementKey(betId)) != null
 
+    /** Whether a confirmed deposit reference already exists, regardless of its original amount. */
+    internal fun hasDeposit(paymentRef: String) = ledger.findByIdempotencyKey("deposit:$paymentRef") != null
+
     /** Bet won: return [payout] (stake included) to the player. */
     fun settleWin(betId: String, payout: Long) = settle(betId, "BET_WON", payout)
 

@@ -165,11 +165,16 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
         var text = ""
         try {
             // Each automated customer starts with a deposit of EUR 50 to EUR 500 the first time it acts.
-            if (funded.add(customer)) {
-                val amount = rnd.nextLong(50_00, 500_00)
-                text = "joined, deposited ${eur(amount)}"
-                wallet.deposit(customer, amount, "EUR", "sim-seed-$customer")
-                record(counters, customer, op, text, true)
+            if (!funded.contains(customer)) {
+                val ref = "sim-seed-$customer"
+                if (!wallet.hasDeposit(ref)) {
+                    // A stable payload survives retries and restarts; legacy random seeds
+                    // are recognized by their committed reference, not regenerated.
+                    val amount = 50_00 + (customer.hashCode().toLong() and 0xffffffffL) % 450_00
+                    text = "joined, deposited ${eur(amount)}"
+                    wallet.deposit(customer, amount, "EUR", ref)
+                    if (funded.add(customer)) record(counters, customer, op, text, true)
+                } else funded.add(customer)
             }
             when (rnd.nextInt(100)) {
                 in 0..64 -> {
