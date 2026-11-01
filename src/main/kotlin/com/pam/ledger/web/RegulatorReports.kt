@@ -86,7 +86,8 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
             ?: audit.checkpointNow()
         val size = anchor.head.treeSize
         val firstTime = if (size > 0) ledger.entry(0).entry.timestampMicros else anchor.head.timestampMicros
-        val endOfSnapshot = Math.addExact(anchor.head.timestampMicros, 1)
+        val lastEntryTime = if (size > 0) ledger.entry(size - 1).entry.timestampMicros else anchor.head.timestampMicros
+        val endOfSnapshot = Math.addExact(maxOf(anchor.head.timestampMicros, lastEntryTime), 1)
         val from = requestedFrom ?: firstTime
         val to = requestedTo ?: endOfSnapshot
         require(from < to) { "start must be before end" }
