@@ -46,9 +46,9 @@ const uuid = () => {
 async function api(path, { method = "GET", params } = {}) {
   const body = params ? new URLSearchParams(params) : undefined;
   const res = await fetch("/api/" + path, { method, body });
+  if (res.ok) return res.json();
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
-  return data;
+  throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
 }
 const say = (el, ok, html) => { el.className = el.className.replace(/\b(ok|bad)\b/g, "").trim() + (ok === null ? "" : ok ? " ok" : " bad"); el.innerHTML = html; };
 const errText = e => esc(e.message || String(e));

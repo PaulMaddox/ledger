@@ -25,6 +25,22 @@ function context(fetch) {
   return c;
 }
 
+test("API propagates successful body failures and keeps fallback parsing for error responses", async () => {
+  for (const body of ['{"seq":', ""]) {
+    const c = context(async () => new Response(body, { status: 200 }));
+    await assert.rejects(c.api("test"), SyntaxError);
+  }
+  for (const failure of [new SyntaxError("Unexpected end of JSON input"), new TypeError("Body unreadable")]) {
+    const c = context(async () => ({ ok: true, json: async () => { throw failure; } }));
+    await assert.rejects(c.api("test"), err => err === failure);
+  }
+  for (const status of [422, 503]) {
+    const c = context(async () => new Response("not JSON", { status, statusText: "Request failed" }));
+    await assert.rejects(c.api("test"), err =>
+      err.status === status && err.error === "error" && err.message === "Request failed");
+  }
+});
+
 function pollingContext() {
   const fixtures = ["F1", "F2"].map(id => ({
     id, home: "Home", away: "Away", odds: { HOME: 200, DRAW: 300, AWAY: 250 },
@@ -239,6 +255,34 @@ test("uncertain wallet actions retry their original customer, amount and idempot
   assert.equal(calls[2].path, "/api/players/bob/withdraw");
   assert.match(calls[2].body, /amount=999/);
   assert.notEqual(calls[2].body, calls[1].body);
+});
+
+test("unreadable successful wallet responses retain the identical deposit or withdrawal for retry", async () => {
+  for (const kind of ["deposit", "withdraw"]) {
+    for (const failure of [new SyntaxError("Unexpected end of JSON input"), new TypeError("Body unreadable")]) {
+      const calls = [];
+      const s = slipContext(async (path, options) => {
+        calls.push({ path, method: options.method, body: options.body.toString() });
+        if (calls.length <= 2) return { ok: true, json: async () => { throw failure; } };
+        return { ok: true, json: async () => ({ seq: 9, chainHash: "abcdef0123456789" }) };
+      });
+      s.element("depAmount").value = "1.01";
+      await s.c.walletAction(kind);
+      assert.match(s.element("walletResult").innerHTML, /Outcome unknown/);
+      assert.match(s.element("walletResult").innerHTML, new RegExp(`original ${kind} for alice`));
+      const original = vm.runInContext("walletRequest", s.c);
+      vm.runInContext('player = "bob"', s.c);
+      s.element("depAmount").value = "9.99";
+      await s.c.walletAction(kind === "deposit" ? "withdraw" : "deposit");
+      assert.deepEqual(calls[1], calls[0]);
+      assert.equal(vm.runInContext("walletRequest", s.c), original);
+      assert.match(s.element("walletResult").innerHTML, /Outcome unknown/);
+      await s.c.walletAction(kind);
+      assert.deepEqual(calls[2], calls[0]);
+      assert.equal(vm.runInContext("walletRequest", s.c), null);
+      assert.match(s.element("walletResult").className, /\bok\b/);
+    }
+  }
 });
 
 test("LAN wallet and bet requests work without secure-context randomUUID", async () => {
@@ -476,6 +520,56 @@ function slipContext(fetch) {
   return { c, element, pick, submit };
 }
 
+test("unreadable successful bet responses retain the identical slip for retry", async () => {
+  for (const failure of [new SyntaxError("Unexpected end of JSON input"), new TypeError("Body unreadable")]) {
+    const calls = [];
+    const s = slipContext(async (path, options) => {
+      if (path === "/api/fixtures") return { ok: true, json: async () => [
+        { id: "F1", home: "Home", away: "Away", odds: { HOME: 200, DRAW: 300, AWAY: 250 } },
+      ] };
+      calls.push({ path, method: options.method, body: options.body.toString() });
+      if (calls.length <= 2) return { ok: true, json: async () => { throw failure; } };
+      return { ok: true, json: async () => ({ seq: 5 }) };
+    });
+    s.pick("HOME");
+    const original = vm.runInContext("selection", s.c);
+    await s.submit();
+    assert.equal(vm.runInContext("selection", s.c), original);
+    assert.equal(s.element("slip").hidden, false);
+    assert.equal(s.element("slipStake").disabled, true);
+    assert.equal(s.element("slipCancel").disabled, true);
+    assert.equal(s.element("priceAWAY").disabled, true);
+    assert.equal(s.element("submit").disabled, false);
+    assert.equal(s.element("betResult").innerHTML, failure.message);
+    assert.match(s.element("betResult").className, /\bbad\b/);
+    s.element("priceAWAY").disabled = false;
+    await s.c.renderCustFixtures();
+    assert.equal(s.element("priceAWAY").disabled, true);
+    s.pick("AWAY");
+    s.element("slipCancel").handlers.click();
+    assert.equal(vm.runInContext("selection", s.c), original);
+    assert.equal(s.element("slip").hidden, false);
+    s.element("slipStake").value = "99.00";
+    vm.runInContext('player = "bob"', s.c);
+    await s.submit();
+    assert.deepEqual(calls[1], calls[0]);
+    assert.equal(vm.runInContext("selection", s.c), original);
+    assert.equal(s.element("slipStake").disabled, true);
+    assert.equal(s.element("slipCancel").disabled, true);
+    assert.equal(s.element("priceAWAY").disabled, true);
+    s.pick("AWAY");
+    s.element("slipCancel").handlers.click();
+    assert.equal(vm.runInContext("selection", s.c), original);
+    await s.submit();
+    assert.deepEqual(calls[2], calls[0]);
+    assert.equal(s.element("slip").hidden, true);
+    assert.equal(vm.runInContext("selection", s.c), null);
+    assert.equal(s.element("slipStake").disabled, false);
+    assert.equal(s.element("slipCancel").disabled, false);
+    assert.equal(s.element("priceAWAY").disabled, false);
+  }
+});
+
 test("double submission is blocked and a lost response retries the identical slip", async () => {
   const calls = [];
   let reject;
@@ -537,12 +631,14 @@ for (const failure of [
   { status: 413, error: "outcome_unknown", message: "unknown" },
   { status: 504, error: "outcome_unknown", message: "unknown" },
   { status: 500, error: "internal_error", message: "unknown" },
-]) test(`an uncertain placement cannot be replaced or cancelled (${failure.status ?? "network"}/${failure.error ?? "network"})`, async () => {
+  ...[400, 403, 404, 409, 413, 422].map(status => ({ status, body: "not JSON", message: "Upstream reply" })),
+]) test(`an uncertain placement cannot be replaced or cancelled (${failure.status ?? "network"}/${failure.error ?? (failure.body ? "non-JSON" : "network")})`, async () => {
   const calls = [];
   const s = slipContext(async (path, options) => {
     calls.push({ path, body: options.body.toString() });
     if (calls.length === 1) throw new Error("Response lost");
     if (calls.length === 2) {
+      if (failure.body) return new Response(failure.body, { status: failure.status, statusText: failure.message });
       if (failure.status) return { ok: false, status: failure.status, json: async () => ({ error: failure.error, message: failure.message }) };
       throw failure;
     }

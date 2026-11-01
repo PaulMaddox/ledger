@@ -541,6 +541,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <li><b>Administrator.</b> Monitor server performance and permanently reset demo storage.</li>
     <li><b>Chaos Monkey.</b> Run transaction races, simulate outages, and tamper with demo history to see how verification and recovery respond.</li>
   </ul>
+  <p class="prose">If a response is lost, unreadable or truncated, wallet actions and bet slips keep their original request for an idempotent retry. An unresolved bet slip cannot be edited or cancelled.</p>
   <p class="prose">Operator totals and chart samples use exact open-bet aggregates maintained as the read model tails committed entries, rather than copying and sorting every open bet on each poll. The aggregates rebuild from verified history after a restart and never decide money movements. This reduces dashboard allocation and garbage collection; the demo still retains the full ledger history and its indexes in memory, so its live heap grows with committed entries.</p>
   <figure class="shot wide">
     <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>

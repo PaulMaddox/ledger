@@ -163,6 +163,9 @@ change it describes:
   polling, until acceptance or a known definitive status/error pair from the API.
   `404/not_found` and `413/payload_too_large` are definitive; never classify by
   HTTP status alone. An unknown or mismatched error code must retain the retry payload.
+- Treat unreadable or truncated JSON in a successful API response as uncertain,
+  never as an empty success. Parsing failures must retain the original wallet
+  deposit/withdrawal or bet placement payload and idempotency key for retry.
 - API POST form bodies are capped at 16 KiB (16,384 bytes) of encoded data, before
   UTF-8 or form decoding. Oversized bodies return HTTP 413 (`payload_too_large`) before
   routing, without performing the operation. Reject oversized declared lengths
