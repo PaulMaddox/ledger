@@ -17,6 +17,10 @@ kotlin { jvmToolchain(21) }
 
 application { mainClass.set("com.pam.ledger.demo.DemoKt") }
 
+tasks.processResources {
+    from("docs/screenshots") { into("web/screenshots") }
+}
+
 // The ledger web console: ./gradlew web  (Windows: .\gradlew.bat web)
 // Options go after --args, e.g. ./gradlew web --args="--port 9090 --data build/web-ledger"
 tasks.register<JavaExec>("web") {
@@ -28,6 +32,8 @@ tasks.register<JavaExec>("web") {
 
 tasks.test {
     useJUnitPlatform()
+    // Keep concurrent HTTP requests honest on hosts with only two virtual-thread carriers.
+    systemProperty("jdk.virtualThreadScheduler.parallelism", "2")
     // The regulatory storm retains every observed balance as independent evidence.
     maxHeapSize = "2g"
     testLogging {

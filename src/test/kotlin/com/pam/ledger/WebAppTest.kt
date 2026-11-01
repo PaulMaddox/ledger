@@ -85,7 +85,7 @@ class WebAppTest {
     }
 
     private fun chaos(app: LedgerWebApp, scenario: String) =
-        call(app, "POST", "chaos", mapOf("scenario" to scenario, "confirmation" to "CHAOS ON MAIN STORE"))
+        call(app, "POST", "chaos", mapOf("scenario" to scenario))
 
     private fun rawRequest(
         app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null,
@@ -119,6 +119,31 @@ class WebAppTest {
             assertTrue(chaos.contains("data-tamper=\"$mode\""), chaos)
         }
         assertTrue(chaos.contains("id=\"tamperResult\""), chaos)
+    }
+
+    @Test
+    fun `About tab serves the generated guide and its screenshots`() = withApp { app ->
+        val console = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/")).GET().build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200, console.statusCode())
+        assertTrue(console.body().indexOf("data-view=\"about\"") < console.body().indexOf("data-view=\"customer\""))
+        assertTrue(console.body().contains("id=\"view-about\""))
+
+        val guide = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/about/")).GET().build(),
+            HttpResponse.BodyHandlers.ofString())
+        assertEquals(200, guide.statusCode())
+        assertTrue(guide.body().contains("<title>Sportsbook Ledger Internals</title>"))
+        assertTrue(guide.body().contains("screenshots/simulator.png"))
+
+        val screenshot = http.send(HttpRequest.newBuilder(
+            URI("http://127.0.0.1:${app.port}/about/screenshots/simulator.png")).GET().build(),
+            HttpResponse.BodyHandlers.ofByteArray())
+        assertEquals(200, screenshot.statusCode())
+        assertTrue(screenshot.headers().firstValue("Content-Type").orElse("").startsWith("image/png"))
+        assertTrue(screenshot.body().isNotEmpty())
+        assertEquals(404, http.send(HttpRequest.newBuilder(
+            URI("http://127.0.0.1:${app.port}/about/screenshots/%2e%2e/app.js")).GET().build(),
+            HttpResponse.BodyHandlers.discarding()).statusCode())
     }
 
     @Test
@@ -201,8 +226,10 @@ class WebAppTest {
             val result = chaos(app, scenario)
             assertEquals(200, result.first, result.second)
             assertTrue(result.second.contains("\"passed\":true"), result.second)
-            assertTrue(result.second.contains("\"scope\":\"MAIN DATA STORE\""), result.second)
-            val available = scenario in setOf("torn-write", "retries", "double-spend", "settlement")
+            val live = scenario in setOf("retries", "double-spend", "settlement")
+            val scope = if (live) "MAIN DATA STORE · LIVE" else "MAIN DATA STORE"
+            assertTrue(result.second.contains("\"scope\":\"$scope\""), result.second)
+            val available = scenario in setOf("torn-write", "retries", "double-spend", "settlement", "signer-outage")
             assertTrue(result.second.contains("\"available\":$available"), result.second)
             val overview = call(app, "GET", "overview")
             assertEquals(200, overview.first, overview.second)
@@ -215,8 +242,11 @@ class WebAppTest {
                 "experiment $scenario must alter the main journal")
             if (available) {
                 assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
-                if (scenario != "torn-write") {
+                if (live) {
                     assertTrue(call(app, "GET", "players").second.contains("chaos-"), "main-store chaos customers must be visible")
+                } else {
+                    assertFalse(call(app, "GET", "players").second.contains("chaos-"),
+                        "file recovery and failed signing must not create a committed customer")
                 }
             } else {
                 assertEquals(503, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "blocked")).first)
@@ -225,7 +255,7 @@ class WebAppTest {
             }
             reset(app)
             assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
-            assertFalse(call(app, "GET", "chaos").second.contains("\"scope\":\"MAIN DATA STORE\""))
+            assertTrue(call(app, "GET", "chaos").second.contains("\"history\":[]"))
             assertEquals("unrelated file", Files.readString(marker))
             assertTrue(key.contentEquals(Files.readAllBytes(app.directory.resolve("demo-signing-key.properties"))))
             Files.list(app.directory).use { files ->
@@ -246,20 +276,67 @@ class WebAppTest {
         val players = call(app, "GET", "players").second
         assertEquals(4, Regex("\"id\":\"chaos-").findAll(players).count(), players)
         val history = call(app, "GET", "chaos").second
-        assertEquals(4, Regex("\"scope\":\"MAIN DATA STORE\"").findAll(history).count(), history)
+        assertEquals(4, Regex("\"scope\":\"MAIN DATA STORE · LIVE\"").findAll(history).count(), history)
         assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
     }
 
     @Test
-    fun `main store chaos requires confirmation and same origin without stopping services`() = withApp { app ->
+    fun `concurrent live chaos replies publish their customers before acknowledgement`() = withApp { app ->
+        val players = race(4) {
+            val result = chaos(app, "retries")
+            assertEquals(200, result.first, result.second)
+            assertTrue(result.second.contains("\"passed\":true"), result.second)
+            val player = checkNotNull(Regex("chaos-[0-9a-f-]+").find(result.second)) {
+                "experiment reply did not identify its committed customer: ${result.second}"
+            }.value
+            val visible = call(app, "GET", "players", mapOf("q" to player))
+            assertEquals(200, visible.first, visible.second)
+            assertTrue(visible.second.contains("\"id\":\"$player\""), visible.second)
+            val audit = call(app, "GET", "regulator/players/$player")
+            assertEquals(200, audit.first, audit.second)
+            assertTrue(audit.second.contains("\"replayedCash\":\"10100\""), audit.second)
+            assertTrue(audit.second.contains("\"reconciles\":true"), audit.second)
+            player
+        }.map { it.getOrThrow() }
+        assertEquals(4, players.distinct().size)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
+    @Test
+    fun `chaos runs without typed confirmation and still requires same origin`() = withApp { app ->
         val before = Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))
-        assertEquals(400, call(app, "POST", "chaos", mapOf("scenario" to "checksum")).first)
-        assertEquals(400, call(app, "POST", "chaos", mapOf("scenario" to "checksum", "confirmation" to "wrong")).first)
-        assertEquals(403, call(app, "POST", "chaos", mapOf("scenario" to "checksum",
-            "confirmation" to "CHAOS ON MAIN STORE"), withOrigin = false).first)
+        assertEquals(403, call(app, "POST", "chaos", mapOf("scenario" to "retries"), withOrigin = false).first)
         assertEquals(400, chaos(app, "erase-host").first)
         assertTrue(before.contentEquals(Files.readAllBytes(app.directory.resolve(Ledger.ENTRIES_FILE))))
         assertTrue(call(app, "GET", "overview").second.contains("\"available\":true"))
+    }
+
+    @Test
+    fun `live chaos transaction races leave the running simulator active`() = withApp { app ->
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "action" to "start", "customers" to 10, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+        for (scenario in listOf("retries", "double-spend", "settlement")) {
+            val result = chaos(app, scenario)
+            assertEquals(200, result.first, result.second)
+            assertTrue(result.second.contains("\"passed\":true"), result.second)
+            assertTrue(result.second.contains("\"scope\":\"MAIN DATA STORE · LIVE\""), result.second)
+            assertTrue(result.second.contains("refused") || result.second.contains("replays"), result.second)
+            assertTrue(call(app, "GET", "simulator").second.contains("\"state\":\"RUNNING\""))
+            assertTrue(call(app, "GET", "overview").second.contains("\"available\":true"))
+        }
+        call(app, "POST", "simulator", mapOf("action" to "stop"))
+    }
+
+    @Test
+    fun `recoverable main-store chaos resumes a running simulator`() = withApp { app ->
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "action" to "start", "customers" to 10, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+        val result = chaos(app, "torn-write")
+        assertEquals(200, result.first, result.second)
+        assertTrue(result.second.contains("\"available\":true"), result.second)
+        assertTrue(call(app, "GET", "simulator").second.contains("\"state\":\"RUNNING\""))
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        call(app, "POST", "simulator", mapOf("action" to "stop"))
     }
 
     @Test

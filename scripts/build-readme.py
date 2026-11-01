@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Builds docs/index.html, the interactive guide served by GitHub Pages.
+"""Builds docs/index.html and the interactive guide embedded in the web console.
 
 It embeds the real Kotlin sources into the page so the step-through debugger always
 shows the code exactly as it is in the repository, and wraps the template in a complete
@@ -102,5 +102,7 @@ body{{margin:0}} img{{max-width:100%}} [hidden]{{display:none!important}}
 </html>
 """
 (root / "docs/index.html").write_text(page)
-print("wrote docs/index.html with", sum(map(len, sources.values())), "chars of embedded source and",
+(root / "src/main/resources/web/about.html").write_text(page)
+print("wrote docs/index.html and src/main/resources/web/about.html with",
+      sum(map(len, sources.values())), "chars of embedded source and",
       sum(map(len, tests.values())), "tests")

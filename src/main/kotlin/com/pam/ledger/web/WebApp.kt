@@ -365,14 +365,21 @@ class LedgerWebApp private constructor(
             }
             val result = if (request.method == "POST" && segments in listOf(
                     listOf("administrator", "clear"), listOf("chaos"), listOf("regulator", "tamper"))) {
-                lifecycle.write {
-                    checkGeneration()
-                    when (segments) {
-                        listOf("administrator", "clear") -> clearStorage(request)
-                        listOf("regulator", "tamper") -> runChaos(request.str("mode"), request.str("confirmation")).let {
-                            it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                if (segments == listOf("chaos") && ChaosLab.isLiveScenario(params["scenario"] ?: "")) {
+                    lifecycle.read {
+                        checkGeneration()
+                        runLiveChaos(request.str("scenario"))
+                    }
+                } else {
+                    lifecycle.write {
+                        checkGeneration()
+                        when (segments) {
+                            listOf("administrator", "clear") -> clearStorage(request)
+                            listOf("regulator", "tamper") -> runChaos(request.str("mode")).let {
+                                it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                            }
+                            else -> runChaos(request.str("scenario"))
                         }
-                        else -> runChaos(request.str("scenario"), request.str("confirmation"))
                     }
                 }
             } else lifecycle.read { checkGeneration(); route(request) }
@@ -468,14 +475,26 @@ class LedgerWebApp private constructor(
     }
 
     private fun serveStatic(ex: HttpExchange, path: String) {
-        val name = when (path) { "/", "/index.html" -> "index.html"; "/app.js" -> "app.js"; "/app.css" -> "app.css"; else -> null }
+        val name = when {
+            path in setOf("/", "/index.html") -> "index.html"
+            path == "/app.js" -> "app.js"
+            path == "/app.css" -> "app.css"
+            path == "/about/" -> "about.html"
+            path.matches(Regex("/about/screenshots/[a-z0-9-]+\\.png")) -> path.removePrefix("/about/")
+            else -> null
+        }
         val bytes = name?.let { javaClass.getResourceAsStream("/web/$it")?.use { s -> s.readAllBytes() } }
         if (bytes == null) {
             ex.sendResponseHeaders(404, -1)
             return
         }
-        val type = when { name.endsWith(".js") -> "text/javascript"; name.endsWith(".css") -> "text/css"; else -> "text/html" }
-        ex.responseHeaders.add("Content-Type", "$type; charset=utf-8")
+        val type = when {
+            name.endsWith(".js") -> "text/javascript"
+            name.endsWith(".css") -> "text/css"
+            name.endsWith(".png") -> "image/png"
+            else -> "text/html"
+        }
+        ex.responseHeaders.add("Content-Type", if (type == "image/png") type else "$type; charset=utf-8")
         ex.responseHeaders.add("Cache-Control", "no-store")
         ex.sendResponseHeaders(200, bytes.size.toLong())
         ex.responseBody.use { it.write(bytes) }
@@ -588,11 +607,26 @@ class LedgerWebApp private constructor(
         return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
     }
 
-    private fun runChaos(scenario: String, confirmation: String): Map<String, Any?> {
-        ChaosLab.validate(scenario, confirmation)
+    private fun runLiveChaos(scenario: String): Map<String, Any?> {
+        ChaosLab.validate(scenario)
+        val current = services ?: throw HttpError(503, "ledger_unavailable",
+            "Main store is stopped. Use Administrator reset before another experiment.")
+        val result = chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+        // Publish the experiment's committed customers before acknowledging it to the console.
+        current.readModel.catchUp()
+        return result
+    }
+
+    private fun runChaos(scenario: String): Map<String, Any?> {
+        ChaosLab.validate(scenario)
         val previous = services ?: throw HttpError(503, "ledger_unavailable",
             "Main store is stopped. Use Administrator reset before another experiment.")
-        // Anchor the exact stopped prefix. The simulator is drained before this final checkpoint.
+        val simulator = previous.simulator
+        val simulatorState = simulator.state
+        val simulatorCustomers = simulator.customers
+        val simulatorOpsPerMinute = simulator.opsPerMinute
+        val simulatorAutoFixtures = simulator.autoFixtures
+        // Anchor the exact stopped prefix before any main-store file mutation.
         services = null
         offlineReason = "Main-store chaos in progress or interrupted. Use Administrator reset if needed."
         previous.close()
@@ -600,7 +634,17 @@ class LedgerWebApp private constructor(
         Ledger.open(LedgerConfig(directory = directory, ledgerId = ledgerId, signer = signer)).use { it.checkpoint() }
         val result = chaos.run(scenario, directory, signer)
         if (result["available"] == true) {
-            services = openServices(directory, signer)
+            val recovered = openServices(directory, signer)
+            recovered.simulator.configure(simulatorCustomers, simulatorOpsPerMinute, simulatorAutoFixtures)
+            when (simulatorState) {
+                Simulator.State.RUNNING -> recovered.simulator.start()
+                Simulator.State.PAUSED -> {
+                    recovered.simulator.start()
+                    recovered.simulator.pause()
+                }
+                Simulator.State.STOPPED -> Unit
+            }
+            services = recovered
             offlineReason = null
         } else {
             offlineReason = result["evidence"].toString()
