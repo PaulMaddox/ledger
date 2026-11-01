@@ -38,7 +38,7 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("ledger-proxy:${DEPLOY_SHA}", script)
         self.assertNotIn("ledger-web:${GITHUB_SHA}", script)
 
-    def test_tests_and_audit_run_in_ci_not_deployment(self):
+    def test_tests_run_once_in_ci_and_never_in_deployment(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         self.assertIn("RUN ./gradlew installDist --no-daemon", dockerfile)
         self.assertNotIn("./gradlew test", dockerfile)
@@ -47,8 +47,12 @@ class DeploymentTests(unittest.TestCase):
         for duplicate in ("check-guide.mjs", "check-web.mjs", "build-readme.py", "./gradlew test"):
             self.assertNotIn(duplicate, deploy_script)
         ci_script = "\n".join(step.get("run", "") for step in CI["jobs"]["tests"]["steps"])
-        self.assertIn("./gradlew test --no-daemon", ci_script)
-        self.assertIn("./gradlew test --no-daemon --rerun-tasks", ci_script)
+        self.assertEqual(
+            [step["run"].strip() for step in CI["jobs"]["tests"]["steps"]
+             if "./gradlew test" in step.get("run", "")],
+            ["./gradlew test --no-daemon"],
+        )
+        self.assertNotIn("--rerun-tasks", ci_script)
         self.assertIn("./gradlew run --no-daemon", ci_script)
         guide_script = "\n".join(step.get("run", "") for step in CI["jobs"]["guide"]["steps"])
         self.assertIn("check-guide.mjs", guide_script)

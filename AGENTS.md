@@ -105,8 +105,8 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 
 - Follow the existing comment style: explain *why*, not *what*, and keep KDoc on public
   APIs. This codebase is meant to be read by auditors as well as engineers.
-- New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`)
-  and the suite run several times; an intermittent failure is a real bug.
+- New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`);
+  an intermittent failure is a real bug, not a reason to rerun until green.
 - Keep error types in the sealed `LedgerException` hierarchy.
 
 ## Keeping the documentation in step
@@ -162,8 +162,8 @@ change it describes:
   explains why.
 - A PR description states what changed, why, and which checks you ran and their results.
 - Before opening a PR: run the tests, rebuild the guide, and run `check-guide.mjs`.
-- CI (`.github/workflows/ci.yml`) runs on every pull request: the test suite twice (to
-  catch intermittent races), the demo with its audit, a check that `docs/index.html` was
+- CI (`.github/workflows/ci.yml`) runs on every pull request: the test suite once,
+  including race and stress tests, the demo with its audit, a check that `docs/index.html` was
   rebuilt, `check-guide.mjs`, and the README's one-command setup and demo on fresh Ubuntu
   and Windows machines. All CI jobs must pass before a PR can be merged. If CI
   fails, fix the cause; never skip, retry until green, or weaken the check.

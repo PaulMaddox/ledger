@@ -224,6 +224,8 @@ also stop their background workers.
 Test reports are written to `build/reports/tests/test/index.html`.
 The test JVM uses two virtual-thread carriers so concurrent HTTP regressions also
 exercise the constrained scheduling found on small CI and AKS hosts.
+CI runs the full suite once per Kotlin-test job, including the dedicated race and
+stress tests; it does not repeat the whole suite to catch intermittent races.
 
 ### What the demo does
 

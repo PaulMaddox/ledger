@@ -111,7 +111,7 @@ on main. Both paths require successful main-branch CI for the exact deployment
 commit. The workflow checks out that SHA and uses it for both image tags, rather
 than substituting whichever main commit is newest when CI completes.
 
-CI runs the Kotlin suite twice, the CLI audit, guide checks and console JavaScript
+CI runs the Kotlin suite once, the CLI audit, guide checks and console JavaScript
 tests. The deployment does not repeat them: the Docker build runs only
 `./gradlew installDist --no-daemon`, then the workflow pushes the images, waits
 for rollout and verified HTTPS, and prints the public URL in its summary:
