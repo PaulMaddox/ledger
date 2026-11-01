@@ -870,7 +870,7 @@ function renderRegTable() {
   $("regDescription").textContent = spec.description;
   renderControls($("regTable"), `<thead><tr>${spec.columns.map(c => `<th scope="col">${esc(c.label)}</th>`).join("")}${spec.detail ? '<th scope="col">Source</th>' : ""}</tr></thead><tbody>` +
     (slice.length ? slice.map(row => `<tr>${spec.columns.map(c => `<td${c.numeric ? ' class="num"' : ""}>${esc(c.format ? c.format(row[c.key]) : row[c.key] ?? "Not collected")}</td>`).join("")}
-      ${spec.detail ? `<td><button type="button" data-report-id="${esc(row.id || row.player)}" data-report-kind="${spec.detail}">Entries</button></td>` : ""}</tr>`).join("") :
+      ${spec.detail ? `<td><button type="button" data-report-id="${esc(row.player || row.id)}" data-report-kind="${spec.detail}">Entries</button></td>` : ""}</tr>`).join("") :
       `<tr><td colspan="${spec.columns.length + (spec.detail ? 1 : 0)}" class="hint">No matching records in this snapshot. This does not establish that no compliance incidents occurred.</td></tr>`) + "</tbody>", ["report-id", "report-kind"]);
   $("regPageLabel").textContent = `${rows.length ? regPage * REG_PAGE_SIZE + 1 : 0}-${Math.min(rows.length, (regPage + 1) * REG_PAGE_SIZE)} of ${int.format(rows.length)} records · page ${regPage + 1} of ${pages}`;
   $("regPrev").disabled = regPage === 0; $("regNext").disabled = regPage + 1 >= pages;
