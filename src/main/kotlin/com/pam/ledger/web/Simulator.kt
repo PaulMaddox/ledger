@@ -306,17 +306,14 @@ class Stats(private val readModel: ReadModel) : AutoCloseable {
 
     private fun sample() {
         val totals = readModel.totals()
-        val open = readModel.openBets()
         val prev = synchronized(points) { points.lastOrNull() }
         val p = Point(
             t = System.currentTimeMillis(),
             entries = totals.entries,
             txPerSec = if (prev == null) 0 else totals.entries - prev.entries,
             ggr = readModel.balance(Accounts.revenue("EUR")),
-            exposure = open.fold(BigInteger.ZERO) { total, bet ->
-                total.add(BigInteger.valueOf(bet.potentialPayout).subtract(BigInteger.valueOf(bet.stake)))
-            },
-            openBets = open.size,
+            exposure = totals.exposure,
+            openBets = totals.openBets,
         )
         synchronized(points) {
             points.addLast(p)

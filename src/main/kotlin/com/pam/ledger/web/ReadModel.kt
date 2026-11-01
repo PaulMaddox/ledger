@@ -47,6 +47,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     data class Totals(
         val entries: Long, val deposits: BigInteger, val withdrawals: BigInteger,
         val staked: BigInteger, val returned: BigInteger, val kindCounts: Map<String, Long>,
+        val openBets: Int, val openStakes: BigInteger, val exposure: BigInteger,
     )
 
     private val lock = Any()
@@ -60,6 +61,9 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     private var withdrawals = BigInteger.ZERO
     private var staked = BigInteger.ZERO
     private var returned = BigInteger.ZERO
+    private var openBetCount = 0
+    private var openStakes = BigInteger.ZERO
+    private var exposure = BigInteger.ZERO
     private val recent = ArrayDeque<Long>()
 
     @Volatile private var running = true
@@ -99,13 +103,18 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 val parts = e.metadata["selection"]?.split("|")
                 if (parts != null && parts.size == 3) {
                     val betId = e.metadata.getValue("betId")
-                    bets[betId] = BetView(
+                    val bet = BetView(
                         betId = e.metadata.getValue("betId"), playerId = player, fixtureId = parts[0],
                         selection = parts[1], oddsHundredths = parts[2].toInt(), stake = stake,
                         placedSeq = e.seq, placedAtMicros = e.timestampMicros,
                     )
+                    bets[betId] = bet
                     openBetsByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
                     openBetsByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
+                    openBetCount++
+                    val amount = BigInteger.valueOf(stake)
+                    openStakes = openStakes.add(amount)
+                    exposure = exposure.add(openExposure(bet))
                 }
             }
             "BET_WON", "BET_LOST", "BET_VOIDED", "BET_CASHED_OUT" -> {
@@ -113,6 +122,12 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 val payout = cashDelta(e.metadata.getValue("playerId"))
                 returned = returned.add(BigInteger.valueOf(payout))
                 bets[betId]?.let {
+                    if (it.isOpen) {
+                        openBetCount--
+                        val amount = BigInteger.valueOf(it.stake)
+                        openStakes = openStakes.subtract(amount)
+                        exposure = exposure.subtract(openExposure(it))
+                    }
                     bets[betId] = it.copy(settledSeq = e.seq, outcome = e.kind.removePrefix("BET_"), payout = payout)
                     openBetsByPlayer[it.playerId]?.remove(betId)
                     openBetsByFixture[it.fixtureId]?.remove(betId)
@@ -121,6 +136,13 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 }
             }
         }
+    }
+
+    private fun openExposure(bet: BetView): BigInteger {
+        val stake = BigInteger.valueOf(bet.stake)
+        // Aggregating generic wallet history must not introduce a Long payout overflow into catch-up.
+        return stake.multiply(BigInteger.valueOf(bet.oddsHundredths.toLong()))
+            .divide(BigInteger.valueOf(100)).subtract(stake)
     }
 
     // ---- Queries (all return copies, safe to use after the lock is released) ----
@@ -140,14 +162,17 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     fun bet(betId: String): BetView? = synchronized(lock) { bets[betId] }
     fun openBets(): List<BetView> = synchronized(lock) {
         openBetsByFixture.values.asSequence().flatMap { it.asSequence() }
-            .map(bets::getValue).sortedBy { it.placedSeq }.toList()
+            .map(bets::getValue).sortedWith { a, b -> a.placedSeq.compareTo(b.placedSeq) }.toList()
     }
     fun openBetsOn(fixtureId: String): List<BetView> = synchronized(lock) {
         openBetsByFixture[fixtureId].orEmpty().mapNotNull(bets::get)
     }
     fun recentSeqs(): List<Long> = synchronized(lock) { recent.toList().asReversed() }
     fun players(): Set<String> = synchronized(lock) { byPlayer.keys.toSet() }
-    fun totals(): Totals = synchronized(lock) { Totals(next, deposits, withdrawals, staked, returned, HashMap(kindCounts)) }
+    /** Exact aggregates for one indexed prefix; polling never scans or sorts the open bets. */
+    fun totals(): Totals = synchronized(lock) {
+        Totals(next, deposits, withdrawals, staked, returned, HashMap(kindCounts), openBetCount, openStakes, exposure)
+    }
 
     fun balance(account: AccountId) = ledger.balance(account)
 
