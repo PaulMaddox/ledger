@@ -236,6 +236,7 @@ class LedgerWebApp private constructor(
     companion object {
         const val LEDGER_ID = "sportsbook-web"
         val CUSTOMERS = listOf("alice", "bob", "carol", "dave", "erin", "farid", "grace", "hiro", "ines", "jamal", "kofi", "lena")
+        private const val MAX_FORM_BODY_BYTES = 16 * 1024
         private val signingKeyBootstrapLock = Any()
 
         fun start(opts: WebOptions, clock: Clock = Clock.systemUTC()): LedgerWebApp {
@@ -387,16 +388,7 @@ class LedgerWebApp private constructor(
             if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
-            if (ex.requestMethod == "POST") {
-                val limit = 16 * 1024
-                if ((ex.requestHeaders.getFirst("Content-Length")?.toLongOrNull() ?: 0L) > limit) {
-                    throw HttpError(413, "body_too_large", "demo request body exceeds 16 KiB")
-                }
-                val body = ByteArray(limit + 1)
-                val size = ex.requestBody.readNBytes(body, 0, body.size)
-                if (size > limit) throw HttpError(413, "body_too_large", "demo request body exceeds 16 KiB")
-                parseForm(String(body, 0, size, Charsets.UTF_8), params)
-            }
+            if (ex.requestMethod == "POST") parseForm(readFormBody(ex), params)
             val segments = uri.rawPath.removePrefix("/api/").trimEnd('/').split('/').map {
                 URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8)
             }
@@ -491,6 +483,21 @@ class LedgerWebApp private constructor(
             ex.requestHeaders.getFirst("Sec-Fetch-Site")?.equals("cross-site", true) == true) {
             throw HttpError(403, "cross_origin", "mutations require a same-origin browser request")
         }
+    }
+
+    private fun readFormBody(ex: HttpExchange): String {
+        fun reject(): Nothing {
+            ex.responseHeaders.set("Connection", "close")
+            throw HttpError(413, "payload_too_large", "form body must not exceed $MAX_FORM_BODY_BYTES bytes")
+        }
+        val contentLength = ex.requestHeaders.getFirst("Content-Length")?.toLongOrNull()
+        if (contentLength != null && contentLength > MAX_FORM_BODY_BYTES) reject()
+        // One extra byte detects overflow. This overload avoids a zero-length read
+        // after filling the buffer, which can wait for another chunk header on the JDK server.
+        val body = ByteArray(MAX_FORM_BODY_BYTES + 1)
+        val size = ex.requestBody.readNBytes(body, 0, body.size)
+        if (size > MAX_FORM_BODY_BYTES) reject()
+        return String(body, 0, size, Charsets.UTF_8)
     }
 
     private fun parseForm(raw: String?, into: MutableMap<String, String>) {
