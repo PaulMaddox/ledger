@@ -173,12 +173,194 @@ async function verifySignature(publicKeyB64, signatureB64, messageBytes) {
 
 const step = (ok, html) => `<li class="${ok ? "ok" : "bad"}">${html}</li>`;
 
+/** CSV includes all rows, exact amount strings, and protection against spreadsheet formulas. */
+function reportCsv(rows) {
+  const keys = [...new Set(rows.flatMap(row => Object.keys(row)))];
+  const cell = value => {
+    let s = typeof value === "object" && value !== null ? JSON.stringify(value) : String(value ?? "");
+    if (/^[\s]*[=+@\-\t\r]/.test(s) && !/^-?\d+$/.test(s)) s = "'" + s;
+    return '"' + s.replace(/"/g, '""') + '"';
+  };
+  return [keys.map(cell).join(","), ...rows.map(row => keys.map(k => cell(row[k])).join(","))].join("\r\n");
+}
+
+function sortReportRows(rows, key, numeric, descending) {
+  return rows.slice().sort((a, b) => {
+    if (a[key] == null || b[key] == null) return a[key] == null ? (b[key] == null ? 0 : 1) : -1;
+    const x = numeric ? BigInt(a[key]) : String(a[key]), y = numeric ? BigInt(b[key]) : String(b[key]);
+    return (x < y ? -1 : x > y ? 1 : 0) * (descending ? -1 : 1);
+  });
+}
+
+/** Independently authenticate canonical evidence and recompute report financials. */
+async function verifyReportEvidence(report, evidence) {
+  const m = report.manifest, a = m.anchor, head = parseTreeHead(b64(a.signingBytes));
+  const check = (ok, message) => { if (!ok) throw new Error(message); };
+  check(m.version === "supervisory-report-v1" && ["all", "manual", "automated"].includes(m.population) &&
+    /^[A-Z]{3}$/.test(m.currency), "Unsupported report definition or filters.");
+  check(head.tag === "PAM-LEDGER/tree-head/v1" && head.ledgerId === m.ledgerId && head.ledgerId === WEB_LEDGER_ID &&
+    head.treeSize === a.treeSize && head.treeSize === evidence.length && hex(head.root) === a.rootHash &&
+    hex(head.chainHead) === a.chainHead, "Evidence does not match the report checkpoint.");
+  const signature = await verifySignature(m.publicKey, a.signature, b64(a.signingBytes));
+  check(signature === true, "The report checkpoint signature is invalid or cannot be verified.");
+  const encode = s => new TextEncoder().encode(s);
+  let chain = await sha256(encode("PAM-LEDGER/genesis/v1"), encode(m.ledgerId));
+  const frontier = [], customers = new Map(), open = new Map(), bets = new Map(), days = new Map(), outcomes = Object.create(null);
+  const dayFormat = new Intl.DateTimeFormat("en-CA", { timeZone: m.timezone, calendar: "iso8601", year: "numeric", month: "2-digit", day: "2-digit" });
+  const money = Object.fromEntries(["deposits", "withdrawals", "stakes", "payouts", "revenue", "winPayouts",
+    "voidRefunds", "cashOuts", "settledStakes", "conservation"].map(k => [k, 0n]));
+  let unclassified = 0, otherEntries = 0, periodEntries = 0;
+  const micros = iso => {
+    const parts = /^(.+T\d\d:\d\d:\d\d)(?:\.(\d+))?Z$/.exec(new Date(iso).toISOString());
+    // Preserve microseconds in the ISO string rather than rounding to milliseconds.
+    const exact = /\.(\d+)Z$/.exec(iso)?.[1] || "";
+    return BigInt(Date.parse(parts[1] + "Z")) * 1000n + BigInt(exact.padEnd(6, "0").slice(0, 6));
+  };
+  const from = micros(m.from), to = micros(m.to);
+  check(from < to, "Invalid reporting interval.");
+  for (let index = 0; index < evidence.length; index++) {
+    const bytes = b64(evidence[index].entryBytes), e = parseEntry(bytes), leaf = await leafHash(bytes);
+    check(e.seq === BigInt(index) && e.prevChainHash === hex(chain), "Evidence is reordered, truncated or has a broken chain.");
+    chain = await sha256(encode("PAM-LEDGER/chain/v1"), chain, leaf);
+    if (index === 0) check(m.dataset === hex(chain), "Report dataset does not match its first canonical entry.");
+    let hash = leaf, level = 0, n = index;
+    while (odd(n)) { hash = await nodeHash(frontier[level], hash); frontier[level++] = null; n = half(n); }
+    frontier[level] = hash;
+    const postings = e.postings.filter(p => p.currency === m.currency);
+    money.conservation += postings.reduce((sum, p) => sum + p.amount, 0n);
+    if (!postings.length) continue;
+    const meta = Object.fromEntries(e.metadata.map(x => [x.key, x.value])), id = meta.playerId;
+    const inPeriod = e.timestampMicros >= from && e.timestampMicros < to;
+    if (id == null) { if (inPeriod) unclassified++; continue; }
+    const automated = id.startsWith("sim-");
+    if (m.population !== "all" && automated !== (m.population === "automated") || e.timestampMicros >= to) continue;
+    if (!customers.has(id)) customers.set(id, { id, entries: 0, bets: 0, firstTime: e.timestampMicros,
+      openingCash: 0n, openingEscrow: 0n, cash: 0n, escrow: 0n, deposits: 0n, withdrawals: 0n, stakes: 0n, payouts: 0n, netSettledLoss: 0n });
+    const c = customers.get(id);
+    const amount = account => postings.filter(p => p.account === account).reduce((sum, p) => sum + p.amount, 0n);
+    const cash = amount(`player:${id}:cash:${m.currency}`), escrow = amount(`player:${id}:open-bets:${m.currency}`);
+    const revenue = amount(`house:revenue:${m.currency}`);
+    c.cash += cash; c.escrow += escrow;
+    if (e.timestampMicros < from) { c.openingCash += cash; c.openingEscrow += escrow; }
+    if (inPeriod) { c.entries++; periodEntries++; c.netSettledLoss += revenue; money.revenue += revenue; }
+    const addDay = (key, value) => {
+      if (!inPeriod) return;
+      const parts = Object.fromEntries(dayFormat.formatToParts(new Date(Number(e.timestampMicros / 1000n))).map(p => [p.type, p.value]));
+      const day = `${parts.year}-${parts.month}-${parts.day}`;
+      if (!days.has(day)) days.set(day, { day, deposits: 0n, withdrawals: 0n, stakes: 0n, payouts: 0n, revenue: 0n });
+      days.get(day)[key] += value;
+    };
+    addDay("revenue", revenue);
+    switch (e.kind) {
+      case "DEPOSIT":
+        if (inPeriod) { c.deposits += cash; money.deposits += cash; }
+        addDay("deposits", cash);
+        break;
+      case "WITHDRAWAL":
+        if (inPeriod) { c.withdrawals -= cash; money.withdrawals -= cash; }
+        addDay("withdrawals", -cash);
+        break;
+      case "BET_PLACED": {
+        const parts = (meta.selection || "").split("|");
+        const odds = parts.length === 3 && /^[+-]?\d+$/.test(parts[2]) && BigInt(parts[2]) >= 0n &&
+          BigInt(parts[2]) <= 2147483647n ? BigInt(parts[2]) : null;
+        const bet = { fixture: odds === null ? "UNATTRIBUTED" : parts[0], selection: odds === null ? "Unknown" : parts[1],
+          odds, player: id, stake: escrow, placedSeq: index, periodPlacement: inPeriod };
+        bets.set(meta.betId, bet); open.set(meta.betId, bet);
+        if (inPeriod) { c.bets++; c.stakes += escrow; money.stakes += escrow; }
+        addDay("stakes", escrow);
+        break;
+      }
+      case "BET_WON": case "BET_LOST": case "BET_VOIDED": case "BET_CASHED_OUT": {
+        check(open.has(meta.betId), "Settlement has no open placement in the evidence.");
+        Object.assign(open.get(meta.betId), { settledSeq: index, periodSettlement: inPeriod, outcome: e.kind.slice(4), payout: cash, revenue });
+        open.delete(meta.betId);
+        if (inPeriod) {
+          c.payouts += cash; money.payouts += cash; money.settledStakes -= escrow;
+          const outcome = e.kind.slice(4); outcomes[outcome] = (outcomes[outcome] || 0) + 1;
+          if (e.kind === "BET_WON") money.winPayouts += cash;
+          if (e.kind === "BET_VOIDED") money.voidRefunds += cash;
+          if (e.kind === "BET_CASHED_OUT") money.cashOuts += cash;
+        }
+        addDay("payouts", cash);
+        break;
+      }
+      default: if (inPeriod) otherEntries++;
+    }
+  }
+  let root = null;
+  for (const node of frontier) if (node) root = root ? await nodeHash(node, root) : node;
+  root ||= await sha256();
+  check(hex(root) === a.rootHash && hex(chain) === a.chainHead, "Canonical evidence does not rebuild the signed root and chain.");
+  const all = [...customers.values()], sum = key => all.reduce((total, c) => total + c[key], 0n);
+  money.openingLiability = sum("openingCash") + sum("openingEscrow");
+  money.cashLiability = sum("cash"); money.escrowLiability = sum("escrow");
+  money.closingLiability = money.cashLiability + money.escrowLiability;
+  money.otherMovement = money.closingLiability - money.openingLiability - money.deposits + money.withdrawals + money.revenue;
+  money.openStakes = [...open.values()].reduce((total, b) => total + b.stake, 0n);
+  for (const [key, value] of Object.entries(money)) check(String(value) === report.financial[key], `Report financial metric ${key} does not reconcile.`);
+  for (const [key, value] of Object.entries({ openBets: open.size, unclassifiedEntries: unclassified, otherEntries, periodEntries }))
+    check(value === report.financial[key], `Report count ${key} does not reconcile.`);
+  check(report.financial.escrowReconciles === (money.openStakes === money.escrowLiability), "Escrow reconciliation verdict is incorrect.");
+  check(report.customers.length === all.length, "Report customer population is incomplete.");
+  const reported = new Map(report.customers.map(c => [c.id, c]));
+  check(reported.size === all.length, "Duplicate customer report rows.");
+  for (const c of all) {
+    const row = reported.get(c.id);
+    check(!!row, `Missing report customer ${c.id}.`);
+    for (const key of ["entries", "bets", "openingCash", "openingEscrow", "cash", "escrow", "deposits", "withdrawals", "stakes", "payouts", "netSettledLoss"])
+      check(String(c[key]) === String(row[key]), `Customer ${c.id}: ${key} does not reconcile.`);
+  }
+  for (const key of new Set([...Object.keys(outcomes), ...Object.keys(report.financial.outcomes)]))
+    check((outcomes[key] || 0) === (report.financial.outcomes[key] || 0), "Settlement outcome counts do not reconcile.");
+  check(report.daily.length === days.size, "Daily reporting is incomplete.");
+  check(new Set(report.daily.map(row => row.day)).size === days.size, "Duplicate daily report buckets.");
+  for (const row of report.daily) {
+    const day = days.get(row.day); check(!!day, "Unexpected daily report bucket.");
+    for (const key of ["deposits", "withdrawals", "stakes", "payouts", "revenue"])
+      check(String(day[key]) === row[key], `Daily metric ${row.day}: ${key} does not reconcile.`);
+  }
+  const fixtureIds = new Set(report.fixtures.map(f => f.id));
+  check(fixtureIds.size === report.fixtures.length, "Duplicate fixture report rows.");
+  for (const b of bets.values()) check(fixtureIds.has(b.fixture), "Fixture report omits ledger bets.");
+  const grouped = new Map();
+  for (const b of bets.values()) { if (!grouped.has(b.fixture)) grouped.set(b.fixture, []); grouped.get(b.fixture).push(b); }
+  for (const row of report.fixtures) {
+    const all = grouped.get(row.id) || [], placed = all.filter(b => b.periodPlacement), settled = all.filter(b => b.periodSettlement);
+    const outstanding = all.filter(b => b.settledSeq == null), total = (list, key) => list.reduce((sum, b) => sum + b[key], 0n);
+    const expected = { placedBets: placed.length, bettors: new Set(placed.map(b => b.player)).size,
+      stakes: total(placed, "stake"), settlements: settled.length, payouts: total(settled, "payout"),
+      revenue: total(settled, "revenue"), openBets: outstanding.length, openStakes: total(outstanding, "stake") };
+    for (const [key, value] of Object.entries(expected))
+      check(String(value) === String(row[key]), `Fixture ${row.id}: ${key} does not reconcile.`);
+    const expectedOutcomes = Object.create(null);
+    for (const b of settled) expectedOutcomes[b.outcome] = (expectedOutcomes[b.outcome] || 0) + 1;
+    for (const key of new Set([...Object.keys(expectedOutcomes), ...Object.keys(row.outcomes)]))
+      check((expectedOutcomes[key] || 0) === (row.outcomes[key] || 0), `Fixture ${row.id}: outcomes do not reconcile.`);
+    const seqs = [...placed.map(b => b.placedSeq), ...settled.map(b => b.settledSeq)].sort((a, b) => a - b);
+    check(JSON.stringify(seqs) === JSON.stringify(row.entrySeqs), `Fixture ${row.id}: entry references do not reconcile.`);
+    const liability = Object.create(null);
+    for (const b of outstanding) {
+      if (b.odds == null || !["HOME", "DRAW", "AWAY"].includes(b.selection) || liability[b.selection] === null) liability[b.selection] = null;
+      else liability[b.selection] = (liability[b.selection] || 0n) + b.stake * b.odds / 100n;
+    }
+    check(Object.keys(liability).length === Object.keys(row.liabilityBySelection).length, "Fixture selection liability coverage differs.");
+    for (const [selection, value] of Object.entries(liability))
+      check(value === null ? row.liabilityBySelection[selection] === null : String(value) === row.liabilityBySelection[selection],
+        `Fixture ${row.id}: selection payout does not reconcile.`);
+    const worst = Object.values(liability).some(v => v === null) ? null : Object.values(liability).reduce((max, v) => v > max ? v : max, 0n);
+    check(worst === null ? row.worstWinningPayout === null : String(worst) === row.worstWinningPayout, "Fixture maximum winning payout does not reconcile.");
+  }
+  return { entries: evidence.length, signature: true, financials: true, customers: true, fixtures: true, daily: true,
+    note: "Canonical source, financials, daily buckets, customer money and fixture monetary totals recomputed. Fixture descriptions and synthetic compliance examples are not authenticated." };
+}
+
 /** Verify entry #seq end to end in this browser and render the reasoning into `target`. */
-async function verifyEntry(seq, target) {
+async function verifyEntry(seq, target, options = null) {
   target.hidden = false;
   target.innerHTML = `<h2>Verifying entry #${seq}…</h2>`;
   try {
-    const p = await api(`proof/inclusion?seq=${seq}`);
+    const p = await api(options?.path || `proof/inclusion?seq=${seq}`);
     const steps = [];
     const bytes = b64(p.entryBytes);
     const e = parseEntry(bytes);
@@ -189,13 +371,15 @@ async function verifyEntry(seq, target) {
     steps.push(step(!!root, root ? `Combined it with ${p.path.length} sibling hashes from the audit path: root <code>${short(hex(root))}</code>` : "The audit path is malformed"));
     const head = parseTreeHead(b64(p.sth.signingBytes));
     const headOk = !!root && head.treeSize === p.treeSize && sameBytes(head.root, root) &&
-      head.tag === "PAM-LEDGER/tree-head/v1" && head.ledgerId === p.ledgerId && head.ledgerId === WEB_LEDGER_ID;
+      head.tag === "PAM-LEDGER/tree-head/v1" && head.ledgerId === p.ledgerId && head.ledgerId === WEB_LEDGER_ID &&
+      (!options?.anchor || head.treeSize === options.anchor.treeSize && hex(head.root) === options.anchor.rootHash);
     steps.push(step(headOk, `Read the signed checkpoint's own bytes: it covers ${int.format(head.treeSize)} entries with root <code>${short(hex(head.root))}</code>${headOk ? ", the root computed above" : ", which does NOT match"}`));
     const sig = await verifySignature(p.publicKey, p.sth.signature, b64(p.sth.signingBytes));
     steps.push(sig === null
       ? `<li>This browser has no Ed25519 support, so the signature could not be checked here (the server reports it ${p.sth.verified ? "valid" : "invalid"}).</li>`
       : step(sig, `Checked the Ed25519 signature on those bytes with the ledger's public key (key ${esc(p.sth.keyId)}): ${sig ? "valid" : "INVALID"}`));
     const ok = leafOk && !!root && headOk && sig === true;
+    if (options?.isCurrent && !options.isCurrent()) return;
     target.innerHTML = `
       <div class="panel-head"><h2>Entry #${e.seq}: ${esc(e.kind)}</h2><button type="button" onclick="this.closest('.panel-head').parentElement.hidden=true">Close</button></div>
       <div class="verdict ${ok ? "ok" : "bad"}">${ok ? "Verified in this browser: this entry is part of the signed ledger, unaltered." : "Verification FAILED."}</div>
@@ -203,6 +387,7 @@ async function verifyEntry(seq, target) {
         ${e.postings.map(x => `<dt>${esc(x.account)}</dt><dd class="${x.amount > 0n ? "pos" : "neg"}">${x.amount > 0n ? "+" : ""}${int.format(x.amount)} ${esc(x.currency)} minor units</dd>`).join("")}</dl>
       <ol class="steps">${steps.join("")}</ol>`;
   } catch (e) {
+    if (options?.isCurrent && !options.isCurrent()) return;
     target.innerHTML = `<div class="verdict bad">${errText(e)}</div>`;
   }
 }
@@ -614,9 +799,253 @@ $("paForm").addEventListener("submit", async e => {
   } catch (err) { $("paResult").innerHTML = `<div class="verdict bad">${errText(err)}</div>`; }
 });
 
+// ============================== supervisory reports ==============================
+let regReport = null, regSection = "overview", regPage = 0, regDescending = false;
+let regLoading = false, regExporting = false, regDetailOffset = 0, regDetailFilter = null, regDetailRevision = 0, regDetailLoading = false;
+let regMoneyFormatter = null;
+const REG_PAGE_SIZE = 25;
+const regMoney = value => {
+  if (value == null) return "Not collected";
+  const amount = BigInt(value), absolute = amount < 0n ? -amount : amount;
+  const unit = regMoneyFormatter ||= new Intl.NumberFormat("en-IE", { style: "currency", currency: regReport.manifest.currency, maximumFractionDigits: 0 });
+  return `${amount < 0n ? "-" : ""}${unit.format(absolute / 100n)}.${String(absolute % 100n).padStart(2, "0")}`;
+};
+const regDate = iso => new Date(iso).toLocaleString("en-GB", { timeZone: regReport.manifest.timezone, hour12: false });
+const regCell = (key, label, numeric = false, format = null) => ({ key, label, numeric, format });
+
+function regTableSpec() {
+  const r = regReport;
+  switch (regSection) {
+    case "financial": return { title: "Daily financial activity", source: "Ledger-derived", description: "Placement and settlement flows are separate. Payouts include returned stakes, void refunds and cash-outs. All amounts are in the selected currency.",
+      rows: r.daily, columns: [regCell("day", "Day"), ...["deposits", "withdrawals", "stakes", "payouts", "revenue"].map(k => regCell(k, k === "revenue" ? "Realised revenue" : k, true, regMoney))] };
+    case "fixtures": return { title: "Fixture reporting", source: "Ledger money + unsigned catalogue", description: "All recorded fixtures, not the operator's recent-history subset. Period stakes and settlements are distinct from outstanding bets at cutoff. Sport, start time and result-change history are not collected.",
+      rows: r.fixtures.map(f => ({ ...f, name: f.definition ? `${f.definition.home} / ${f.definition.away}` : "Definition unavailable",
+        result: f.definition?.declaredResult || "No declared result", exceptionSummary: f.exceptions.join("; ") || "None identified in snapshot" })),
+      columns: [regCell("id", "Fixture"), regCell("name", "Teams (unsigned)"), regCell("result", "Declared result"), regCell("placedBets", "Period bets", true),
+        regCell("stakes", "Period stakes", true, regMoney), regCell("payouts", "Period payouts", true, regMoney), regCell("revenue", "Realised revenue", true, regMoney),
+        regCell("openBets", "Open at cutoff", true), regCell("openStakes", "Void-refund liability", true, regMoney),
+        regCell("worstWinningPayout", "Largest winning payout", true, v => v == null ? "Unknown market" : regMoney(v)),
+        regCell("exceptionSummary", "Settlement / source exceptions")], detail: "fixture" };
+    case "customers": return { title: "Customer activity and liabilities", source: "Ledger-derived", description: "Observed accounts are not registrations or verified people. Balances are replayed at this report's cutoff. Positive net settled loss is a customer loss; negative is a customer win. Identity, age, location and account restrictions are not collected.",
+      rows: r.customers, columns: [regCell("id", "Customer"), regCell("entries", "Period entries", true), regCell("bets", "Period bets", true),
+        regCell("deposits", "Deposits", true, regMoney), regCell("withdrawals", "Withdrawals", true, regMoney), regCell("netSettledLoss", "Net settled loss", true, regMoney),
+        regCell("cash", "Cash at cutoff", true, regMoney), regCell("escrow", "Escrow at cutoff", true, regMoney),
+        regCell("activityShareBps", "Stake share", true, v => v == null ? "No stakes" : `${BigInt(v) / 100n}.${String(BigInt(v) % 100n).padStart(2, "0")}%`)], detail: "player" };
+    case "protection": return { title: "Player-protection indicators", source: "Ledger activity + illustrative rule", description: "An indicator is a prompt for review, not a diagnosis. The activity threshold is an example, not a prescribed limit. Real limits, self-exclusions, sessions, blocked attempts and intervention outcomes are not collected.",
+      rows: r.signals.filter(s => s.type === "activity-review"), columns: [regCell("player", "Customer"), regCell("title", "Indicator"),
+        regCell("status", "Review state"), regCell("explanation", "Interpretation")], detail: "player" };
+    case "controls": return { title: "Payment-review indicators", source: "Ledger transactions + illustrative rule", description: "Fast deposit-to-withdrawal activity can be legitimate. These are unreviewed indicators, not suspicious-activity determinations, submitted reports or evidence of criminal conduct.",
+      rows: r.signals.filter(s => s.type === "payment-review"), columns: [regCell("player", "Customer"), regCell("title", "Indicator"),
+        regCell("seq", "Withdrawal entry", true), regCell("relatedSeq", "Deposit entry", true), regCell("status", "Review state")], detail: "player" };
+    default: return { title: "Reporting coverage", source: "Coverage, not a compliance verdict", description: "Not collected means unknown, never zero incidents or a passing control. The evidence pack authenticates ledger source and recomputes money; separately captured descriptions and fictional scenarios have different provenance.",
+      rows: r.coverage, columns: [regCell("area", "Reporting area"), regCell("status", "Evidence status"), regCell("detail", "Coverage and limitations")] };
+  }
+}
+
+function renderRegTable() {
+  if (!regReport || regSection === "evidence") return;
+  const spec = regTableSpec(), search = $("regSearch").value.trim().toLowerCase();
+  const column = spec.columns.find(c => c.key === $("regSort").value) || spec.columns[0];
+  const matching = spec.rows.filter(row => !search || Object.values(row).some(v => String(v ?? "").toLowerCase().includes(search)));
+  const rows = sortReportRows(matching, column.key, column.numeric, regDescending);
+  const pages = Math.max(1, Math.ceil(rows.length / REG_PAGE_SIZE));
+  regPage = Math.min(regPage, pages - 1);
+  const slice = rows.slice(regPage * REG_PAGE_SIZE, (regPage + 1) * REG_PAGE_SIZE);
+  $("regSectionTitle").textContent = spec.title; $("regSource").textContent = spec.source;
+  $("regDescription").textContent = spec.description;
+  renderControls($("regTable"), `<thead><tr>${spec.columns.map(c => `<th scope="col">${esc(c.label)}</th>`).join("")}${spec.detail ? '<th scope="col">Source</th>' : ""}</tr></thead><tbody>` +
+    (slice.length ? slice.map(row => `<tr>${spec.columns.map(c => `<td${c.numeric ? ' class="num"' : ""}>${esc(c.format ? c.format(row[c.key]) : row[c.key] ?? "Not collected")}</td>`).join("")}
+      ${spec.detail ? `<td><button type="button" data-report-id="${esc(row.id || row.player)}" data-report-kind="${spec.detail}">Entries</button></td>` : ""}</tr>`).join("") :
+      `<tr><td colspan="${spec.columns.length + (spec.detail ? 1 : 0)}" class="hint">No matching records in this snapshot. This does not establish that no compliance incidents occurred.</td></tr>`) + "</tbody>", ["report-id", "report-kind"]);
+  $("regPageLabel").textContent = `${rows.length ? regPage * REG_PAGE_SIZE + 1 : 0}-${Math.min(rows.length, (regPage + 1) * REG_PAGE_SIZE)} of ${int.format(rows.length)} records · page ${regPage + 1} of ${pages}`;
+  $("regPrev").disabled = regPage === 0; $("regNext").disabled = regPage + 1 >= pages;
+}
+
+function renderRegSummary() {
+  const r = regReport, f = r.financial, c = r.customerSummary;
+  const summary = (label, value, note) => `<div><span>${esc(label)}</span><strong>${esc(value)}</strong><small>${esc(note)}</small></div>`;
+  let html = `<div class="reg-summary">${summary("Realised gaming revenue", regMoney(f.revenue), "Settlements in this period")}
+    ${summary("Customer liabilities", regMoney(f.closingLiability), "Cash + open-bet escrow at cutoff")}
+    ${summary("Active accounts", int.format(c.active), `${int.format(c.bettors)} bettors / ${int.format(c.depositors)} depositors`)}
+    ${summary("Outstanding bets", int.format(f.openBets), `${regMoney(f.openStakes)} in stakes`)}</div>`;
+  if (regSection === "financial") {
+    html += `<h2>Customer-liability bridge</h2><p class="hint">Opening liability + deposits - withdrawals - realised revenue + other movements = closing liability.</p>
+      <dl class="kv">${[["Opening liability", f.openingLiability], ["Deposits", f.deposits], ["Withdrawals", f.withdrawals], ["Realised revenue", f.revenue],
+        ["Other movements (review if non-zero)", f.otherMovement], ["Closing liability", f.closingLiability], ["Winning payouts (stake included)", f.winPayouts],
+        ["Void refunds", f.voidRefunds], ["Cash-outs", f.cashOuts]].map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(regMoney(v))}</dd>`).join("")}</dl>
+      <p class="reg-note">Bank and payment-provider reconciliation, safeguarding coverage and tax figures are not collected.</p>`;
+  } else if (regSection === "customers") {
+    html += `<p class="hint">${int.format(c.observed)} accounts observed before cutoff; ${int.format(c.firstActivityInPeriod)} first observed in this period. Registration and verification counts: not collected.</p>`;
+  }
+  html += `<div class="reg-attention"><span class="${BigInt(f.conservation) === 0n ? "ok" : "bad"}">Currency posting sum: ${esc(f.conservation)} minor units</span>
+    <span class="${f.escrowReconciles ? "ok" : "bad"}">Open-stake / escrow reconciliation: ${f.escrowReconciles ? "matches" : "exception"}</span>
+    <span>${int.format(r.signals.length)} illustrative monitoring indicators</span>
+    <span>${int.format(r.fixtures.filter(fx => fx.exceptions.length).length)} fixture / source exceptions</span>
+    <span>${int.format(f.unclassifiedEntries + f.otherEntries)} unclassified / other entries</span></div>`;
+  $("regSummary").innerHTML = html;
+}
+
+function renderRegExamples() {
+  const relevant = regSection === "protection" || regSection === "controls";
+  $("regExamples").hidden = !relevant;
+  if (!relevant) return;
+  const examples = regReport.compliance;
+  const cases = examples.cases.filter(c => regSection === "controls" || c.id.startsWith("RG-"));
+  $("regExamples").innerHTML = `<div class="panel-head"><h2>Illustrative compliance scenarios</h2><span class="pill warn">Synthetic examples</span></div>
+    <p class="reg-note">${esc(examples.note)}</p>
+    <div class="reg-case-list">${cases.map(c => `<details><summary>${esc(c.id)} · ${esc(c.category)} · ${esc(c.status)}</summary>
+      <p class="hint">Fictional owner: ${esc(c.owner)}. Ordered scenario steps are not dated operational records.</p>
+      <ol>${c.events.map(e => `<li>${esc(e.event)}</li>`).join("")}</ol></details>`).join("")}</div>
+    ${regSection === "controls" ? `<h2>Control-assurance examples</h2><div class="tablewrap"><table class="tbl"><thead><tr><th>Control</th><th>Fictional owner</th><th>Example status</th><th>Evidence needed</th></tr></thead><tbody>
+      ${examples.controls.map(c => `<tr><td>${esc(c.control)}</td><td>${esc(c.owner)}</td><td>${esc(c.status)}</td><td>${esc(c.evidence)}</td></tr>`).join("")}</tbody></table></div>` : ""}`;
+}
+
+function setRegSection(section) {
+  regSection = section; regPage = 0; regDescending = false;
+  $("regSearch").value = ""; $("regDirection").textContent = "Ascending"; $("regDirection").setAttribute("aria-pressed", "false");
+  $("regReporting").hidden = section === "evidence"; $("regEvidence").hidden = section !== "evidence";
+  $("regCsv").disabled = !regReport || section === "evidence" || regLoading || regExporting;
+  document.querySelectorAll("[data-report-section]").forEach(b => b.setAttribute("aria-pressed", String(b.dataset.reportSection === section)));
+  if (regReport && section !== "evidence") {
+    $("regSort").innerHTML = regTableSpec().columns.map(c => `<option value="${esc(c.key)}">${esc(c.label)}</option>`).join("");
+    renderRegSummary(); renderRegTable(); renderRegExamples();
+  }
+}
+
+async function freezeRegReport() {
+  if (regLoading || regExporting) return;
+  regLoading = true; $("regFreeze").disabled = true; $("regPack").disabled = true; $("regCsv").disabled = true;
+  $("regStatus").textContent = "Capturing a durable checkpoint and replaying its ledger prefix...";
+  try {
+    const report = await api("regulator/report", { method: "POST", params: { fromDate: $("regFrom").value, toDate: $("regTo").value,
+      timezone: $("regZone").value, currency: $("regCurrency").value, population: $("regPopulation").value } });
+    const m = report.manifest, a = m.anchor, head = parseTreeHead(b64(a.signingBytes));
+    const signature = await verifySignature(m.publicKey, a.signature, b64(a.signingBytes));
+    if (signature === false || head.tag !== "PAM-LEDGER/tree-head/v1" || head.ledgerId !== WEB_LEDGER_ID ||
+        head.ledgerId !== m.ledgerId || head.treeSize !== a.treeSize || hex(head.root) !== a.rootHash || hex(head.chainHead) !== a.chainHead)
+      throw new Error("Report checkpoint verification failed. No new report was accepted.");
+    regReport = report; regMoneyFormatter = null; regDetailRevision++; regDetailLoading = false; $("regDetail").hidden = true;
+    $("regSnapshot").innerHTML = `<span class="pill ${signature === true ? "ok" : "warn"}">${signature === true ? "Checkpoint signature valid" : "Browser signature check unavailable"}</span>
+      <span>${int.format(a.treeSize)} entries · root <code>${esc(short(a.rootHash))}</code></span>
+      <span>${esc(regDate(m.from))} to ${esc(regDate(m.to))} (${esc(m.timezone)})</span><span class="pill ${m.coverage === "Partial period" ? "warn" : "mut"}">${esc(m.coverage)}</span>`;
+    $("regStatus").textContent = `Frozen ${regDate(m.generatedAt)}. Figures will not change until you freeze another report. ${m.historyNote}`;
+    setRegSection(regSection);
+  } catch (e) {
+    $("regStatus").textContent = `Report could not be frozen: ${e.message || String(e)}${regReport ? " The previous snapshot is still displayed." : " Correct the filters or restore the ledger, then freeze again."}`;
+  } finally {
+    regLoading = false; $("regFreeze").disabled = false; $("regPack").disabled = !regReport || regExporting;
+    $("regCsv").disabled = !regReport || regSection === "evidence" || regExporting;
+  }
+}
+
+async function loadRegDetail(reset = false) {
+  if (!regReport || !regDetailFilter || regDetailLoading && !reset) return;
+  regDetailLoading = true;
+  const revision = regDetailRevision, report = regReport, filter = { ...regDetailFilter };
+  if (reset) { regDetailOffset = 0; $("regDetailTable").innerHTML = ""; $("regDetailProof").innerHTML = ""; }
+  $("regDetail").hidden = false; $("regDetailMore").hidden = true;
+  $("regDetailTitle").textContent = `Source entries: ${filter.player || filter.fixture}`;
+  $("regDetailStatus").textContent = "Reading entries from the frozen checkpoint...";
+  try {
+    const a = report.manifest.anchor;
+    const page = await api("regulator/report/evidence?" + new URLSearchParams({ size: a.treeSize, root: a.rootHash,
+      offset: regDetailOffset, limit: 100, ...filter }));
+    if (revision !== regDetailRevision || report !== regReport) return;
+    if (page.anchor.rootHash !== a.rootHash || page.anchor.treeSize !== a.treeSize) throw new Error("Evidence checkpoint does not match the report.");
+    const header = '<tr><th>Entry</th><th>Type</th><th>Commit time</th><th>Money postings</th><th>Proof</th></tr>';
+    const html = page.entries.map(e => `<tr><td class="num">${e.seq}</td><td>${esc(e.kind)}</td><td>${esc(regDate(e.time))}</td>
+      <td>${e.postings.map(p => `${esc(p.account)}: ${esc(p.amount)} ${esc(p.currency)} minor units`).join("<br>")}</td>
+      <td><button type="button" data-report-proof="${e.seq}">Verify</button></td></tr>`).join("");
+    $("regDetailTable").innerHTML = header + html;
+    regDetailOffset = page.nextOffset;
+    $("regDetailMore").hidden = page.complete;
+    $("regDetailStatus").textContent = page.entries.length ? "This evidence page includes opening history as well as period activity." :
+      page.complete ? "No matching entries in the final scan page." : "No matches in this scan page. Load the next page to continue.";
+  } catch (e) {
+    if (revision === regDetailRevision) $("regDetailStatus").textContent = `Unable to read report evidence: ${e.message || String(e)}. Freeze a new report if demo storage was reset.`;
+  } finally {
+    if (revision === regDetailRevision) regDetailLoading = false;
+  }
+}
+
+function regExportRows() {
+  const r = regReport, spec = regTableSpec();
+  let rows = spec.rows.map(row => ({ recordType: regSection, source: spec.source, ...row }));
+  if (regSection === "financial") rows = [...Object.entries(r.financial).map(([metric, value]) => ({ recordType: "financial metric", source: "Ledger-derived", metric, value })), ...rows];
+  if (regSection === "protection" || regSection === "controls") {
+    const cases = r.compliance.cases.filter(c => regSection === "controls" || c.id.startsWith("RG-"));
+    rows.push(...cases.map(c => ({ recordType: "case scenario", ...c })));
+    if (regSection === "controls") rows.push(...r.compliance.controls.map(c => ({ recordType: "control scenario", source: "Synthetic example", ...c })));
+  }
+  const m = r.manifest;
+  return (rows.length ? rows : [{ recordType: regSection, source: spec.source, note: "No recorded rows; not a compliance verdict" }]).map(row => ({
+    reportVersion: m.version, dataset: m.dataset, from: m.from, to: m.to, timezone: m.timezone,
+    currency: m.currency, population: m.population, treeSize: m.anchor.treeSize, rootHash: m.anchor.rootHash, amountUnit: "minor units", ...row }));
+}
+
+function downloadRegFile(name, text, type) {
+  const url = URL.createObjectURL(new Blob([text], { type })), link = document.createElement("a");
+  link.href = url; link.download = name; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+async function exportRegEvidence() {
+  if (!regReport || regLoading || regExporting) return;
+  regExporting = true; $("regPack").disabled = true; $("regFreeze").disabled = true; $("regCsv").disabled = true;
+  const report = regReport, a = report.manifest.anchor, entries = [];
+  try {
+    let offset = 0;
+    do {
+      $("regStatus").textContent = `Collecting canonical evidence: ${int.format(offset)} of ${int.format(a.treeSize)} entries...`;
+      const page = await api("regulator/report/evidence?" + new URLSearchParams({ size: a.treeSize, root: a.rootHash, offset, limit: 1000 }));
+      if (page.anchor.rootHash !== a.rootHash || page.anchor.treeSize !== a.treeSize || page.nextOffset <= offset && !page.complete)
+        throw new Error("Evidence paging did not preserve the report checkpoint.");
+      entries.push(...page.entries.map(e => ({ seq: e.seq, entryBytes: e.entryBytes }))); offset = page.nextOffset;
+      if (page.complete) break;
+    } while (offset < a.treeSize);
+    $("regStatus").textContent = "Rebuilding the signed chain and Merkle root, and recomputing money in this browser...";
+    const verification = await verifyReportEvidence(report, entries);
+    const payload = { report, entries }, payloadJson = JSON.stringify(payload);
+    const digest = hex(await sha256(new TextEncoder().encode(payloadJson)));
+    downloadRegFile(`supervisory-evidence-${a.treeSize}.json`, JSON.stringify({ format: "supervisory-evidence-v1", payload, sha256: digest,
+      verification, warning: "The payload digest detects file changes, not authorship. The checkpoint authenticates canonical ledger entries only." }), "application/json");
+    $("regStatus").textContent = `Evidence exported: ${int.format(entries.length)} canonical entries, signature, financials and customer money verified in this browser. Fixture descriptions and synthetic scenarios remain unauthenticated.`;
+  } catch (e) {
+    $("regStatus").textContent = `Evidence export failed: ${e.message || String(e)}. No evidence pack was downloaded.`;
+  } finally {
+    regExporting = false; $("regPack").disabled = false; $("regFreeze").disabled = false; $("regCsv").disabled = regSection === "evidence";
+  }
+}
+
+// Reporting events keep the frozen snapshot independent of changing filters and live polls.
+$("regForm").addEventListener("submit", e => { e.preventDefault(); freezeRegReport(); });
+$("regForm").addEventListener("input", () => { if (regReport && !regLoading && !regExporting) $("regStatus").textContent = "Filters changed. Freeze report to apply them; the displayed and exported snapshot still uses its recorded filters."; });
+$("regAll").addEventListener("click", () => { $("regFrom").value = ""; $("regTo").value = ""; freezeRegReport(); });
+document.querySelectorAll("[data-report-section]").forEach(b => b.addEventListener("click", () => setRegSection(b.dataset.reportSection)));
+$("regSearch").addEventListener("input", () => { regPage = 0; renderRegTable(); });
+$("regSort").addEventListener("change", () => { regPage = 0; renderRegTable(); });
+$("regDirection").addEventListener("click", () => { regDescending = !regDescending; $("regDirection").textContent = regDescending ? "Descending" : "Ascending";
+  $("regDirection").setAttribute("aria-pressed", String(regDescending)); renderRegTable(); });
+$("regPrev").addEventListener("click", () => { regPage--; renderRegTable(); });
+$("regNext").addEventListener("click", () => { regPage++; renderRegTable(); });
+$("regTable").addEventListener("click", e => { const b = e.target.closest("[data-report-id]"); if (b) {
+  regDetailRevision++; regDetailFilter = { [b.dataset.reportKind]: b.dataset.reportId }; loadRegDetail(true);
+} });
+$("regDetailClose").addEventListener("click", () => { regDetailRevision++; regDetailLoading = false; $("regDetail").hidden = true; });
+$("regDetailMore").addEventListener("click", () => loadRegDetail());
+$("regDetailTable").addEventListener("click", e => { const b = e.target.closest("[data-report-proof]"); if (b && regReport) {
+  const a = regReport.manifest.anchor, revision = regDetailRevision;
+  verifyEntry(Number(b.dataset.reportProof), $("regDetailProof"), {
+    path: "regulator/report/proof?" + new URLSearchParams({ size: a.treeSize, root: a.rootHash, seq: b.dataset.reportProof }),
+    anchor: a, isCurrent: () => revision === regDetailRevision,
+  });
+} });
+$("regCsv").addEventListener("click", () => { if (regReport && !regLoading && !regExporting && regSection !== "evidence")
+  downloadRegFile(`supervisory-${regSection}-${regReport.manifest.anchor.treeSize}.csv`, reportCsv(regExportRows()), "text/csv;charset=utf-8"); });
+$("regPack").addEventListener("click", exportRegEvidence);
+
 let stopRegulator = [];
 views.regulator = {
-  enter() { stopRegulator = [poll(refreshCheckpoints, 3000)]; },
+  enter() { stopRegulator = [poll(refreshCheckpoints, 3000)]; if (!regReport) freezeRegReport(); },
   leave() { stopRegulator.forEach(f => f()); },
 };
 

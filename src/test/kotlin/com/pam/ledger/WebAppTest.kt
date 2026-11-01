@@ -90,6 +90,52 @@ class WebAppTest {
     }
 
     @Test
+    fun `supervisory admission never queues full history requests or blocks wallet traffic`() = withApp { app ->
+        val field = LedgerWebApp::class.java.getDeclaredField("reporting").apply { isAccessible = true }
+        val gate = field.get(app) as java.util.concurrent.Semaphore
+        assertTrue(gate.tryAcquire())
+        try {
+            val report = call(app, "POST", "regulator/report")
+            assertEquals(503, report.first)
+            assertTrue(report.second.contains("\"error\":\"overloaded\""))
+            assertEquals(503, call(app, "GET", "regulator/report/evidence").first)
+            assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "while-reporting")).first)
+            assertEquals(200, call(app, "GET", "overview").first)
+        } finally { gate.release() }
+        assertEquals(400, call(app, "POST", "regulator/report", mapOf("timezone" to "invalid")).first)
+        assertEquals(200, call(app, "POST", "regulator/report").first, "errors must release reporting admission")
+        assertEquals(1, gate.availablePermits())
+    }
+
+    @Test
+    fun `supervisory API freezes complete reports and invalidates evidence after demo reset`() = withApp { app ->
+        val (status, report) = call(app, "POST", "regulator/report")
+        assertEquals(200, status, report)
+        assertTrue(report.contains("\"version\":\"supervisory-report-v1\""))
+        assertTrue(report.contains("\"registrations\":null"))
+        assertTrue(report.contains("\"source\":\"Synthetic example\""))
+        val size = Regex("\"treeSize\":(\\d+)").find(report)!!.groupValues[1]
+        val root = Regex("\"rootHash\":\"([a-f0-9]+)\"").find(report)!!.groupValues[1]
+        val params = mapOf("size" to size, "root" to root, "limit" to "5")
+        val first = call(app, "GET", "regulator/report/evidence", params)
+        assertEquals(200, first.first, first.second)
+        assertTrue(first.second.contains("\"nextOffset\":5"))
+        assertTrue(first.second.contains("\"entryBytes\":"))
+        val proof = call(app, "GET", "regulator/report/proof", params + ("seq" to "0"))
+        assertEquals(200, proof.first, proof.second)
+        assertTrue(proof.second.contains("\"rootHash\":\"$root\""))
+        assertEquals(400, call(app, "GET", "regulator/report/proof", params + ("seq" to size)).first)
+        assertEquals(400, call(app, "GET", "regulator/report/evidence", params + ("limit" to 1001)).first)
+        assertEquals(400, call(app, "POST", "regulator/report", mapOf("timezone" to "invalid")).first)
+        assertEquals(400, call(app, "POST", "regulator/report", mapOf("fromDate" to "invalid")).first)
+        call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
+        val old = call(app, "GET", "regulator/report/evidence", params)
+        assertEquals(404, old.first)
+        assertTrue(old.second.contains("freeze a new report"))
+        assertEquals(404, call(app, "GET", "regulator/report/proof", params + ("seq" to "0")).first)
+    }
+
+    @Test
     fun `daily demo reset uses 03 UAE time regardless of the host timezone`() {
         val before = Instant.parse("2026-10-31T22:59:59Z")
         val boundary = Instant.parse("2026-10-31T23:00:00Z")

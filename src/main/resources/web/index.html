@@ -140,6 +140,57 @@
 
 <!-- ============================== REGULATOR ============================== -->
 <section class="view" id="view-regulator" hidden>
+  <div class="panel reg-header">
+    <div class="panel-head"><div><h1>Supervisory reporting</h1><p class="hint">Financial activity, customer outcomes and control coverage, backed by a frozen ledger prefix.</p></div>
+      <div class="row"><button type="button" id="regCsv" disabled>Export section CSV</button><button type="button" id="regPack" disabled>Export evidence JSON</button></div>
+    </div>
+    <form id="regForm" class="reg-filters">
+      <div class="field"><label for="regFrom">Start date</label><input id="regFrom" type="date"></div>
+      <div class="field"><label for="regTo">End date (exclusive)</label><input id="regTo" type="date"></div>
+      <div class="field"><label for="regZone">Reporting timezone</label><select id="regZone"><option value="UTC">UTC</option><option value="Asia/Dubai">UTC+04:00</option><option value="Europe/London">London time</option><option value="America/New_York">New York time</option></select></div>
+      <div class="field"><label for="regCurrency">Currency</label><select id="regCurrency"><option>EUR</option><option>USD</option><option>GBP</option><option>AED</option></select></div>
+      <div class="field"><label for="regPopulation">Demo population</label><select id="regPopulation"><option value="all">All accounts</option><option value="manual">Non-automated accounts</option><option value="automated">Automated accounts</option></select></div>
+      <button type="submit" class="primary" id="regFreeze">Freeze report</button>
+      <button type="button" id="regAll">Available history</button>
+    </form>
+    <p class="hint">Blank dates use all retained history. Dates are midnight in the selected timezone. No currency conversion is performed.</p>
+    <div id="regStatus" class="result" role="status" aria-live="polite">Preparing the first report...</div>
+    <div id="regSnapshot" class="reg-snapshot"></div>
+  </div>
+  <nav class="reg-nav" aria-label="Supervisory report sections">
+    <button type="button" data-report-section="overview" aria-pressed="true">Overview</button>
+    <button type="button" data-report-section="financial" aria-pressed="false">Financial</button>
+    <button type="button" data-report-section="fixtures" aria-pressed="false">Fixtures</button>
+    <button type="button" data-report-section="customers" aria-pressed="false">Customers</button>
+    <button type="button" data-report-section="protection" aria-pressed="false">Player protection</button>
+    <button type="button" data-report-section="controls" aria-pressed="false">Cases &amp; controls</button>
+    <button type="button" data-report-section="evidence" aria-pressed="false">Evidence</button>
+  </nav>
+  <div id="regReporting" class="reg-reporting">
+    <div class="panel" id="regSummary"></div>
+    <div class="panel" id="regExamples" hidden></div>
+    <div class="panel">
+      <div class="panel-head"><h2 id="regSectionTitle">Data coverage</h2><span id="regSource" class="hint"></span></div>
+      <p id="regDescription" class="hint"></p>
+      <div class="row reg-table-tools">
+        <label class="sr" for="regSearch">Search this report section</label><input id="regSearch" type="search" placeholder="Search this section">
+        <label for="regSort">Sort by</label><select id="regSort"></select>
+        <button type="button" id="regDirection" aria-pressed="false">Ascending</button>
+      </div>
+      <div class="tablewrap reg-tablewrap"><table class="tbl" id="regTable"></table></div>
+      <div class="panel-head"><span class="hint" id="regPageLabel"></span><div class="row"><button type="button" id="regPrev" disabled>Previous</button><button type="button" id="regNext" disabled>Next</button></div></div>
+    </div>
+    <div class="panel proofpanel" id="regDetail" hidden>
+      <div class="panel-head"><h2 id="regDetailTitle">Source entries</h2><button type="button" id="regDetailClose">Close detail</button></div>
+      <p class="hint">Canonical ledger entries from this report's checkpoint. Proofs authenticate entries, not fixture descriptions or compliance examples.</p>
+      <div id="regDetailStatus" role="status" aria-live="polite"></div>
+      <div class="tablewrap"><table class="tbl" id="regDetailTable"></table></div>
+      <button type="button" id="regDetailMore" hidden>Load next evidence page</button>
+      <div id="regDetailProof" class="report"></div>
+    </div>
+  </div>
+  <div id="regEvidence" class="reg-reporting" hidden>
+  <p class="hint">These tools check the ledger itself. A valid chain is not a finding that all compliance obligations were met.</p>
   <div class="grid2">
     <div class="panel">
       <div class="panel-head"><h2>Signed checkpoints</h2><button type="button" id="signNow">Sign a checkpoint now</button></div>
@@ -181,6 +232,7 @@
       <button type="submit" class="primary">Audit</button>
     </form>
     <div id="paResult"></div>
+  </div>
   </div>
 </section>
 
