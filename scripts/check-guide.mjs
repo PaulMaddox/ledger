@@ -11,7 +11,8 @@
  *    (this is what breaks when someone edits Ledger.kt and the guide isn't updated);
  *  - any cloud component lacks a service, rationale or alternative for any provider,
  *    or any component/provider/drill combination throws while rendering;
- *  - any test link in the R1-R6 table points at a test that no longer exists.
+ *  - the test catalogue includes anything other than ledger tests and their helpers,
+ *    or any test link in the R1-R6 table points at a test that no longer exists.
  *
  * It does not check visual layout. For that, open the page in a browser.
  */
@@ -80,9 +81,28 @@ globalThis.__checks = {
     return { renders, missing };
   },
   tests() {
+    const files = ["MultiDeviceWalletTest.kt", "ConcurrencyTest.kt", "IntegrityTest.kt", "MerkleTest.kt"];
+    const broken = [];
+    for (const file of files) {
+      if (!TESTS[file]?.length || !TEST_FILES[file]) broken.push("missing ledger tests: " + file);
+    }
+    for (const file of Object.keys(TESTS)) {
+      if (!files.includes(file)) broken.push("non-ledger test group: " + file);
+    }
+    for (const file of Object.keys(TEST_FILES)) {
+      if (![...files, "TestSupport.kt"].includes(file)) broken.push("non-ledger test source: " + file);
+    }
+    if (!TEST_FILES["TestSupport.kt"]) broken.push("missing ledger test helpers");
+    renderTests();
+    const catalogue = $("testList").innerHTML;
+    for (const file of [...files, "TestSupport.kt"]) {
+      if (!catalogue.includes("<h4>" + file + "</h4>")) broken.push("missing rendered group: " + file);
+    }
+    if (catalogue.includes("WebAppTest")) broken.push("web console tests rendered");
     const names = new Set(Object.values(TESTS).flat().map(t => t.name));
     const links = [...GUIDE_HTML.matchAll(/data-test="([^"]+)"/g)].map(m => m[1]);
-    return { tests: names.size, links: links.length, broken: links.filter(n => !names.has(n)) };
+    broken.push(...links.filter(n => !names.has(n)));
+    return { tests: names.size, links: links.length, broken };
   },
 };`;
 (0, eval)(scripts.join("\n;\n") + checks);
