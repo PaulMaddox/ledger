@@ -55,7 +55,8 @@ safe to run again, and CI runs these exact commands on fresh Ubuntu and Windows 
 
 `./gradlew web` (Windows: `.\gradlew.bat web`) starts the ledger with a browser dashboard at
 <http://localhost:8080>. It has a view for each persona, all working against the same live
-ledger, so anything done in one view shows up in the others.
+ledger, so anything done in one view shows up in the others. The first tab, **About**, embeds
+the interactive ledger guide and its screenshots.
 
 ![Simulator: 500 automated customers, each tile streaming its latest actions](docs/screenshots/simulator.png)
 
@@ -99,20 +100,48 @@ ledger, so anything done in one view shows up in the others.
   in-flight placement's definitive result, including during queue overload.
 - **Regulator.** Signed checkpoints verified in the browser, a full independent audit,
   with signature caching bound to the exact evidence, display commitments and public key,
-  consistency and inclusion proofs, a per-customer audit trail, and a tamper lab that
-  corrupts a *copy* of the signed journal prefix three different ways and shows the verifier
-  catching each, even while the simulator appends new entries. Audit snapshots reread
+  consistency and inclusion proofs and a per-customer audit trail. Audit snapshots reread
   checkpoint records from disk through the captured checkpoint's position instead of
   trusting cached copies or unverified tree sizes. Player audits compare posting replays
   with immutable engine account states at each account's own last sequence.
   Signing times are decoded from the signed bytes.
   Checkpoint history and its read offset advance together only after a successful scan.
+- **Administrator.** Live CPU, heap and host memory, available filesystem space, journal size,
+  physical process storage I/O (Linux only), durably committed transactions/sec, platform
+  threads, garbage collection and read-model lag. Unsupported counters are labelled unavailable.
+  Clearing storage requires typing `CLEAR DEMO STORAGE`; it stops and drains services,
+  permanently deletes only the demo journals, torn-tail quarantine files and fixtures, then seeds a fresh demo.
+  The signing key, lock files and unrelated files remain. This unauthenticated, demo-only
+  reset is an explicit exception to append-only storage, never a production ledger operation.
+- **Chaos Monkey.** Seven bounded experiments against the **main data store**: torn writes, CRC corruption,
+  signed-history rollback, duplicate retry storms, multi-device double spending, conflicting
+  settlement and signing-service outage/fail-stop. Clicking **Run experiment** authorizes
+  that run; no typed phrase is required. Retry, double-spend and settlement races run live
+  on the ledger alongside the simulator, demonstrating committed outcomes and rejected
+  transactions without interrupting simulator traffic. A live experiment catches the
+  dashboard read model up before replying, so its committed customer is immediately
+  searchable; balances and integrity evidence still come from the ledger.
+  Live races remain serialized with a virtual-thread-safe lock, so concurrent
+  requests cannot pin all JDK 21 HTTP carriers while waiting for their workers.
+  File and signer faults drain services
+  before running; the simulator resumes with a fresh run if the store recovers. Corruption
+  correctly fail-stops the ledger, so services remain stopped until reset rather than
+  accepting writes against damaged history. Storage attacks mutate the main journal under
+  its directory lock; the tamper lab edits deposits, rewrites the chain or rolls back signed
+  entries in that same store. Torn-write recovery preserves committed history; detected
+  corruption remains for inspection, without automatic restore. Administrator reset is
+  available even when the ledger is stopped or the app restarts on corrupt storage. Use it
+  to start again. History retains the last 30 experiments in memory until reset or app
+  restart. These are demo-only, owner-approved exceptions to append-only storage, never
+  production operations.
 
 | Operator | Customer |
 |---|---|
 | ![Operator view](docs/screenshots/operator.png) | ![Customer view](docs/screenshots/customer.png) |
 | **Regulator** | **Verified in the browser** |
 | ![Regulator view](docs/screenshots/regulator.png) | ![An entry verified in the browser](docs/screenshots/customer-verify.png) |
+| **Administrator** | **Chaos Monkey** |
+| ![Administrator performance dashboard](docs/screenshots/administrator.png) | ![Chaos Monkey failure experiments](docs/screenshots/chaos.png) |
 
 Options: `./gradlew web --args="--port 9090 --data build/web-ledger"`. Without `--data` the
 ledger lives in a fresh temporary folder each run; with it, the ledger, signing key, fixture
@@ -130,7 +159,8 @@ To listen on the LAN, explicitly allow the hostname or IP address users will acc
 `--host` selects the bind address; repeat `--allowed-host` for additional exact hostnames or
 IP addresses (without schemes, ports or wildcards). IPv6 wildcard binding uses `--host ::`.
 Loopback access stays available with wildcard binding; other hosts and cross-origin
-mutations remain blocked. Exposing this unauthenticated demo lets reachable users move money.
+mutations remain blocked. Exposing this unauthenticated demo lets reachable users move money,
+damage the main store with Chaos Monkey, and permanently clear demo history with Administrator reset.
 Following a link from the README or guide is allowed while Host validation remains enforced.
 Request IDs also work on LAN HTTP origins; in-browser cryptographic verification still
 requires a secure context with WebCrypto (HTTPS or localhost).
@@ -138,10 +168,17 @@ requires a secure context with WebCrypto (HTTPS or localhost).
 ### Deploying the web console to Azure AKS
 
 The [AKS deployment instructions](deploy/README.md) configure the existing `ledger`
-cluster in resource group `ledger`, Sweden Central, using GitHub Actions and Azure
-OIDC (no stored Azure password). After the one-time setup, pushes to `main` build and
-test a container, deploy it with a persistent Azure disk, and publish an Azure DNS
-address with automatic HTTPS. The workflow reports the public URL.
+cluster in resource group `ledger`, Sweden Central. One-time setup uses a
+**Bicep template deployed through the Azure portal** plus a namespace and GitHub
+environment; there are no manual Azure CLI setup commands or app registrations.
+Bicep provisions the registry, managed identity, GitHub OIDC trust and scoped
+permissions without changing the cluster or storing an Azure password.
+After setup, successful CI on `main` triggers a container build and deployment
+with a persistent Azure disk and automatic HTTPS. The deployment checks out and
+tags the exact CI-tested commit; manual deployments require successful CI for
+that commit too. Tests and the demo audit run in CI, not again in the deployment
+or Docker build. The container still includes the generated About guide and its
+screenshots. The workflow reports the public URL.
 
 This is still an **unauthenticated synthetic-money demo**, not a production wallet.
 It runs exactly one ledger instance; updates briefly interrupt service. Behind a TLS
@@ -152,6 +189,11 @@ deployment does not change the rendered UI.
 
 ## Running
 
+The regulatory stress test retains every screen's balance reads with lossless
+run-length compression and checks them against replayed ledger history. Repeated
+reads keep their counts and order without exhausting the test heap; failed tests
+also stop their background workers.
+
 | | Ubuntu | Windows |
 |---|---|---|
 | Run the demo | `./gradlew run` | `.\gradlew.bat run` |
@@ -160,6 +202,8 @@ deployment does not change the rendered UI.
 | Run one test class | `./gradlew test --tests "com.pam.ledger.MultiDeviceWalletTest"` | `.\gradlew.bat test --tests "com.pam.ledger.MultiDeviceWalletTest"` |
 
 Test reports are written to `build/reports/tests/test/index.html`.
+The test JVM uses two virtual-thread carriers so concurrent HTTP regressions also
+exercise the constrained scheduling found on small CI and AKS hosts.
 
 ### What the demo does
 
@@ -210,7 +254,7 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -WithGuideTools   # W
 Then:
 
 ```
-python3 scripts/build-readme.py   # rebuild docs/index.html (Windows: python instead of python3)
+python3 scripts/build-readme.py   # rebuild docs/index.html and the web console's embedded guide
 node scripts/check-guide.mjs      # headless check of the guide
 node scripts/check-web.mjs        # console browser regression checks (no dependencies)
 ```
@@ -237,7 +281,7 @@ src/main/kotlin/com/pam/ledger/
   Hashes.kt, EntryCodec.kt, Validation.kt, Model.kt, Errors.kt, AppendOnlyList.kt
   LedgerVerifier.kt    offline auditor
   web/                 web console server: read model, book, simulator, regulator tools, HTTP API
-src/main/resources/web/  web console front end (index.html, app.js, app.css; no libraries)
+src/main/resources/web/  web console front end (including generated about.html; no libraries)
 src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1–R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt
@@ -251,6 +295,10 @@ scripts/
   check-guide.mjs      headless check: debugger anchors, cloud data, test links
   capture-screenshots.py  regenerates docs/screenshots/ from the running web console
 docs/screenshots/      web console screenshots used here and in the guide
+deploy/
+  main.bicep          one-time Azure resources and GitHub OIDC permissions for existing AKS
+  azure.json          generated portal-deployable ARM template (never edit by hand)
+  aks.yaml            single-instance web console, persistent disk and public HTTPS proxy
 ```
 
 ## Before production

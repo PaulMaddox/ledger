@@ -7,3 +7,6 @@
 !gradle/**
 !src/
 !src/**
+!docs/
+!docs/screenshots/
+!docs/screenshots/*.png

@@ -20,6 +20,27 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  deployment:
+    name: AKS deployment configuration
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+      - name: Validate Bicep and its generated portal template
+        run: |
+          set -euo pipefail
+          az bicep install --version v0.48.1
+          az bicep lint --file deploy/main.bicep
+          az bicep build --file deploy/main.bicep --outfile "$RUNNER_TEMP/azure.json"
+          diff -u deploy/azure.json "$RUNNER_TEMP/azure.json"
+      - name: Check deployment contracts
+        run: |
+          python3 -m pip install -r scripts/requirements-deploy.txt
+          python3 scripts/check-deploy.py
+
   tests:
     name: Kotlin tests
     runs-on: ubuntu-latest

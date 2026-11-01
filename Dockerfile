@@ -3,9 +3,8 @@ WORKDIR /build
 COPY gradlew settings.gradle.kts build.gradle.kts ./
 COPY gradle/ gradle/
 COPY src/ src/
-RUN ./gradlew test --no-daemon && \
-    ./gradlew test --no-daemon --rerun-tasks && \
-    ./gradlew run installDist --no-daemon
+COPY docs/screenshots/ docs/screenshots/
+RUN ./gradlew installDist --no-daemon
 
 FROM caddy:2.10.2-alpine AS proxy
 # High listener ports do not need the upstream binary's privileged-port capability.
