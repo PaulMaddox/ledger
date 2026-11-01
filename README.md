@@ -88,6 +88,10 @@ These safeguards belong only to the unauthenticated demo, not the production led
   Seed deposits are stable across retries and restarts; existing seed references are not funded again.
   Betting selects from a current-open fixture index rather than sorting completed fixture history.
   Accepted/refused events wait for the original wallet outcome; a slow response is never counted as a refusal.
+  Bet registration uses a parking-safe lock: waiting for ledger queue admission never
+  holds a map-compute monitor that could starve JDK 21 virtual threads and HTTP handlers.
+  The AKS deployment checks actual loopback HTTP responses, not just TCP acceptance;
+  sustained handler stalls trigger a restart that retains and replays the durable ledger.
   Customer IDs always use ASCII digits, independent of the host locale.
   Resizing the simulator wall preserves retained customers' activity, balances and refusal state.
   Action errors appear beside the controls, survive refreshes, and clear after a successful action.

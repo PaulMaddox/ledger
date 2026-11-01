@@ -22,8 +22,10 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
+import kotlin.concurrent.withLock
 import kotlin.concurrent.write
 import kotlin.random.Random
 
@@ -83,7 +85,8 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     private val openById = ConcurrentHashMap<String, Fixture>()
     private val counter = AtomicInteger()
     private val persistenceLock = Any()
-    private val pendingByBetId = ConcurrentHashMap<String, PendingPlacement>()
+    private val placementLock = ReentrantLock()
+    private val pendingByBetId = HashMap<String, PendingPlacement>()
     internal var placementTimeout: Duration = Duration.ofSeconds(30)
 
     init {
@@ -144,7 +147,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
                 return@read wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
             }
             var created: PendingPlacement? = null
-            val pending = pendingByBetId.compute(betId) { _, current ->
+            // Queue admission can park. A ConcurrentHashMap.compute monitor would
+            // pin a JDK 21 carrier and can starve every virtual HTTP/simulator thread.
+            val pending = placementLock.withLock {
+                val current = pendingByBetId[betId]
                 if (current != null) {
                     if (current.playerId != playerId || current.fixtureId != fixtureId ||
                         current.selection != selection || current.stake != stake) {
@@ -156,15 +162,16 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
                     // Settlement waits for this future even if the request times out.
                     val submitted = wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
                     val placement = PendingPlacement(playerId, fixtureId, selection, stake, submitted)
+                    pendingByBetId[betId] = placement
                     f.pendingPlacements.add(submitted)
                     created = placement
                     placement
                 }
-            }!!
+            }
             created?.let { placement ->
                 placement.future.whenComplete { _, _ ->
                     f.pendingPlacements.remove(placement.future)
-                    pendingByBetId.remove(betId, placement)
+                    placementLock.withLock { pendingByBetId.remove(betId, placement) }
                 }
             }
             pending.future

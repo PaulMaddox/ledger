@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Check the deployment's permissions, persistence and single-writer contract."""
 import json
+import os
+import socket
+import subprocess
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import unittest
 
@@ -145,6 +150,61 @@ class DeploymentTests(unittest.TestCase):
         )
         config = next(r for r in MANIFESTS if r["kind"] == "ConfigMap")
         self.assertIn("reverse_proxy 127.0.0.1:8080", config["data"]["Caddyfile"])
+
+    def test_probes_detect_handler_starvation_not_just_an_open_socket(self):
+        deployment = next(r for r in MANIFESTS if r["kind"] == "Deployment")
+        containers = deployment["spec"]["template"]["spec"]["containers"]
+        ledger = next(c for c in containers if c["name"] == "ledger")
+        for name in ("startupProbe", "readinessProbe", "livenessProbe"):
+            probe = ledger[name]
+            command = probe["exec"]["command"]
+            self.assertEqual(command[0], "curl")
+            self.assertIn("--fail", command)
+            self.assertEqual(command[-1], "http://127.0.0.1:8080/")
+            self.assertEqual(command[command.index("--max-time") + 1], "3")
+            self.assertGreater(probe["timeoutSeconds"], 3)
+            self.assertNotIn("tcpSocket", probe)
+        self.assertEqual(ledger["startupProbe"]["failureThreshold"], 120)
+        self.assertEqual(ledger["livenessProbe"]["periodSeconds"], 10)
+        self.assertEqual(ledger["livenessProbe"]["failureThreshold"], 6)
+        proxy = next(c for c in containers if c["name"] == "https")
+        self.assertEqual(proxy["livenessProbe"]["tcpSocket"]["port"], "https")
+        self.assertIn("RUN curl --version > /dev/null", (ROOT / "Dockerfile").read_text())
+
+    def test_http_probe_rejects_an_accepting_but_unresponsive_server(self):
+        release = threading.Event()
+
+        class Handler(BaseHTTPRequestHandler):
+            def do_GET(self):
+                if self.path == "/stalled":
+                    release.wait(10)
+                    return
+                self.send_response(503 if self.path == "/failed" else 200)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def log_message(self, *args):
+                pass
+
+        server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+        worker = threading.Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            with socket.create_connection(server.server_address, timeout=1):
+                pass
+            deployment = next(r for r in MANIFESTS if r["kind"] == "Deployment")
+            ledger = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == "ledger")
+            command = list(ledger["livenessProbe"]["exec"]["command"])
+            command[command.index("--output") + 1] = os.devnull
+            for path, expected in (("/", 0), ("/stalled", 28), ("/failed", 22)):
+                command[-1] = f"http://127.0.0.1:{server.server_port}{path}"
+                result = subprocess.run(command, capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode, expected, result.stderr)
+        finally:
+            release.set()
+            server.shutdown()
+            server.server_close()
+            worker.join(5)
 
 
 if __name__ == "__main__":

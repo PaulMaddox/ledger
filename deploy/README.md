@@ -161,6 +161,30 @@ protect it and plan in-country backups before relying on retained history.
 The application binds only to pod loopback. Caddy preserves browser request headers,
 and `--public-origin` pins the exact HTTPS hostname and port. Do not rewrite Origin
 or Referer to bypass checks. Local HTTP remains available for diagnostics.
+The ledger's startup, readiness and liveness probes require an actual loopback HTTP
+response within three seconds; an accepting TCP socket alone does not prove its
+virtual-thread handlers can run. Six consecutive liveness failures, ten seconds
+apart, trigger a container restart with the existing volume, not a storage reset.
+The separately configured daily demo purge still applies, including catch-up at startup.
+Startup allows ten minutes for replay before readiness/liveness begin. The proxy
+has independent TCP listener readiness and liveness checks.
+
+Bet registration never waits for ledger queue admission inside
+`ConcurrentHashMap.compute`: that intrinsic monitor pins JDK 21 virtual-thread
+carriers and can deadlock both the simulator and HTTP server. A `ReentrantLock`
+preserves atomic pending-slip registration while allowing parked callers to release
+carriers; fixture placement/settlement coordination and durable acknowledgments are
+unchanged. Regression coverage deliberately fills a one-slot ledger queue with
+only two carriers, checks another virtual thread still runs, races pending retries,
+and checks HTTP responsiveness through a busy run with automatic fixture rounds.
+
+For Azure CLI diagnostics against a cluster in a different directory, explicitly
+set the cluster tenant when converting credentials with
+`kubelogin convert-kubeconfig -l azurecli --tenant-id <cluster-tenant-id>`.
+Otherwise Azure CLI's default directory can cause authentication errors even when
+the account already has the required cluster roles. Inspect existing permissions
+before requesting any new grants; never enable local administrator accounts as a workaround.
+
 Both containers run non-root with read-only root filesystems and no service-account
 token. The Kubernetes disk is writable only through their mounted data directories.
 The workflow builds a separate Caddy image target that removes its binary's upstream
