@@ -11,7 +11,7 @@ Exact balances. Safe concurrency. Evidence you can verify yourself.
 
 </div>
 
-## Every balance has a history
+## 🧾 Every balance has a history
 
 A wallet is more than its latest number. This ledger records the movements behind
 it, protects the money under competing requests, and lets you inspect the evidence.
@@ -64,7 +64,7 @@ what the ledger refuses to accept.
 
 ![Chaos Monkey experiments and their accounting and integrity results](docs/screenshots/chaos.png)
 
-## Don't take the dashboard's word for it
+## 🔎 Don't take the dashboard's word for it
 
 Open a receipt and verify it in your own browser. The browser checks the
 transaction, its proof and its signature itself. The **Regulator** view goes
@@ -82,7 +82,7 @@ explanations.
 > clear it with Administrator reset. History resets daily and simulator sessions
 > are time-limited. Never use real accounts, private customer data or production keys.
 
-## Run it locally
+## 🚀 Run it locally
 
 With [Git](https://git-scm.com) installed, choose your platform. After starting
 the console, open **<http://localhost:8080>**.
