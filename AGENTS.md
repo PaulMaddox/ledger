@@ -159,7 +159,7 @@ change it describes:
 - Placing a bet and settling its fixture are coordinated by the per-fixture lock in `Book`.
   Keep it, and keep the race test in `WebAppTest`.
 - API POST form bodies are capped at 16 KiB (16,384 bytes) of encoded data, before
-  UTF-8 or form decoding. Oversized bodies return HTTP 413 (`body_too_large`) before
+  UTF-8 or form decoding. Oversized bodies return HTTP 413 (`payload_too_large`) before
   routing, without performing the operation. Reject oversized declared lengths
   before reading and keep streaming reads bounded to 16,385 bytes (one extra byte
   detects overflow), using the buffer-taking `readNBytes(buffer, offset, length)` overload.

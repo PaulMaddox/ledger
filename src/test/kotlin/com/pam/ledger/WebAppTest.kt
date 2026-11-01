@@ -844,7 +844,7 @@ class WebAppTest {
                 val response = http.send(request, HttpResponse.BodyHandlers.ofString())
                 assertEquals(if (body.size <= limit) 200 else 413, response.statusCode(), response.body())
                 if (body.size > limit) {
-                    assertTrue(response.body().contains("\"error\":\"body_too_large\""), response.body())
+                    assertTrue(response.body().contains("\"error\":\"payload_too_large\""), response.body())
                     assertEquals(before, call(app, "GET", "fixtures").second)
                 }
             }
@@ -876,7 +876,7 @@ class WebAppTest {
                     val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
                     val length = headers.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
                     val body = CharArray(length) { reader.read().also { assertTrue(it >= 0) }.toChar() }.concatToString()
-                    assertTrue(body.contains("\"error\":\"body_too_large\""), body)
+                    assertTrue(body.contains("\"error\":\"payload_too_large\""), body)
                 }
                 assertEquals(before, call(app, "GET", "players/alice").second)
             }
