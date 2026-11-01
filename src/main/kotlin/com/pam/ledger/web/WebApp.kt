@@ -233,6 +233,9 @@ class LedgerWebApp private constructor(
     private lateinit var server: HttpServer
     private lateinit var maintenance: DemoMaintenance
     private val requests = Semaphore(32)
+    // Replay and JSON serialization are deliberately single-flight, without a waiting queue.
+    // Supervisory clients must not multiply full-history working sets or crowd out wallet requests.
+    private val reporting = Semaphore(1)
     private val experiments = ReentrantLock()
     val port: Int get() = server.address.port
 
@@ -394,6 +397,7 @@ class LedgerWebApp private constructor(
             return
         }
         var experiment = false
+        var reportRequest = false
         try {
             val contentLength = ex.requestHeaders.getFirst("Content-Length")
             if (ex.requestHeaders.getFirst("Transfer-Encoding") == null &&
@@ -419,6 +423,10 @@ class LedgerWebApp private constructor(
                 decodeComponent(it, form = false)
             }
             val request = Request(ex.requestMethod, segments, params)
+            if (segments.size >= 2 && segments[0] == "regulator" && segments[1] == "report") {
+                if (!reporting.tryAcquire()) throw HttpError(503, "overloaded", "another supervisory request is running; retry later")
+                reportRequest = true
+            }
             if (request.method == "POST" && segments in listOf(
                     listOf("regulator", "audit"), listOf("regulator", "tamper"), listOf("chaos"))) {
                 experiments.lock()
@@ -471,6 +479,7 @@ class LedgerWebApp private constructor(
         } finally {
             ex.close()
             if (experiment) experiments.unlock()
+            if (reportRequest) reporting.release()
             if (!liveness) requests.release()
         }
     }
@@ -684,6 +693,9 @@ class LedgerWebApp private constructor(
             }
 
             // ---- Regulator ----
+            post("regulator", "report") -> RegulatorReports(ledger, book, audit).create(r.params)
+            get("regulator", "report", "evidence") -> RegulatorReports(ledger, book, audit).evidence(r.params)
+            get("regulator", "report", "proof") -> RegulatorReports(ledger, book, audit).proof(r.params)
             get("regulator", "checkpoints") -> mapOf(
                 "publicKey" to ledger.publicKey.encoded,
                 "checkpoints" to audit.checkpoints().map(::sthView).asReversed(),

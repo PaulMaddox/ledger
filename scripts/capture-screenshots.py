@@ -9,6 +9,7 @@ Run whenever the web app's appearance or behaviour changes (AGENTS.md requires i
 Requires Playwright for Python and a Chromium-based browser:
     pip install playwright && python3 -m playwright install chromium
 or pass an existing Chrome with --chrome /path/to/chrome.
+Use --regulator-only to refresh the reporting screenshots without exercising Chaos Monkey.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
 build up, then photographs each persona's view into docs/screenshots/. WARNING: the
@@ -23,7 +24,7 @@ from playwright.async_api import async_playwright
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int) -> None:
+async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         launch = {"args": ["--no-sandbox"]}
@@ -55,30 +56,46 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int) -> 
         await page.fill("#simRate", "60")
         await page.click("#simStart")
         await page.wait_for_timeout(warmup * 1000)
-        await shot("simulator")
+        if not regulator_only:
+            await shot("simulator")
 
         # Operator: KPIs, charts, fixtures and feed, with three minutes' worth of chart history building.
-        await page.goto(url + "#operator")
-        await page.wait_for_timeout(4000)
-        await shot("operator")
+        if not regulator_only:
+            await page.goto(url + "#operator")
+            await page.wait_for_timeout(4000)
+            await shot("operator")
 
         # Customer: an automated customer's account, with one entry verified in the browser.
-        await page.goto(url + "#customer")
-        await page.fill("#playerSearch", "sim-00007")
-        await page.wait_for_timeout(1200)
-        await page.click("[data-player='sim-00007']")
-        await page.wait_for_timeout(1500)
-        await page.click("#historyTable [data-verify]")
-        await page.wait_for_selector("#custProof .verdict", timeout=10000)
-        await close_up("customer-verify", "#custProof")
-        await shot("customer")
+        if not regulator_only:
+            await page.goto(url + "#customer")
+            await page.fill("#playerSearch", "sim-00007")
+            await page.wait_for_timeout(1200)
+            await page.click("[data-player='sim-00007']")
+            await page.wait_for_timeout(1500)
+            await page.click("#historyTable [data-verify]")
+            await page.wait_for_selector("#custProof .verdict", timeout=10000)
+            await close_up("customer-verify", "#custProof")
+            await shot("customer")
 
         # Regulator: a full audit.
         await page.goto(url + "#regulator")
-        await page.wait_for_timeout(1500)
+        await page.wait_for_function("document.querySelector('#regPack')?.disabled === false")
+        await shot("regulator")
+        for section in ["financial", "fixtures", "customers", "protection", "controls"]:
+            await page.click(f"[data-report-section='{section}']")
+            if section in ["protection", "controls"]:
+                await page.locator("#regExamples details").first.evaluate("(el) => el.open = true")
+            await shot(f"regulator-{section}")
+        await page.click("[data-report-section='evidence']")
         await page.click("#auditBtn")
         await page.wait_for_selector("#auditResult .verdict", timeout=30000)
-        await shot("regulator")
+        await shot("regulator-evidence")
+
+        if regulator_only:
+            await browser.close()
+            if errors:
+                raise SystemExit("page errors while capturing:\n  " + "\n  ".join(errors))
+            return
 
         await page.goto(url + "#administrator")
         await page.wait_for_selector("#adminKpis .kpi")
@@ -110,5 +127,6 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=str(ROOT / "docs" / "screenshots"), help="output folder")
     ap.add_argument("--chrome", default=None, help="path to an existing Chrome/Chromium executable")
     ap.add_argument("--warmup", type=int, default=12, help="seconds of simulated traffic before the first screenshot")
+    ap.add_argument("--regulator-only", action="store_true", help="capture reporting views only; skip destructive Chaos Monkey scenarios")
     a = ap.parse_args()
-    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup))
+    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only))
