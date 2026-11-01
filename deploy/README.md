@@ -5,100 +5,134 @@ Deploys the web console, not the CLI demo, to cluster **ledger**, resource group
 `9600a075-454a-4e6b-82d4-58bef3e21b4a`. Wait until cluster provisioning is `Succeeded`.
 The cluster uses Microsoft Entra authentication with Azure RBAC.
 
-**Anyone on the internet can use every persona, move synthetic money and run the
-simulator. Never put real accounts, private customer data or production keys here.**
+**Anyone on the internet can use every persona, move synthetic money, run the
+simulator, damage the main store with Chaos Monkey, and permanently clear its history
+with Administrator reset. Never put real accounts, private customer data or production keys here.**
 HTTPS makes browser verification work; it does not add authentication or make this
 a production wallet. Azure load balancer, disk, registry and compute incur charges.
 
-## One-time Azure setup
+## One-time setup: Azure portal, then GitHub
 
-Run these commands as an Azure administrator in Azure Cloud Shell (Bash), with `gh`
-available for the GitHub steps. Choose a globally unique registry name, a DNS label
-unique within Sweden Central, and your real certificate contact email.
+No manual Azure CLI setup, app registration, client secret, ingress controller or
+certificate manager is required. [main.bicep](main.bicep) creates a Basic container
+registry, a user-assigned managed identity, its GitHub OIDC trust, and all Azure role
+assignments. It **references, but never updates or recreates, the existing AKS cluster**.
+Registry and identity stay in Sweden Central. The registry name defaults to a
+stable, globally unique name derived from the resource group.
 
-```bash
-SUBSCRIPTION=9600a075-454a-4e6b-82d4-58bef3e21b4a
-ACR_NAME=youruniqueregistry
-DNS_LABEL=your-unique-ledger-demo
-TLS_EMAIL=you@example.com
-az account set --subscription "$SUBSCRIPTION"
-AKS_ID=$(az aks show -g ledger -n ledger --query id -o tsv)
-TENANT_ID=$(az account show --query tenantId -o tsv)
+Kubernetes workloads remain in [aks.yaml](aks.yaml): Bicep manages Azure resources,
+while GitHub Actions applies the native Kubernetes manifests. The AKS controller
+creates the public IP/DNS and Azure disk from the Service and PVC declarations.
+There is no second infrastructure deployment system running inside the cluster.
 
-az acr create -g ledger -n "$ACR_NAME" --sku Basic --location swedencentral
-ACR_ID=$(az acr show -n "$ACR_NAME" --query id -o tsv)
-# The default registry permission mode uses AcrPull/AcrPush, not ABAC repository roles.
-az aks update -g ledger -n ledger --attach-acr "$ACR_ID"
+### 1. Create the Kubernetes namespace in the AKS portal
 
-CLIENT_ID=$(az ad app create --display-name ledger-github-deploy --query appId -o tsv)
-az ad sp create --id "$CLIENT_ID"
-az ad app federated-credential create --id "$CLIENT_ID" --parameters '{
-  "name": "github-azure-demo",
-  "issuer": "https://token.actions.githubusercontent.com",
-  "subject": "repo:PaulMaddox/ledger:environment:azure-demo",
-  "audiences": ["api://AzureADTokenExchange"]
-}'
-az role assignment create --assignee "$CLIENT_ID" --role AcrPush --scope "$ACR_ID"
-az role assignment create --assignee "$CLIENT_ID" --role Reader --scope "$ACR_ID"
-az role assignment create --assignee "$CLIENT_ID" \
-  --role "Azure Kubernetes Service Cluster User Role" --scope "$AKS_ID"
-az role assignment create --assignee "$CLIENT_ID" \
-  --role "Azure Kubernetes Service RBAC Writer" --scope "$AKS_ID/namespaces/ledger-web"
+Open **ledger > Kubernetes resources > Namespaces**, then use **Create** to create
+`ledger-web` (or paste this into the portal's YAML editor):
+
+```yaml
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: ledger-web
 ```
 
-As a cluster administrator, connect to the cluster using the portal's **Connect**
-instructions (install `kubelogin` if needed), then create the namespace once:
+This is the only manual cluster setup. Your administrator needs **Azure Kubernetes
+Service RBAC Cluster Admin** on this cluster; Azure resource Owner alone does not grant
+Kubernetes access. If needed, an administrator can assign that role to you in the
+cluster's **Access control (IAM)** pane. Do not grant it to the deployment identity.
+Bicep's existing namespace declaration constructs the Azure RBAC scope only; it does
+not create a Kubernetes namespace or require AKS managed namespaces.
 
-```bash
-az aks get-credentials -g ledger -n ledger
-kubelogin convert-kubeconfig -l azurecli
-kubectl create namespace ledger-web
-```
+### 2. Deploy the Bicep infrastructure through the Azure portal
 
-Your administrator identity needs AKS Azure RBAC Cluster Admin to create namespaces.
-The deployment identity deliberately cannot create them. Role propagation can take
-several minutes. Hosted GitHub runners must be able to reach the AKS API; if it is
-private or IP-restricted, use a trusted self-hosted runner inside the permitted
-network rather than opening administrative access to the internet.
+Download [azure.json](azure.json), the committed ARM template compiled from
+`main.bicep`. In the Azure portal, search for **Deploy a custom template**, select
+**Build your own template in the editor > Load file**, load `azure.json`, and save.
 
-## GitHub setup
+Select subscription `9600a075-454a-4e6b-82d4-58bef3e21b4a` and resource group
+**ledger**. Leave **Cluster Name** as `ledger`, **Location** as `swedencentral`, and
+**Github Repository** as `PaulMaddox/ledger`. Leave the generated **Registry Name**
+unless you want to choose another globally unique name for a new dedicated registry.
+Use **Review + create > Create**.
 
-In **Settings > Environments**, create `azure-demo`. Restrict deployment branches
-to `main`; add required reviewers if desired. This branch restriction matters
-because the federated identity trusts the environment, not an individual branch.
-Set these **environment variables** (none is an Azure password):
+If GitHub uses immutable OIDC subjects, set **Github Repository** to the repository
+prefix returned by `gh api repos/PaulMaddox/ledger/actions/oidc/customization/sub`
+without the leading `repo:`. For this repository that is
+`PaulMaddox@4678446/ledger@1440482868`. The complete trusted subject must match
+GitHub's assertion exactly, including `:environment:azure-demo`; reapplying the
+template with the older name-only value would break Azure login again.
+
+The person deploying needs resource creation and role-assignment permissions in
+resource group `ledger` (for example **Owner**, or **Contributor** plus **Role Based
+Access Control Administrator** with permission to assign the template's roles).
+No Microsoft Entra application-administrator permission is needed. Reapplying the
+same template/parameters is safe; use incremental deployment, never complete mode.
+If `ledger-github-deploy` already exists from another setup, inspect its existing
+permissions before reusing it; this template does not remove older grants.
+
+Wait for deployment success, then open the deployment's **Outputs**. The identity
+gets registry push/read permissions and AKS cluster-user credentials, but Kubernetes
+write access is restricted to `ledger-web`. AKS's existing **kubelet identity** gets
+`AcrPull`; the cluster configuration is not changed with `--attach-acr`.
+
+### 3. Configure the GitHub environment
+
+In repository **Settings > Environments**, create `azure-demo`. Under **Deployment
+branches and tags**, select only branch `main`; add required reviewers if desired.
+**Do not skip this restriction:** Azure's OIDC trust is bound to the environment,
+not the branch, so the workflow's branch guard alone is not a security boundary.
+
+Copy these six deployment outputs into matching **environment variables** (not secrets):
 
 | Variable | Value |
 |---|---|
-| `AZURE_CLIENT_ID` | Application ID (`CLIENT_ID` above) |
-| `AZURE_TENANT_ID` | Directory ID (`TENANT_ID` above) |
-| `AZURE_SUBSCRIPTION_ID` | Subscription ID above |
+| `AZURE_CLIENT_ID` | Managed identity client ID |
+| `AZURE_TENANT_ID` | Directory ID |
+| `AZURE_SUBSCRIPTION_ID` | Subscription ID |
+| `AKS_RESOURCE_GROUP` | `ledger` |
+| `AKS_CLUSTER_NAME` | `ledger` |
 | `ACR_NAME` | Registry name, without `.azurecr.io` |
-| `AKS_DNS_LABEL` | Chosen DNS label, without dots |
-| `TLS_EMAIL` | Real email for certificate expiry/contact notices |
 
-Alternatively, after creating the environment and its branch restrictions, use:
+Also add `AKS_DNS_LABEL` (a DNS label unique within Sweden Central, such as
+`paulmaddox-ledger-demo`, without dots) and `TLS_EMAIL` (your real certificate
+contact email). There are no Azure passwords to store or rotate.
 
-```bash
-gh variable set AZURE_CLIENT_ID --repo PaulMaddox/ledger --env azure-demo --body "$CLIENT_ID"
-gh variable set AZURE_TENANT_ID --repo PaulMaddox/ledger --env azure-demo --body "$TENANT_ID"
-gh variable set AZURE_SUBSCRIPTION_ID --repo PaulMaddox/ledger --env azure-demo --body "$SUBSCRIPTION"
-gh variable set ACR_NAME --repo PaulMaddox/ledger --env azure-demo --body "$ACR_NAME"
-gh variable set AKS_DNS_LABEL --repo PaulMaddox/ledger --env azure-demo --body "$DNS_LABEL"
-gh variable set TLS_EMAIL --repo PaulMaddox/ledger --env azure-demo --body "$TLS_EMAIL"
-```
+Role propagation can take several minutes. Hosted GitHub runners must reach the AKS
+API. The supplied cluster is not private; if API IP restrictions are added, use a
+trusted self-hosted runner in the permitted network rather than opening administrative
+access to the internet.
+
+## Automatic deployments
 
 Merge the deployment change, then open **Actions > Deploy web app to AKS**.
-It runs on every push to main, or manually with **Run workflow** on main. The image
-build runs all Kotlin tests twice and the CLI audit before publishing. The workflow
-also checks the guide and console JavaScript, waits for rollout and verified HTTPS,
-then prints the public URL in its summary:
+It runs after **CI** succeeds for a push to main, or manually with **Run workflow**
+on main. Both paths require successful main-branch CI for the exact deployment
+commit. The workflow checks out that SHA and uses it for both image tags, rather
+than substituting whichever main commit is newest when CI completes.
+
+CI runs the Kotlin suite twice, the CLI audit, guide checks and console JavaScript
+tests. The deployment does not repeat them: the Docker build runs only
+`./gradlew installDist --no-daemon`, then the workflow pushes the images, waits
+for rollout and verified HTTPS, and prints the public URL in its summary:
 
 `https://<AKS_DNS_LABEL>.swedencentral.cloudapp.azure.com/`
 
-The regulatory stress test retains all balance observations as evidence; the test
-JVM has a 2 GiB maximum heap so container builds do not exhaust Gradle's default
-512 MiB heap. This is test-only configuration, not a change to ledger rules.
+The Docker build includes the generated About guide from `src/main/resources`
+and the PNGs from `docs/screenshots`, which Gradle packages into the application.
+The About-page HTTP regression runs in CI with those same packaged resources.
+
+The regulatory stress test retains every balance observation in lossless
+run-length-compressed sequences per screen, including the count and order of
+repeated reads. It checks every observed value against replayed ledger history
+and stops its workers even after a failure. The test JVM has a 2 GiB maximum heap.
+This is test-only evidence storage and cleanup, not a change to ledger rules.
+
+Azure infrastructure is deployed once, not on every merge. A later infrastructure
+change is made in Bicep and reapplied through the same portal flow. The GitHub
+deployment identity cannot assign roles or modify the cluster. CI compiles Bicep,
+checks that `azure.json` is current, and checks OIDC, permission scopes, persistent
+storage and the single-writer Kubernetes configuration.
 
 The public LoadBalancer service exposes only Caddy on ports 80 and 443. Azure assigns
 its public IP and DNS record; Caddy obtains and renews a publicly trusted certificate,
@@ -152,3 +186,18 @@ kubectl logs deployment/ledger-web -n ledger-web -c ledger
 A failed HTTPS check is a failed deployment, not success. Fix DNS, certificate,
 permissions, registry pulls or networking before redeploying. Reverting an image
 must never revert or delete ledger history; review data compatibility before rollback.
+
+## Editing the deployment
+
+Edit `deploy/main.bicep`, never the generated `deploy/azure.json`. With Bicep CLI
+**v0.48.1**, regenerate the portal template and run the deployment checks:
+
+```bash
+bicep build deploy/main.bicep --outfile deploy/azure.json
+python3 -m pip install -r scripts/requirements-deploy.txt
+python3 scripts/check-deploy.py
+```
+
+PyYAML is deployment-test tooling only, not an application runtime dependency.
+Commit both the Bicep source and generated template. Deployment-only changes do not
+alter the console's rendered UI and do not need regenerated screenshots.

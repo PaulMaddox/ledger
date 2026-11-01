@@ -59,7 +59,7 @@ function pollingContext() {
     if (!elements.has(id)) {
       let html = "";
       const el = {
-        value: "", controls: [], addEventListener() {},
+        value: "", className: "", controls: [], addEventListener() {},
         contains(active) { return this.controls.includes(active); },
         querySelectorAll(selector) { return this.controls.filter(b => b.matches(selector)); },
         get innerHTML() { return html; },
@@ -70,9 +70,10 @@ function pollingContext() {
             const data = Object.fromEntries([...attributes.matchAll(/data-([\w-]+)="([^"]*)"/g)].map(([, key, val]) =>
               [key, val.replace(/&(amp|lt|gt|quot|#39);/g, (_, entity) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[entity]))]));
             return {
+              disabled: /\bdisabled\b/.test(attributes),
               getAttribute: name => data[name.slice(5)] ?? null,
               matches: selector => [...selector.matchAll(/\[data-([\w-]+)\]/g)].every(([, key]) => key in data),
-              focus(options) { document.activeElement = this; this.focusOptions = options; },
+              focus(options) { if (!this.disabled) { document.activeElement = this; this.focusOptions = options; } },
             };
           });
         },
@@ -150,6 +151,30 @@ test("customer refresh does not transfer focus to another customer's control", a
     await s.c.refreshPlayer();
     assert.equal(s.document.activeElement, s.document.body);
   }
+});
+
+test("authorized Chaos Monkey polling retains scenario focus but does not focus stopped controls", async () => {
+  const s = pollingContext();
+  const data = {
+    available: true, history: [],
+    scenarios: ["retries", "checksum"].map(id => ({ id, name: id, description: "Main-store experiment" })),
+  };
+  s.responses["/api/chaos"] = data;
+  vm.runInContext('let current = "chaos";', s.c);
+  vm.runInContext(source.slice(source.indexOf("let stopChaos"), source.indexOf('$("chaosScenarios").addEventListener')), s.c);
+  s.element("chaosConfirmation").value = "CHAOS ON MAIN STORE";
+  await s.c.refreshChaos();
+  s.element("chaosScenarios").controls[1].focus();
+  data.scenarios.reverse();
+  await s.c.refreshChaos();
+  assert.equal(s.document.activeElement.getAttribute("data-chaos"), "checksum");
+  assert.equal(s.document.activeElement.focusOptions.preventScroll, true);
+
+  data.available = false;
+  data.reason = "Recovery refused; reset required";
+  await s.c.refreshChaos();
+  assert.equal(s.document.activeElement, s.document.body);
+  assert.ok(s.element("chaosScenarios").controls.every(b => b.disabled));
 });
 
 test("polling restores the current focus, not where it was before the response arrived", async () => {
@@ -337,6 +362,56 @@ test("resizing the simulator wall preserves retained customers' activity and fil
   c.buildWall(600);
   c.buildWall(700);
   assert.match(elements.get("wallNote").textContent, /of 700/);
+});
+
+test("simulator action errors survive refreshes and wall resizing until a successful action", async () => {
+  const c = context();
+  const elements = new Map();
+  c.document = {
+    getElementById: id => {
+      if (!elements.has(id)) elements.set(id, {
+        dataset: {}, value: "", className: "", innerHTML: "",
+        replaceChildren(frag) { this.children = frag.children; },
+      });
+      return elements.get(id);
+    },
+    createDocumentFragment: () => ({ children: [], appendChild(el) { this.children.push(el); } }),
+    createElement: () => ({ dataset: {}, querySelector: () => ({}) }),
+  };
+  c.performance = { now: () => 1000 };
+  const state = { customers: 2, state: "STOPPED", succeeded: 0, rejectedForFunds: 0, rejectedOther: 0 };
+  let error = "customers must be 1..20000";
+  c.api = async (path, options) => {
+    if (options && error) throw new Error(error);
+    return state;
+  };
+  vm.runInContext(source.slice(source.indexOf("const WALL_LIMIT"), source.indexOf('$("wallSearch").addEventListener')), c);
+  vm.runInContext(source.slice(source.indexOf("function simStat"), source.indexOf('$("simForm").addEventListener')), c);
+
+  await c.refreshSim();
+  const result = c.document.getElementById("simResult");
+  elements.get("simForm").dataset.dirty = "1";
+  await c.simAction("start", true);
+  assert.equal(result.innerHTML, error);
+  assert.match(result.className, /\bbad\b/);
+  assert.equal(elements.get("simForm").dataset.dirty, "1");
+  for (const customers of [2, 3, 501]) {
+    state.customers = customers;
+    await c.refreshSim();
+    assert.equal(result.innerHTML, error);
+    assert.match(elements.get("wallNote").textContent, /automated customer/);
+  }
+  error = "<invalid settings>";
+  await c.simAction(null, true);
+  assert.equal(result.innerHTML, "&lt;invalid settings&gt;");
+
+  error = null;
+  await c.simAction("start", true);
+  assert.equal(result.innerHTML, "");
+  assert.doesNotMatch(result.className, /\bbad\b/);
+  assert.equal(elements.get("simForm").dataset.dirty, undefined);
+  await c.refreshSim();
+  assert.equal(result.innerHTML, "");
 });
 
 test("simulator event polling waits for the customer wall to be built", async () => {
