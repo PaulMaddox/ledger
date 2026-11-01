@@ -11,8 +11,6 @@ Exact balances. Safe concurrency. Evidence you can verify yourself.
 
 </div>
 
-[![The live operator console: balances, exposure, fixtures and transactions in one view](docs/screenshots/operator.png)](https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/)
-
 ## Every balance has a history
 
 A wallet is more than its latest number. PAM Ledger records the movements behind
@@ -24,28 +22,47 @@ it, protects the money under competing requests, and lets you inspect the eviden
 - **Keep the receipt.** An accepted transaction survives a restart.
 - **Check the history.** Independent audits and cryptographic proofs reveal tampering.
 
-## Watch it work. Then challenge it.
+## One ledger. Six perspectives.
 
-Run hundreds of automated customers in the **Simulator**. Place a bet as a
-**Customer**, race five devices for the same balance, then switch to **Operator**
-to settle the fixture and follow the money.
+### Operator
 
-<details>
-<summary><strong>Inside the simulator: hundreds of wallets, one live ledger</strong></summary>
+Follow revenue and exposure, settle fixtures, and watch transactions arrive.
 
-![Automated customers streaming bets, deposits, withdrawals and cash-outs](docs/screenshots/simulator.png)
+[![Operator dashboard with revenue, exposure, fixtures and live transactions](docs/screenshots/operator.png)](https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/)
 
-</details>
+### Customer
 
-<details>
-<summary><strong>Chaos Monkey: double spends, outages and deliberately damaged history</strong></summary>
+Manage a wallet, place bets and cash out. Race five devices for the same balance,
+then inspect the receipts.
+
+![Customer wallet, five-device race, betting markets and transaction history](docs/screenshots/customer.png)
+
+### Regulator
+
+Audit the ledger independently, check signed checkpoints, and verify that entries
+belong to an unaltered history.
+
+![Regulator dashboard with signed checkpoints, independent audit and proof tools](docs/screenshots/regulator.png)
+
+### Simulator
+
+Put hundreds of automated customers to work making bets, deposits, withdrawals
+and cash-outs. Follow each wallet's latest actions as they happen.
+
+![Simulator controls and automated customers streaming their latest actions](docs/screenshots/simulator.png)
+
+### Administrator
+
+Monitor performance and storage, and reset the demo when you want a fresh start.
+
+![Administrator dashboard with throughput, CPU, memory, storage and reset controls](docs/screenshots/administrator.png)
+
+### Chaos Monkey
 
 Test conflicting settlements and failure recovery. Inspect the damage and see
 what the ledger refuses to accept.
 
 ![Chaos Monkey experiments and their accounting and integrity results](docs/screenshots/chaos.png)
-
-</details>
 
 ## Don't take the dashboard's word for it
 
