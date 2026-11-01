@@ -24,10 +24,13 @@ import java.util.concurrent.Callable
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /** Demo-only failures against the main store. The app owns exclusive service-lifetime coordination. */
 class ChaosLab {
     private val history = ArrayDeque<Map<String, Any?>>()
+    private val liveLock = ReentrantLock()
 
     companion object {
         val LIVE_SCENARIOS = setOf("retries", "double-spend", "settlement")
@@ -142,13 +145,13 @@ class ChaosLab {
     }
 
     /** Run business-operation races on the live ledger without interrupting simulator traffic. */
-    @Synchronized
-    fun runLive(scenario: String, ledger: Ledger, wallet: SportsbookWallet, book: Book): Map<String, Any?> {
+    fun runLive(scenario: String, ledger: Ledger, wallet: SportsbookWallet, book: Book): Map<String, Any?> = liveLock.withLock {
+        // A monitor pins JDK 21 HTTP carriers while this request waits for its virtual race workers.
         require(isLiveScenario(scenario)) { "scenario is not a live transaction experiment" }
         val started = System.nanoTime()
         val (passed, evidence) = liveMoneyExperiment(scenario, wallet, book)
         val headSize = ledger.head().size
-        return remember(mapOf(
+        remember(mapOf(
             "scenario" to scenario,
             "name" to SCENARIOS.getValue(scenario).first,
             "passed" to passed,

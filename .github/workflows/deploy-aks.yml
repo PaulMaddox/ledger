@@ -1,8 +1,10 @@
 name: Deploy web app to AKS
 
 on:
-  push:
+  workflow_run:
+    workflows: [CI]
     branches: [main]
+    types: [completed]
   workflow_dispatch:
 
 permissions:
@@ -14,14 +16,19 @@ concurrency:
 
 jobs:
   deploy:
-    if: github.ref == 'refs/heads/main'
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'))
     runs-on: ubuntu-latest
     timeout-minutes: 45
     environment: azure-demo
     permissions:
       contents: read
+      actions: read
       id-token: write
     env:
+      DEPLOY_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
       AZURE_SUBSCRIPTION_ID: ${{ vars.AZURE_SUBSCRIPTION_ID }}
       AKS_RESOURCE_GROUP: ${{ vars.AKS_RESOURCE_GROUP || 'ledger' }}
       AKS_CLUSTER_NAME: ${{ vars.AKS_CLUSTER_NAME || 'ledger' }}
@@ -30,14 +37,22 @@ jobs:
       TLS_EMAIL: ${{ vars.TLS_EMAIL }}
     steps:
       - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.DEPLOY_SHA }}
+      - name: Require successful CI for this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          CI_RUNS=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow ci.yml \
+            --branch main --event push --commit "$DEPLOY_SHA" --status success \
+            --json databaseId --jq 'length')
+          if [ "$CI_RUNS" -eq 0 ]; then
+            echo "::error::No successful main-branch CI run for $DEPLOY_SHA. Wait for CI before deploying."
+            exit 1
+          fi
       - uses: gradle/actions/wrapper-validation@v5
-      - uses: actions/setup-python@v6
-        with:
-          python-version: "3.12"
-      - uses: actions/setup-node@v5
-        with:
-          node-version: "22"
-      - name: Validate configuration and guide
+      - name: Validate configuration
         env:
           AZURE_CLIENT_ID: ${{ vars.AZURE_CLIENT_ID }}
           AZURE_TENANT_ID: ${{ vars.AZURE_TENANT_ID }}
@@ -58,10 +73,6 @@ jobs:
           [[ "$ACR_NAME" =~ ^[a-zA-Z0-9]{5,50}$ ]]
           [[ "$DNS_LABEL" =~ ^[a-z][a-z0-9-]{1,61}[a-z0-9]$ ]]
           [[ "$TLS_EMAIL" =~ ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$ ]]
-          python3 scripts/build-readme.py
-          git diff --exit-code -- docs/index.html
-          node scripts/check-guide.mjs
-          node scripts/check-web.mjs
       - uses: azure/login@v2
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -79,13 +90,13 @@ jobs:
           test "$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query provisioningState -o tsv)" = Succeeded
           test "$(az aks show -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --query location -o tsv)" = swedencentral
           LOGIN_SERVER=$(az acr show -n "$ACR_NAME" --query loginServer -o tsv)
-          echo "IMAGE=$LOGIN_SERVER/ledger-web:${GITHUB_SHA}" >> "$GITHUB_ENV"
-          echo "PROXY_IMAGE=$LOGIN_SERVER/ledger-proxy:${GITHUB_SHA}" >> "$GITHUB_ENV"
+          echo "IMAGE=$LOGIN_SERVER/ledger-web:${DEPLOY_SHA}" >> "$GITHUB_ENV"
+          echo "PROXY_IMAGE=$LOGIN_SERVER/ledger-proxy:${DEPLOY_SHA}" >> "$GITHUB_ENV"
           echo "PUBLIC_HOST=$DNS_LABEL.swedencentral.cloudapp.azure.com" >> "$GITHUB_ENV"
           az acr login -n "$ACR_NAME"
           az aks get-credentials -g "$AKS_RESOURCE_GROUP" -n "$AKS_CLUSTER_NAME" --overwrite-existing
           kubelogin convert-kubeconfig -l azurecli
-      - name: Build, test twice, audit and push image
+      - name: Build and push images
         run: |
           set -euo pipefail
           docker build --tag "$IMAGE" .

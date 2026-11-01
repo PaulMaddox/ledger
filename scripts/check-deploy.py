@@ -10,9 +10,45 @@ ROOT = Path(__file__).resolve().parent.parent
 TEMPLATE = json.loads((ROOT / "deploy/azure.json").read_text())
 MANIFESTS = list(yaml.safe_load_all((ROOT / "deploy/aks.yaml").read_text()))
 WORKFLOW = yaml.safe_load((ROOT / ".github/workflows/deploy-aks.yml").read_text())
+CI = yaml.safe_load((ROOT / ".github/workflows/ci.yml").read_text())
 
 
 class DeploymentTests(unittest.TestCase):
+    def test_deployment_uses_only_the_ci_verified_commit(self):
+        trigger = WORKFLOW[True]["workflow_run"]
+        self.assertEqual(trigger, {"workflows": ["CI"], "branches": ["main"], "types": ["completed"]})
+        self.assertNotIn("push", WORKFLOW[True])
+        self.assertIn("workflow_dispatch", WORKFLOW[True])
+        job = WORKFLOW["jobs"]["deploy"]
+        self.assertEqual(job["permissions"]["actions"], "read")
+        self.assertEqual(job["env"]["DEPLOY_SHA"], "${{ github.event.workflow_run.head_sha || github.sha }}")
+        self.assertEqual(job["steps"][0]["with"]["ref"], "${{ env.DEPLOY_SHA }}")
+        gate = job["steps"][1]
+        self.assertEqual(gate["env"]["GH_TOKEN"], "${{ github.token }}")
+        for required in ('--workflow ci.yml', '--branch main --event push', '--commit "$DEPLOY_SHA"',
+                         '--status success', 'if [ "$CI_RUNS" -eq 0 ]; then', 'exit 1'):
+            self.assertIn(required, gate["run"])
+        script = "\n".join(step.get("run", "") for step in job["steps"])
+        self.assertIn("ledger-web:${DEPLOY_SHA}", script)
+        self.assertIn("ledger-proxy:${DEPLOY_SHA}", script)
+        self.assertNotIn("ledger-web:${GITHUB_SHA}", script)
+
+    def test_tests_and_audit_run_in_ci_not_deployment(self):
+        dockerfile = (ROOT / "Dockerfile").read_text()
+        self.assertIn("RUN ./gradlew installDist --no-daemon", dockerfile)
+        self.assertNotIn("./gradlew test", dockerfile)
+        self.assertNotIn("./gradlew run", dockerfile)
+        deploy_script = "\n".join(step.get("run", "") for step in WORKFLOW["jobs"]["deploy"]["steps"])
+        for duplicate in ("check-guide.mjs", "check-web.mjs", "build-readme.py", "./gradlew test"):
+            self.assertNotIn(duplicate, deploy_script)
+        ci_script = "\n".join(step.get("run", "") for step in CI["jobs"]["tests"]["steps"])
+        self.assertIn("./gradlew test --no-daemon", ci_script)
+        self.assertIn("./gradlew test --no-daemon --rerun-tasks", ci_script)
+        self.assertIn("./gradlew run --no-daemon", ci_script)
+        guide_script = "\n".join(step.get("run", "") for step in CI["jobs"]["guide"]["steps"])
+        self.assertIn("check-guide.mjs", guide_script)
+        self.assertIn("check-web.mjs", guide_script)
+
     def test_container_build_includes_about_screenshots(self):
         dockerfile = (ROOT / "Dockerfile").read_text()
         ignore = (ROOT / ".dockerignore").read_text().splitlines()
@@ -47,9 +83,11 @@ class DeploymentTests(unittest.TestCase):
             "[format('repo:{0}:environment:azure-demo', parameters('githubRepository'))]",
         )
         self.assertEqual(job["permissions"]["id-token"], "write")
-        self.assertEqual(job["if"], "github.ref == 'refs/heads/main'")
+        self.assertEqual(job["if"], "github.ref == 'refs/heads/main' && "
+                         "(github.event_name == 'workflow_dispatch' || "
+                         "(github.event.workflow_run.event == 'push' && github.event.workflow_run.conclusion == 'success'))")
         # PyYAML's YAML 1.1 loader treats the unquoted GitHub key "on" as True.
-        self.assertEqual(WORKFLOW[True]["push"]["branches"], ["main"])
+        self.assertEqual(WORKFLOW[True]["workflow_run"]["branches"], ["main"])
         self.assertFalse(WORKFLOW["concurrency"]["cancel-in-progress"])
         for name in TEMPLATE["outputs"]:
             self.assertIn(f"vars.{name}", json.dumps(job))
