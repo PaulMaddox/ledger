@@ -65,12 +65,13 @@ stops automatically after **15 minutes**, including paused time; configuration c
 repeated Start requests and recoverable chaos do not extend it. Already-submitted operations
 finish normally. Starting a new run is an explicit action.
 
-To protect disk and heap between purges, a once-per-second capacity check drains and stops
-demo services at **100,000 entries**, **64 MiB of journals, torn-tail quarantine and fixture
-data**, or **1,000 fixtures** (in-flight work may overshoot these high-water marks). Use
-Administrator reset or wait for the daily purge to resume. HTTP bodies are limited to
-**16 KiB**, at most **32 requests** are processed concurrently, and only **one audit or
-Chaos Monkey experiment** runs at a time; excess requests receive 413 or 503.
+To cap demo storage between purges, a once-per-second capacity check drains and stops
+services when journals, torn-tail quarantine and fixture data total **12 GB**
+(12,000,000,000 bytes; in-flight work may overshoot this high-water mark). There is no entry
+or fixture-count limit. Use Administrator reset or wait for the daily purge to resume.
+HTTP bodies are limited to **16 KiB**, at most **32 requests** are processed concurrently,
+and only **one audit or Chaos Monkey experiment** runs at a time; excess requests receive
+413 or 503.
 The JDK HTTP server defaults to at most 64 connections, a 10-second request-read deadline
 and a 30-second response deadline; JVM `sun.net.httpserver` properties can override these.
 These safeguards belong only to the unauthenticated demo, not the production ledger engine.

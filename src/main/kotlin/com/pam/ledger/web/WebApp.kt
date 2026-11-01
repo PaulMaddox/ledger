@@ -646,12 +646,8 @@ class LedgerWebApp private constructor(
 
     internal fun maintainDemo() = maintenance.checkNow()
 
-    // High-water marks stop the demo, not the production writer, before the next daily purge.
-    internal fun checkDemoCapacity(
-        maxEntries: Long = 100_000,
-        maxBytes: Long = 64L * 1024 * 1024,
-        maxFixtures: Int = 1_000,
-    ) = lifecycle.write {
+    // The demo storage limit stops the demo, not the production writer, before the next daily purge.
+    internal fun checkDemoCapacity(maxBytes: Long = 12_000_000_000L) = lifecycle.write {
         val current = services ?: return@write
         val bytes = Files.list(directory).use { files ->
             files.filter { file ->
@@ -661,8 +657,7 @@ class LedgerWebApp private constructor(
                 }
             }.mapToLong { Files.size(it) }.sum()
         }
-        if (current.ledger.head().size >= maxEntries || bytes >= maxBytes ||
-            current.book.fixtures().size >= maxFixtures) {
+        if (bytes >= maxBytes) {
             services = null
             offlineReason = "Demo capacity reached. Use Administrator reset or wait for the daily 03:00 UAE reset."
             current.close()

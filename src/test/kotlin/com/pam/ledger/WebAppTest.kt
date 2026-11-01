@@ -242,14 +242,12 @@ class WebAppTest {
     }
 
     @Test
-    fun `demo capacity high water marks drain services until reset`() {
-        for (limit in listOf("entries", "bytes", "fixtures")) withApp { app ->
+    fun `demo data limit drains services until reset`() {
+        withApp { app ->
             call(app, "POST", "simulator", mapOf("action" to "start", "customers" to 1, "opsPerMinute" to 1))
-            app.checkDemoCapacity(
-                maxEntries = if (limit == "entries") 12 else Long.MAX_VALUE,
-                maxBytes = if (limit == "bytes") 1 else Long.MAX_VALUE,
-                maxFixtures = if (limit == "fixtures") 6 else Int.MAX_VALUE,
-            )
+            app.checkDemoCapacity(maxBytes = Long.MAX_VALUE)
+            assertTrue(call(app, "GET", "overview").second.contains("\"available\":true"))
+            app.checkDemoCapacity(maxBytes = 1)
             val overview = call(app, "GET", "overview").second
             assertTrue(overview.contains("\"available\":false") && overview.contains("Demo capacity reached"), overview)
             assertEquals(503, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "capacity")).first)
