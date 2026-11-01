@@ -49,6 +49,7 @@ function pollingContext() {
       const el = {
         value: "", className: "", controls: [], addEventListener() {},
         contains(active) { return this.controls.includes(active); },
+        querySelector() { return element("submit"); },
         querySelectorAll(selector) { return this.controls.filter(b => b.matches(selector)); },
         get innerHTML() { return html; },
         set innerHTML(value) {
@@ -280,20 +281,46 @@ test("late cash-out success and failure do not overwrite a different customer's 
   }
 });
 
-test("a definitive 422 bet rejection unlocks the stake and starts a corrected request", async () => {
+for (const [status, error] of [
+  [400, "bad_request"], [403, "invalid_host"], [403, "cross_origin"], [404, "not_found"],
+  [409, "insufficient_funds"], [409, "idempotency_conflict"], [409, "version_conflict"],
+  [409, "storage_reset"], [413, "payload_too_large"], [422, "rejected"],
+]) test(`a definitive ${status}/${error} bet rejection unlocks the slip and starts a corrected request`, async () => {
   const bodies = [];
   const s = slipContext(async (path, options) => {
     bodies.push(options.body.toString());
-    if (bodies.length === 1) return { ok: false, status: 422, json: async () => ({ error: "rejected", message: "overflow" }) };
+    if (bodies.length === 1) return { ok: false, status, json: async () => ({ error, message: "refused" }) };
     return { ok: true, json: async () => ({ seq: 2 }) };
   });
   s.pick("HOME");
   await s.submit();
   assert.equal(s.element("slipStake").disabled, false);
+  assert.equal(s.element("slipCancel").disabled, false);
+  assert.equal(s.element("priceAWAY").disabled, false);
   s.element("slipStake").value = "1.00";
   await s.submit();
   assert.match(bodies[1], /stake=100(?:&|$)/);
   assert.notEqual(new URLSearchParams(bodies[0]).get("betId"), new URLSearchParams(bodies[1]).get("betId"));
+  s.pick("AWAY");
+  assert.equal(vm.runInContext("selection.sel", s.c), "AWAY");
+  s.element("slipCancel").handlers.click();
+  assert.equal(s.element("slip").hidden, true);
+  assert.equal(vm.runInContext("selection", s.c), null);
+});
+
+for (const [status, error] of [
+  [404, "not_found"], [413, "payload_too_large"], [422, "rejected"],
+]) test(`a definitively rejected ${status} slip can be replaced and cancelled`, async () => {
+  const s = slipContext(async () => ({ ok: false, status, json: async () => ({ error }) }));
+  s.pick("HOME");
+  await s.submit();
+  assert.equal(s.element("slipCancel").disabled, false);
+  assert.equal(s.element("priceAWAY").disabled, false);
+  s.pick("AWAY");
+  assert.equal(vm.runInContext("selection.sel", s.c), "AWAY");
+  s.element("slipCancel").handlers.click();
+  assert.equal(vm.runInContext("selection", s.c), null);
+  assert.equal(s.element("slip").hidden, true);
 });
 
 test("resizing the simulator wall preserves retained customers' activity and filters", () => {
@@ -426,15 +453,18 @@ function slipContext(fetch) {
     if (!elements.has(id)) elements.set(id, {
       handlers: {}, value: "10.00", className: "", innerHTML: "", hidden: true, disabled: false,
       addEventListener(name, handler) { this.handlers[name] = handler; },
+      contains() { return false; },
       querySelector() { return element("submit"); },
+      querySelectorAll() { return ["HOME", "AWAY"].map(s => element("price" + s)); },
     });
     return elements.get(id);
   };
   const c = context(fetch);
   c.URLSearchParams = URLSearchParams;
-  c.document = { getElementById: element, querySelectorAll: () => [] };
+  c.document = { activeElement: null, getElementById: element, querySelectorAll: () => [] };
   const customer = source.slice(source.indexOf('let player = "alice"')).split("// Five devices at once:")[0];
   vm.runInContext(customer, c);
+  c.renderCustFixtures = c.loadCustFixtures;
   vm.runInContext(`
     loadPlayers = loadCustFixtures = refreshPlayer = async () => {};
     fixturesCache = [{ id: "F1", home: "Home", away: "Away", odds: { HOME: 200, AWAY: 250 } }];
@@ -470,19 +500,96 @@ test("double submission is blocked and a lost response retries the identical sli
   assert.equal(s.element("slip").hidden, true);
 });
 
-test("completion of an old slip preserves a newly selected slip", async () => {
+test("pending placement blocks price replacement and cancellation until success", async () => {
   let complete;
   const s = slipContext(() => new Promise(yes => { complete = yes; }));
   s.pick("HOME");
+  const original = vm.runInContext("selection", s.c);
   const pending = s.submit();
   s.pick("AWAY");
+  assert.equal(vm.runInContext("selection", s.c), original);
+  s.element("slipCancel").handlers.click();
+  assert.equal(vm.runInContext("selection", s.c), original);
+  assert.equal(s.element("slip").hidden, false);
   assert.equal(s.element("submit").disabled, true);
+  assert.equal(s.element("slipCancel").disabled, true);
+  assert.equal(s.element("priceAWAY").disabled, true);
   complete({ ok: true, json: async () => ({ seq: 6 }) });
   await pending;
-  assert.equal(s.element("slip").hidden, false);
+  assert.equal(s.element("slip").hidden, true);
   assert.equal(s.element("submit").disabled, false);
   assert.equal(s.element("slipStake").disabled, false);
+  assert.equal(s.element("slipCancel").disabled, false);
+  assert.equal(s.element("priceAWAY").disabled, false);
+  s.pick("AWAY");
   assert.equal(vm.runInContext("selection.sel", s.c), "AWAY");
+  s.element("slipCancel").handlers.click();
+  assert.equal(vm.runInContext("selection", s.c), null);
+});
+
+for (const failure of [
+  new Error("Response lost"),
+  ...[400, 403, 409, 422].map(status => ({ status, error: "upstream_error", message: "unknown" })),
+  ...[400, 403, 409].map(status => ({ status, error: "rejected", message: "mismatched code" })),
+  { status: 422, error: "bad_request", message: "mismatched code" },
+  { status: 404, error: "upstream_error", message: "unknown" },
+  { status: 413, error: "upstream_error", message: "unknown" },
+  { status: 413, error: "outcome_unknown", message: "unknown" },
+  { status: 504, error: "outcome_unknown", message: "unknown" },
+  { status: 500, error: "internal_error", message: "unknown" },
+]) test(`an uncertain placement cannot be replaced or cancelled (${failure.status ?? "network"}/${failure.error ?? "network"})`, async () => {
+  const calls = [];
+  const s = slipContext(async (path, options) => {
+    calls.push({ path, body: options.body.toString() });
+    if (calls.length === 1) throw new Error("Response lost");
+    if (calls.length === 2) {
+      if (failure.status) return { ok: false, status: failure.status, json: async () => ({ error: failure.error, message: failure.message }) };
+      throw failure;
+    }
+    return { ok: true, json: async () => ({ seq: 7 }) };
+  });
+  s.pick("HOME");
+  await s.submit();
+  const original = vm.runInContext("selection", s.c);
+  s.pick("AWAY");
+  assert.equal(vm.runInContext("selection", s.c), original);
+  s.element("slipCancel").handlers.click();
+  assert.equal(vm.runInContext("selection", s.c), original);
+  assert.equal(s.element("slip").hidden, false);
+  assert.equal(s.element("slipCancel").disabled, true);
+  assert.equal(s.element("priceAWAY").disabled, true);
+  assert.equal(s.element("submit").disabled, false);
+  vm.runInContext('player = "bob"', s.c);
+  s.element("slipStake").value = "99.00";
+  await s.submit();
+  assert.deepEqual(calls[1], calls[0]);
+  assert.equal(vm.runInContext("selection", s.c), original);
+  assert.equal(s.element("slipCancel").disabled, true);
+  assert.equal(s.element("priceAWAY").disabled, true);
+  s.pick("AWAY");
+  s.element("slipCancel").handlers.click();
+  assert.equal(vm.runInContext("selection", s.c), original);
+  await s.submit();
+  assert.deepEqual(calls[2], calls[0]);
+  assert.equal(vm.runInContext("selection", s.c), null);
+  assert.equal(s.element("slipCancel").disabled, false);
+  assert.equal(s.element("priceAWAY").disabled, false);
+});
+
+test("fixture refresh keeps price controls locked for an unresolved placement", async () => {
+  const s = slipContext(async path => {
+    if (path === "/api/fixtures") return { ok: true, json: async () => [
+      { id: "F1", home: "Home", away: "Away", odds: { HOME: 200, DRAW: 300, AWAY: 250 } },
+    ] };
+    throw new Error("Response lost");
+  });
+  s.pick("HOME");
+  await s.submit();
+  s.element("priceAWAY").disabled = false;
+  await s.c.renderCustFixtures();
+  assert.equal(s.element("priceAWAY").disabled, true);
+  assert.equal(s.element("slipCancel").disabled, true);
+  assert.equal(s.element("submit").disabled, false);
 });
 
 test("checkpoint cache binds signature, signed bytes, key and displayed commitments", () => {
