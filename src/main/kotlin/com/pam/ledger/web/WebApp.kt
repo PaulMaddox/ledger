@@ -48,6 +48,7 @@ import java.util.Base64
 import java.util.Properties
 import java.util.concurrent.Executors
 import java.util.concurrent.Semaphore
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -229,7 +230,7 @@ class LedgerWebApp private constructor(
     private lateinit var server: HttpServer
     private lateinit var maintenance: DemoMaintenance
     private val requests = Semaphore(32)
-    private val experiments = Semaphore(1)
+    private val experiments = ReentrantLock()
     val port: Int get() = server.address.port
 
     companion object {
@@ -399,7 +400,7 @@ class LedgerWebApp private constructor(
             val request = Request(ex.requestMethod, segments, params)
             if (request.method == "POST" && segments in listOf(
                     listOf("regulator", "audit"), listOf("regulator", "tamper"), listOf("chaos"))) {
-                if (!experiments.tryAcquire()) throw HttpError(503, "overloaded", "another demo audit or experiment is running")
+                experiments.lock()
                 experiment = true
             }
             val expectedServices = services
@@ -448,7 +449,7 @@ class LedgerWebApp private constructor(
             runCatching { respond(ex, status, mapOf("error" to code, "message" to (e.message ?: code))) }
         } finally {
             ex.close()
-            if (experiment) experiments.release()
+            if (experiment) experiments.unlock()
             requests.release()
         }
     }
@@ -672,7 +673,10 @@ class LedgerWebApp private constructor(
         ChaosLab.validate(scenario)
         val current = services ?: throw HttpError(503, "ledger_unavailable",
             "Main store is stopped. Use Administrator reset before another experiment.")
-        return chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+        val result = chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+        // Publish the experiment's committed customers before acknowledging it to the console.
+        current.readModel.catchUp()
+        return result
     }
 
     private fun runChaos(scenario: String): Map<String, Any?> {

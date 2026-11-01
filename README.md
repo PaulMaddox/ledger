@@ -133,8 +133,13 @@ These safeguards belong only to the unauthenticated demo, not the production led
   settlement and signing-service outage/fail-stop. Clicking **Run experiment** authorizes
   that run; no typed phrase is required. Retry, double-spend and settlement races run live
   on the ledger alongside the simulator, demonstrating committed outcomes and rejected
-  transactions without interrupting simulator traffic. File and signer faults drain services
-  before running; the simulator resumes with fresh counters but its original expiry if the store recovers. Corruption
+  transactions without interrupting simulator traffic. A live experiment catches the
+  dashboard read model up before replying, so its committed customer is immediately
+  searchable; balances and integrity evidence still come from the ledger.
+  Live races remain serialized with a virtual-thread-safe lock, so concurrent
+  requests cannot pin all JDK 21 HTTP carriers while waiting for their workers.
+  File and signer faults drain services before running; the simulator resumes with
+  fresh counters but its original expiry if the store recovers. Corruption
   correctly fail-stops the ledger, so services remain stopped until reset rather than
   accepting writes against damaged history. Storage attacks mutate the main journal under
   its directory lock; the tamper lab edits deposits, rewrites the chain or rolls back signed
@@ -178,10 +183,17 @@ requires a secure context with WebCrypto (HTTPS or localhost).
 ### Deploying the web console to Azure AKS
 
 The [AKS deployment instructions](deploy/README.md) configure the existing `ledger`
-cluster in resource group `ledger`, Sweden Central, using GitHub Actions and Azure
-OIDC (no stored Azure password). After the one-time setup, pushes to `main` build and
-test a container, deploy it with a persistent Azure disk, and publish an Azure DNS
-address with automatic HTTPS. The workflow reports the public URL.
+cluster in resource group `ledger`, Sweden Central. One-time setup uses a
+**Bicep template deployed through the Azure portal** plus a namespace and GitHub
+environment; there are no manual Azure CLI setup commands or app registrations.
+Bicep provisions the registry, managed identity, GitHub OIDC trust and scoped
+permissions without changing the cluster or storing an Azure password.
+After setup, successful CI on `main` triggers a container build and deployment
+with a persistent Azure disk and automatic HTTPS. The deployment checks out and
+tags the exact CI-tested commit; manual deployments require successful CI for
+that commit too. Tests and the demo audit run in CI, not again in the deployment
+or Docker build. The container still includes the generated About guide and its
+screenshots. The workflow reports the public URL.
 
 This is still an **unauthenticated synthetic-money demo**, not a production wallet.
 It runs exactly one ledger instance; updates briefly interrupt service. Behind a TLS
@@ -192,6 +204,11 @@ deployment does not change the rendered UI.
 
 ## Running
 
+The regulatory stress test retains every screen's balance reads with lossless
+run-length compression and checks them against replayed ledger history. Repeated
+reads keep their counts and order without exhausting the test heap; failed tests
+also stop their background workers.
+
 | | Ubuntu | Windows |
 |---|---|---|
 | Run the demo | `./gradlew run` | `.\gradlew.bat run` |
@@ -200,6 +217,8 @@ deployment does not change the rendered UI.
 | Run one test class | `./gradlew test --tests "com.pam.ledger.MultiDeviceWalletTest"` | `.\gradlew.bat test --tests "com.pam.ledger.MultiDeviceWalletTest"` |
 
 Test reports are written to `build/reports/tests/test/index.html`.
+The test JVM uses two virtual-thread carriers so concurrent HTTP regressions also
+exercise the constrained scheduling found on small CI and AKS hosts.
 
 ### What the demo does
 
@@ -291,6 +310,10 @@ scripts/
   check-guide.mjs      headless check: debugger anchors, cloud data, test links
   capture-screenshots.py  regenerates docs/screenshots/ from the running web console
 docs/screenshots/      web console screenshots used here and in the guide
+deploy/
+  main.bicep          one-time Azure resources and GitHub OIDC permissions for existing AKS
+  azure.json          generated portal-deployable ARM template (never edit by hand)
+  aks.yaml            single-instance web console, persistent disk and public HTTPS proxy
 ```
 
 ## Before production
