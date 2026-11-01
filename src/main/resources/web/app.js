@@ -46,9 +46,9 @@ const uuid = () => {
 async function api(path, { method = "GET", params } = {}) {
   const body = params ? new URLSearchParams(params) : undefined;
   const res = await fetch("/api/" + path, { method, body });
+  if (res.ok) return res.json();
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
-  return data;
+  throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
 }
 const say = (el, ok, html) => { el.className = el.className.replace(/\b(ok|bad)\b/g, "").trim() + (ok === null ? "" : ok ? " ok" : " bad"); el.innerHTML = html; };
 const errText = e => esc(e.message || String(e));
@@ -437,8 +437,11 @@ let walletSubmitting = false;
 let fixturesCache = [];
 
 function updateSlipControls() {
+  const unresolved = !!selection?.params;
   $("slip").querySelector('button[type="submit"]').disabled = slipSubmitting;
-  $("slipStake").disabled = !!selection?.params;
+  $("slipStake").disabled = unresolved;
+  $("slipCancel").disabled = unresolved;
+  $("custFixtures").querySelectorAll("[data-fx]").forEach(b => { b.disabled = unresolved; });
 }
 
 async function loadPlayers() {
@@ -548,10 +551,11 @@ async function loadCustFixtures() {
     <div class="fx"><div class="teams">${esc(f.home)} v ${esc(f.away)} <span>${esc(f.id)}</span></div>
       <div class="prices">${["HOME", "DRAW", "AWAY"].map(s => `<button type="button" data-fx="${esc(f.id)}" data-sel="${s}" aria-pressed="${selection && selection.fixture === f.id && selection.sel === s}"><span>${s.toLowerCase()}</span><b>${odds(f.odds[s])}</b></button>`).join("")}</div>
     </div>`).join("") || `<p class="hint">No open fixtures. The operator can add one.</p>`, ["fx", "sel"]);
+  updateSlipControls();
 }
 $("custFixtures").addEventListener("click", e => {
   const b = e.target.closest("[data-fx]");
-  if (!b) return;
+  if (!b || selection?.params) return;
   const f = fixturesCache.find(x => x.id === b.dataset.fx);
   selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: `${f.home} v ${f.away}`, betId: uuid(), params: null };
   $("slipText").innerHTML = `<b>${esc(selection.sel)}</b> in ${esc(selection.label)} @ <b>${odds(selection.odds)}</b>`;
@@ -559,7 +563,10 @@ $("custFixtures").addEventListener("click", e => {
   updateSlipControls();
   loadCustFixtures();
 });
-$("slipCancel").addEventListener("click", () => { selection = null; $("slip").hidden = true; loadCustFixtures(); });
+$("slipCancel").addEventListener("click", () => {
+  if (selection?.params) return;
+  selection = null; $("slip").hidden = true; loadCustFixtures();
+});
 $("slip").addEventListener("submit", async e => {
   e.preventDefault();
   if (!selection || slipSubmitting) return;
@@ -582,7 +589,15 @@ $("slip").addEventListener("submit", async e => {
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     if (player === submittedSelection.player) say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
-    if ([400, 403, 409, 422].includes(err.status)) {
+    const definitiveErrors = {
+      400: ["bad_request"],
+      403: ["invalid_host", "cross_origin"],
+      404: ["not_found"],
+      409: ["insufficient_funds", "idempotency_conflict", "version_conflict", "storage_reset"],
+      413: ["payload_too_large"],
+      422: ["rejected"],
+    };
+    if (Number.isInteger(err.status) && definitiveErrors[err.status]?.includes(err.error)) {
       submittedSelection.params = null;
       submittedSelection.betId = uuid();
     }
