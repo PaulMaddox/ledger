@@ -46,9 +46,26 @@ docs/screenshots/        web console screenshots, used by README.md and the guid
 ./gradlew test                       # full test suite (JUnit 5); gradlew.bat on Windows
 ./gradlew run                        # demo: concurrent betting, audit, proofs
 ./gradlew web                        # web console at http://localhost:8080
+./gradlew installDist                # package the standalone CLI demo
 python3 scripts/build-readme.py      # rebuild docs/index.html after ANY source or guide change
 node scripts/check-guide.mjs         # must print four PASS lines
+node scripts/check-web.mjs           # dependency-free console regressions
 ```
+
+The setup scripts install JDK 21 if needed and download the build tools; the first
+build requires internet access. On Windows, the README's `-ExecutionPolicy Bypass`
+option applies only to the setup process, not to system settings. With JDK 21
+already installed, setup is optional.
+
+The CLI demo places and settles bets concurrently, checks proofs, and audits the
+files it wrote. Rejected overspending attempts are expected; an audit failure
+causes a non-zero exit. Test reports are in `build/reports/tests/test/index.html`.
+After `installDist`, run `build/install/pam-ledger/bin/pam-ledger`; on Windows,
+use `build\install\pam-ledger\bin\pam-ledger.bat`.
+
+Guide tools require Python 3.10+ and Node.js 18+. The setup scripts can install
+them with `--with-guide-tools` on Ubuntu or `-WithGuideTools` on Windows. Use
+`python` instead of `python3` on Windows.
 
 Always use the wrapper (`./gradlew`), never a locally installed `gradle`, so builds use
 the same Gradle version as CI. Do not change `gradle/wrapper/` except to upgrade Gradle
@@ -114,7 +131,10 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 Documentation is part of every change, not a follow-up. In the same pull request as any
 change it describes:
 
-- **README.md** must describe what the code now does: commands, features, layout.
+- **README.md** is the product front page: explain its value, show the console,
+  and link to the live demo, guide and a concise local quick start. Keep CI policy,
+  probe configuration, build internals, report paths and contributor tooling out
+  of it; those belong here or in `deploy/README.md`, not in the product showcase.
 - **The guide** (`docs/readme.src.html`, then rebuild `docs/index.html`) must match the code.
 - **Screenshots** must be regenerated when the visible UI changes (layout, styles,
   wording, or displayed content). Backend or API changes alone do not require new

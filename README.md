@@ -1,31 +1,77 @@
+<div align="center">
+
 # PAM Ledger
 
-An append-only, double-entry ledger for sportsbook player accounts. Built in
-Kotlin on JDK 21, with exact money movements and cryptographic evidence you can
-verify independently.
+### Money moves. Proof follows.
 
-**[Try the live demo: Ledger Console →](https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/)**
+An append-only, double-entry ledger for sportsbook player accounts.<br>
+Exact balances. Safe concurrency. Evidence you can verify yourself.
 
-**[Explore the interactive guide →](https://paulmaddox.github.io/ledger/)**
-Follow the architecture, try the proof playgrounds, and step through real code.
+**[Try the live console](https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/)** &nbsp;&middot;&nbsp; [Explore the interactive guide](https://paulmaddox.github.io/ledger/)
 
-## What it guarantees
+</div>
 
-| Property | What it means |
-|---|---|
-| Exact accounting | Money is conserved; player balances cannot go negative. |
-| Safe concurrency | Competing bets and withdrawals cannot spend the same funds twice. |
-| Exactly-once operations | Retrying an operation cannot move money again. |
-| Durable receipts | An accepted transaction survives a restart. |
-| Verifiable history | Independent audits and cryptographic proofs reveal tampering. |
+[![The live operator console: balances, exposure, fixtures and transactions in one view](docs/screenshots/operator.png)](https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/)
 
-## Quick start
+## Every balance has a history
 
-Install [Git](https://git-scm.com), then choose your platform. The setup script
-installs JDK 21 if needed and downloads the build tools. The first build needs
-internet access and may take a few minutes.
+A wallet is more than its latest number. PAM Ledger records the movements behind
+it, protects the money under competing requests, and lets you inspect the evidence.
 
-**Ubuntu 22.04 or newer**
+- **Account for every cent.** Money is conserved, and player balances cannot go negative.
+- **Compete without double spending.** Simultaneous bets and withdrawals cannot spend the same funds twice.
+- **Retry without paying twice.** Repeating an operation cannot move money again.
+- **Keep the receipt.** An accepted transaction survives a restart.
+- **Check the history.** Independent audits and cryptographic proofs reveal tampering.
+
+## Watch it work. Then challenge it.
+
+Run hundreds of automated customers in the **Simulator**. Place a bet as a
+**Customer**, race five devices for the same balance, then switch to **Operator**
+to settle the fixture and follow the money.
+
+<details>
+<summary><strong>Inside the simulator: hundreds of wallets, one live ledger</strong></summary>
+
+![Automated customers streaming bets, deposits, withdrawals and cash-outs](docs/screenshots/simulator.png)
+
+</details>
+
+<details>
+<summary><strong>Chaos Monkey: double spends, outages and deliberately damaged history</strong></summary>
+
+Test conflicting settlements and failure recovery. Inspect the damage and see
+what the ledger refuses to accept.
+
+![Chaos Monkey experiments and their accounting and integrity results](docs/screenshots/chaos.png)
+
+</details>
+
+## Don't take the dashboard's word for it
+
+Open a receipt and verify it in your own browser. The browser checks the
+transaction, its proof and its signature itself. The **Regulator** view goes
+further, independently auditing the ledger files and checking signed checkpoints.
+
+![A cash-out receipt with balanced postings and a successful independent browser verification](docs/screenshots/customer-verify.png)
+
+**Go inside the ledger:** the [interactive guide](https://paulmaddox.github.io/ledger/)
+connects the architecture to real code, with proof playgrounds and step-through
+explanations.
+
+> [!IMPORTANT]
+> **Public demo. Synthetic money. No authentication.**
+> Anyone can use every view, damage history with Chaos Monkey, or permanently
+> clear it with Administrator reset. History resets daily and simulator sessions
+> are time-limited. Never use real accounts, private customer data or production keys.
+
+## Run it locally
+
+With [Git](https://git-scm.com) installed, choose your platform. After starting
+the console, open **<http://localhost:8080>**.
+
+<details>
+<summary><strong>Ubuntu 22.04 or newer</strong></summary>
 
 ```bash
 git clone https://github.com/PaulMaddox/ledger.git && cd ledger
@@ -33,7 +79,10 @@ git clone https://github.com/PaulMaddox/ledger.git && cd ledger
 ./gradlew web
 ```
 
-**Windows 10 or 11 · PowerShell**
+</details>
+
+<details>
+<summary><strong>Windows 10 or 11 · PowerShell</strong></summary>
 
 ```powershell
 git clone https://github.com/PaulMaddox/ledger.git; cd ledger
@@ -41,79 +90,10 @@ powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
 .\gradlew.bat web
 ```
 
-Open **<http://localhost:8080>**. The Windows execution-policy option applies
-only to that script run, not to your system settings.
+</details>
 
-Already have JDK 21? Skip setup and use the Gradle wrapper directly; you do not
-need to install Gradle separately.
+---
 
-## See it in action
-
-The web console gives customers, operators and regulators different views of the
-same live ledger. Start the simulator, place a bet, settle a fixture, then verify
-the resulting transaction in your browser.
-
-![Simulator: automated customers streaming their latest actions](docs/screenshots/simulator.png)
-
-| View | Try it |
-|---|---|
-| **Simulator** | Run hundreds of customers making bets, deposits, withdrawals and cash-outs. |
-| **Customer** | Manage a wallet, race five devices for the same balance, and verify a receipt. |
-| **Operator** | Follow revenue and exposure, settle fixtures, and watch transactions arrive. |
-| **Regulator** | Audit the files independently and check signed checkpoints and proofs. |
-| **Administrator** | Monitor performance and reset demo storage. |
-| **Chaos Monkey** | Test double spending, conflicting settlements, outages and damaged history. |
-
-| Operator | Customer |
-|---|---|
-| ![Operator dashboard](docs/screenshots/operator.png) | ![Customer wallet](docs/screenshots/customer.png) |
-| **Regulator** | **Verified in the browser** |
-| ![Regulator audit tools](docs/screenshots/regulator.png) | ![A transaction verified in the browser](docs/screenshots/customer-verify.png) |
-| **Administrator** | **Chaos Monkey** |
-| ![Administrator performance dashboard](docs/screenshots/administrator.png) | ![Chaos Monkey failure experiments](docs/screenshots/chaos.png) |
-
-**Demo only: no authentication, synthetic money.** Every view is available to
-anyone who can reach the console. Chaos Monkey can damage its history, and
-Administrator reset permanently clears it. Never use real accounts, private
-customer data or production keys.
-
-Demo history resets daily at **03:00 UAE time**. Simulator runs stop after
-**15 minutes**, including pauses; services stop at a **12 GB** storage high-water
-mark until reset. These limits apply to the demo, not the ledger engine.
-
-For AKS hosting, follow the **[deployment guide](deploy/README.md)**. HTTP health
-checks detect stalled handlers and restart the container with its existing storage.
-
-## Run and contribute
-
-| Task | Ubuntu | Windows |
-|---|---|---|
-| CLI demo and independent audit | `./gradlew run` | `.\gradlew.bat run` |
-| Web console | `./gradlew web` | `.\gradlew.bat web` |
-| All tests | `./gradlew test` | `.\gradlew.bat test` |
-
-The CLI demo places and settles bets concurrently, checks proofs, and audits the
-files it wrote. Rejected overspending attempts are expected; an audit failure
-causes a non-zero exit. Test reports are in `build/reports/tests/test/index.html`.
-
-CI runs the full Kotlin suite once per test job, including race and stress tests.
-Deployment packages the CI-tested commit without running the suite again.
-
-To build a standalone CLI demo, run `./gradlew installDist`, then
-`build/install/pam-ledger/bin/pam-ledger`. On Windows, use
-`.\gradlew.bat installDist` and `build\install\pam-ledger\bin\pam-ledger.bat`.
-
-Read **[AGENTS.md](AGENTS.md)** before changing the project. For implementation
-details and ledger test source, use the **[interactive guide](https://paulmaddox.github.io/ledger/)**.
-
-The guide source is `docs/readme.src.html`; never edit the generated HTML by hand.
-With Python 3.10+ and Node.js 18+ installed, rebuild and check it from the repository root:
-
-```bash
-python3 scripts/build-readme.py
-node scripts/check-guide.mjs
-node scripts/check-web.mjs
-```
-
-On Windows, use `python` in place of `python3`. The setup scripts can also install
-guide tools with `--with-guide-tools` on Ubuntu or `-WithGuideTools` on Windows.
+[Architecture, proofs and source](https://paulmaddox.github.io/ledger/) &nbsp;&middot;&nbsp;
+[Contributing](AGENTS.md) &nbsp;&middot;&nbsp;
+[Host your own demo](deploy/README.md)
