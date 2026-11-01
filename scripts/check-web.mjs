@@ -281,11 +281,14 @@ test("late cash-out success and failure do not overwrite a different customer's 
   }
 });
 
-for (const status of [400, 403, 409, 422]) test(`a definitive ${status} bet rejection unlocks the slip and starts a corrected request`, async () => {
+for (const [status, error] of [
+  [400, "rejected"], [403, "rejected"], [404, "not_found"],
+  [409, "rejected"], [413, "payload_too_large"], [422, "rejected"],
+]) test(`a definitive ${status} bet rejection unlocks the slip and starts a corrected request`, async () => {
   const bodies = [];
   const s = slipContext(async (path, options) => {
     bodies.push(options.body.toString());
-    if (bodies.length === 1) return { ok: false, status, json: async () => ({ error: "rejected", message: "refused" }) };
+    if (bodies.length === 1) return { ok: false, status, json: async () => ({ error, message: "refused" }) };
     return { ok: true, json: async () => ({ seq: 2 }) };
   });
   s.pick("HOME");
@@ -304,10 +307,14 @@ for (const status of [400, 403, 409, 422]) test(`a definitive ${status} bet reje
   assert.equal(vm.runInContext("selection", s.c), null);
 });
 
-test("a definitively rejected slip can be replaced and cancelled", async () => {
-  const s = slipContext(async () => ({ ok: false, status: 422, json: async () => ({ error: "rejected" }) }));
+for (const [status, error] of [
+  [404, "not_found"], [413, "payload_too_large"], [422, "rejected"],
+]) test(`a definitively rejected ${status} slip can be replaced and cancelled`, async () => {
+  const s = slipContext(async () => ({ ok: false, status, json: async () => ({ error }) }));
   s.pick("HOME");
   await s.submit();
+  assert.equal(s.element("slipCancel").disabled, false);
+  assert.equal(s.element("priceAWAY").disabled, false);
   s.pick("AWAY");
   assert.equal(vm.runInContext("selection.sel", s.c), "AWAY");
   s.element("slipCancel").handlers.click();
@@ -521,6 +528,9 @@ test("pending placement blocks price replacement and cancellation until success"
 
 for (const failure of [
   new Error("Response lost"),
+  { status: 404, error: "upstream_error", message: "unknown" },
+  { status: 413, error: "upstream_error", message: "unknown" },
+  { status: 413, error: "outcome_unknown", message: "unknown" },
   { status: 504, error: "outcome_unknown", message: "unknown" },
   { status: 500, error: "internal_error", message: "unknown" },
 ]) test(`an uncertain placement cannot be replaced or cancelled (${failure.message}, ${failure.status ?? "network"})`, async () => {

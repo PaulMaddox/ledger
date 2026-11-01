@@ -404,7 +404,9 @@ $("slip").addEventListener("submit", async e => {
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     if (player === submittedSelection.player) say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
-    if ([400, 403, 409, 422].includes(err.status)) {
+    if ([400, 403, 409, 422].includes(err.status) ||
+        (err.status === 404 && err.error === "not_found") ||
+        (err.status === 413 && err.error === "payload_too_large")) {
       submittedSelection.params = null;
       submittedSelection.betId = uuid();
     }
