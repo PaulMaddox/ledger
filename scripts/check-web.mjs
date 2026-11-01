@@ -1,7 +1,7 @@
 // Dependency-free regression checks for the real console JavaScript.
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { webcrypto } from "node:crypto";
+import { webcrypto, createHash, generateKeyPairSync, sign } from "node:crypto";
 import vm from "node:vm";
 import test from "node:test";
 
@@ -20,7 +20,7 @@ function entryBytes(amount = 100n) {
   ]);
 }
 function context(fetch) {
-  const c = vm.createContext({ crypto: webcrypto, atob, TextDecoder, Uint8Array, DataView, fetch });
+  const c = vm.createContext({ crypto: webcrypto, atob, TextDecoder, TextEncoder, Uint8Array, DataView, fetch });
   vm.runInContext(cryptoSource, c);
   return c;
 }
@@ -92,6 +92,150 @@ function pollingContext() {
   vm.runInContext(source.slice(source.indexOf("async function refreshFixtures()"), source.indexOf('$("fixtureTable").addEventListener')), c);
   return { c, document, element, responses, customer, fixtures };
 }
+
+function reportFixture() {
+  const hash = (...parts) => createHash("sha256").update(Buffer.concat(parts)).digest();
+  let chain = hash(Buffer.from("PAM-LEDGER/genesis/v1"), Buffer.from("sportsbook-web"));
+  const entries = [], leaves = [];
+  const movements = [
+    ["DEPOSIT", "deposit:one", [["house:psp-clearing:EUR", -1000n], ["player:alice:cash:EUR", 1000n]], { playerId: "alice" }],
+    ["BET_PLACED", "bet:one:place", [["player:alice:cash:EUR", -200n], ["player:alice:open-bets:EUR", 200n]], { betId: "one", playerId: "alice", selection: "F1|HOME|200" }],
+    ["BET_WON", "bet:one:settle", [["player:alice:open-bets:EUR", -200n], ["player:alice:cash:EUR", 300n], ["house:revenue:EUR", -100n]], { betId: "one", placementSeq: "1", playerId: "alice" }],
+    ["WITHDRAWAL", "withdraw:one", [["player:alice:cash:EUR", -10n], ["house:psp-clearing:EUR", 10n]], { playerId: "alice" }],
+  ];
+  let dataset;
+  for (const [seq, [kind, key, postings, meta]] of movements.entries()) {
+    const metadata = Object.entries(meta).sort(([a], [b]) => a.localeCompare(b));
+    const bytes = Buffer.concat([Buffer.from("PAML"), Buffer.from([1]), i64(seq), i64(1000000 + seq), chain, Buffer.alloc(16),
+      str(key), str(kind), i32(postings.length), ...postings.flatMap(([account, amount]) => [str(account), str("EUR"), i64(amount)]),
+      i32(metadata.length), ...metadata.flatMap(([k, v]) => [str(k), str(v)])]);
+    const leaf = hash(Buffer.from([0]), bytes);
+    chain = hash(Buffer.from("PAM-LEDGER/chain/v1"), chain, leaf);
+    if (seq === 0) dataset = chain.toString("hex");
+    leaves.push(leaf);
+    entries.push({ seq, entryBytes: bytes.toString("base64") });
+  }
+  const root = hash(Buffer.from([1]), hash(Buffer.from([1]), leaves[0], leaves[1]), hash(Buffer.from([1]), leaves[2], leaves[3]));
+  const bytes = Buffer.concat([str("PAM-LEDGER/tree-head/v1"), str("sportsbook-web"), i64(entries.length), root, chain, i64(1000005)]);
+  const key = generateKeyPairSync("ed25519");
+  const anchor = { treeSize: entries.length, rootHash: root.toString("hex"), chainHead: chain.toString("hex"),
+    signingBytes: bytes.toString("base64"), signature: sign(null, bytes, key.privateKey).toString("base64") };
+  const report = {
+    manifest: { version: "supervisory-report-v1", ledgerId: "sportsbook-web", dataset, from: "1970-01-01T00:00:01Z", to: "1970-01-01T00:00:01.000004Z",
+      timezone: "UTC", currency: "EUR", population: "all", publicKey: key.publicKey.export({ type: "spki", format: "der" }).toString("base64"), anchor },
+    financial: { deposits: "1000", withdrawals: "10", stakes: "200", payouts: "300", revenue: "-100", winPayouts: "300",
+      voidRefunds: "0", cashOuts: "0", settledStakes: "200", conservation: "0", openingLiability: "0", cashLiability: "1090",
+      escrowLiability: "0", closingLiability: "1090", otherMovement: "0", openStakes: "0", openBets: 0,
+      unclassifiedEntries: 0, otherEntries: 0, periodEntries: 4, outcomes: { WON: 1 }, escrowReconciles: true },
+    customers: [{ id: "alice", entries: 4, bets: 1, openingCash: "0", openingEscrow: "0", cash: "1090", escrow: "0",
+      deposits: "1000", withdrawals: "10", stakes: "200", payouts: "300", netSettledLoss: "-100" }],
+    daily: [{ day: "1970-01-01", deposits: "1000", withdrawals: "10", stakes: "200", payouts: "300", revenue: "-100" }],
+    fixtures: [{ id: "F1", placedBets: 1, bettors: 1, stakes: "200", settlements: 1, payouts: "300", revenue: "-100",
+      openBets: 0, openStakes: "0", liabilityBySelection: {}, worstWinningPayout: "0", outcomes: { WON: 1 }, entrySeqs: [1, 2] }],
+  };
+  return { report, entries };
+}
+
+test("report CSV exports exact amounts and neutralizes spreadsheet formulas", () => {
+  const c = context();
+  const csv = c.reportCsv([{ player: '=HYPERLINK("bad")', money: "9007199254740993", loss: "-100",
+    note: "line1\nline2", object: { source: "Synthetic example" } }, { player: " @SUM(A1:A2)", money: "2", loss: "-2" }]);
+  assert.match(csv, /"'=HYPERLINK\(""bad""\)"/);
+  assert.match(csv, /"' @SUM/);
+  assert.match(csv, /"9007199254740993"/);
+  assert.match(csv, /"-100"/);
+  assert.match(csv, /Synthetic example/);
+});
+
+test("report sorting retains exact ordering beyond Number range and leaves unknowns last", () => {
+  const c = context();
+  const rows = [{ amount: "9007199254740993" }, { amount: null }, { amount: "9007199254740992" }, { amount: "-10" }];
+  assert.deepEqual(Array.from(c.sortReportRows(rows, "amount", true, false), x => x.amount),
+    ["-10", "9007199254740992", "9007199254740993", null]);
+  assert.deepEqual(Array.from(c.sortReportRows(rows, "amount", true, true), x => x.amount),
+    ["9007199254740993", "9007199254740992", "-10", null]);
+  assert.equal(rows[0].amount, "9007199254740993");
+});
+
+test("evidence verification rebuilds signed canonical history and financial and customer totals", async () => {
+  const c = context(), f = reportFixture();
+  const result = await c.verifyReportEvidence(f.report, f.entries);
+  assert.equal(result.entries, 4);
+  assert.equal(result.financials, true);
+  assert.equal(result.customers, true);
+  for (const change of [
+    x => { x.report.financial.revenue = "-99"; },
+    x => { x.report.customers[0].cash = "1091"; },
+    x => { x.report.customers = []; },
+    x => { x.report.financial.outcomes.WON = 2; },
+    x => { x.report.fixtures[0].stakes = "201"; },
+    x => { x.report.fixtures[0].outcomes.WON = 2; },
+    x => { x.report.fixtures[0].entrySeqs = [0, 2]; },
+    x => { x.report.daily[0].revenue = "-99"; },
+    x => { x.entries.reverse(); },
+    x => { x.entries.pop(); },
+    x => { x.report.manifest.anchor.rootHash = "00".repeat(32); },
+    x => { x.report.manifest.anchor.signature = Buffer.alloc(64).toString("base64"); },
+  ]) {
+    const altered = structuredClone(f); change(altered);
+    await assert.rejects(c.verifyReportEvidence(altered.report, altered.entries));
+  }
+});
+
+test("evidence replay preserves microsecond and cross-period settlement cutoffs", async () => {
+  const c = context(), f = reportFixture();
+  f.report.manifest.from = "1970-01-01T00:00:01.000002Z";
+  Object.assign(f.report.financial, { openingLiability: "1000", deposits: "0", stakes: "0", periodEntries: 2 });
+  Object.assign(f.report.customers[0], { entries: 2, bets: 0, openingCash: "800", openingEscrow: "200", deposits: "0", stakes: "0" });
+  Object.assign(f.report.daily[0], { deposits: "0", stakes: "0" });
+  Object.assign(f.report.fixtures[0], { stakes: "0", placedBets: 0, bettors: 0, entrySeqs: [2] });
+  assert.equal((await c.verifyReportEvidence(f.report, f.entries)).financials, true);
+  f.report.manifest.to = "1970-01-01T00:00:01.000002Z";
+  await assert.rejects(c.verifyReportEvidence(f.report, f.entries), /Invalid reporting interval/);
+});
+
+test("report tables paginate locally while CSV retains all rows and snapshot filters", () => {
+  const s = pollingContext();
+  vm.runInContext(source.slice(source.indexOf("// ============================== supervisory reports"), source.indexOf("// Reporting events")), s.c);
+  const rows = Array.from({ length: 61 }, (_, n) => ({ id: `player-${String(n).padStart(3, "0")}`, entries: n, bets: n,
+    deposits: "100", withdrawals: "0", netSettledLoss: "0", cash: "100", escrow: "0", activityShareBps: null }));
+  s.c.mockReport = { manifest: { version: "v1", currency: "EUR", population: "all", from: "2026-01-01T00:00:00Z",
+    to: "2026-01-02T00:00:00Z", timezone: "UTC", dataset: "old", anchor: { treeSize: 61, rootHash: "old-root" } }, customers: rows };
+  vm.runInContext('regReport = mockReport; regSection = "customers"; renderRegTable()', s.c);
+  assert.equal(s.element("regTable").controls.length, 25);
+  assert.match(s.element("regPageLabel").textContent, /1-25 of 61/);
+  vm.runInContext('regPage = 2; renderRegTable()', s.c);
+  assert.equal(s.element("regTable").controls.length, 11);
+  s.element("regSearch").value = "player-060";
+  vm.runInContext("renderRegTable()", s.c);
+  assert.equal(s.element("regTable").controls.length, 1);
+  const csv = vm.runInContext("reportCsv(regExportRows())", s.c);
+  assert.match(csv, /player-000/);
+  assert.match(csv, /player-060/);
+  assert.match(csv, /old-root/);
+  assert.equal(csv.split("\r\n").length, 62);
+});
+
+test("report evidence pages replace previous DOM rows instead of retaining full history", async () => {
+  const s = pollingContext();
+  s.c.URLSearchParams = URLSearchParams;
+  vm.runInContext(source.slice(source.indexOf("// ============================== supervisory reports"), source.indexOf("// Reporting events")), s.c);
+  const anchor = { treeSize: 2000, rootHash: "fixed-root" };
+  s.c.mockReport = { manifest: { anchor, timezone: "UTC" } };
+  vm.runInContext('regReport = mockReport; regDetailFilter = {player: "alice"}', s.c);
+  const row = seq => ({ seq, kind: "DEPOSIT", time: "2026-01-01T00:00:00Z", postings: [] });
+  s.responses["/api/regulator/report/evidence?size=2000&root=fixed-root&offset=0&limit=100&player=alice"] =
+    { anchor, entries: Array.from({ length: 100 }, (_, n) => row(n)), nextOffset: 1000, complete: false };
+  s.responses["/api/regulator/report/evidence?size=2000&root=fixed-root&offset=1000&limit=100&player=alice"] =
+    { anchor, entries: [row(1999)], nextOffset: 2000, complete: true };
+  await s.c.loadRegDetail(true);
+  assert.equal(s.element("regDetailTable").controls.length, 100);
+  await s.c.loadRegDetail();
+  assert.equal(s.element("regDetailTable").controls.length, 1);
+  assert.match(s.element("regDetailTable").innerHTML, /data-report-proof="1999"/);
+  assert.doesNotMatch(s.element("regDetailTable").innerHTML, /data-report-proof="0"/);
+  assert.equal(s.element("regDetailMore").hidden, true);
+});
 
 for (const [name, renderer, container, keys] of [
   ["customer picker", "loadPlayers", "playerList", ["player"]],
@@ -489,6 +633,22 @@ test("verified panel renders canonical bytes, not altered JSON entry fields", as
   assert.match(target.innerHTML, /\+100 EUR minor units/);
   assert.match(target.innerHTML, /closest\('\.panel-head'\)\.parentElement\.hidden=true/);
   assert.doesNotMatch(target.innerHTML, /forged/i);
+  await c.verifyEntry(0, target, { anchor: { treeSize: 1, rootHash: "00".repeat(32) } });
+  assert.match(target.innerHTML, /Verification FAILED/);
+  let resolve;
+  const late = context(() => new Promise(r => { resolve = r; }));
+  const pending = late.verifyEntry(0, target, { isCurrent: () => false });
+  target.innerHTML = "A newer report detail";
+  resolve({ ok: true, json: async () => response });
+  await pending;
+  assert.equal(target.innerHTML, "A newer report detail");
+  let reject;
+  const failed = context(() => new Promise((_, r) => { reject = r; }));
+  const pendingFailure = failed.verifyEntry(0, target, { isCurrent: () => false });
+  target.innerHTML = "A newer report detail";
+  reject(new Error("old reset"));
+  await pendingFailure;
+  assert.equal(target.innerHTML, "A newer report detail");
 });
 
 function slipContext(fetch) {
