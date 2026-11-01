@@ -282,9 +282,10 @@ test("late cash-out success and failure do not overwrite a different customer's 
 });
 
 for (const [status, error] of [
-  [400, "rejected"], [403, "rejected"], [404, "not_found"],
-  [409, "rejected"], [413, "payload_too_large"], [422, "rejected"],
-]) test(`a definitive ${status} bet rejection unlocks the slip and starts a corrected request`, async () => {
+  [400, "bad_request"], [403, "invalid_host"], [403, "cross_origin"], [404, "not_found"],
+  [409, "insufficient_funds"], [409, "idempotency_conflict"], [409, "version_conflict"],
+  [409, "storage_reset"], [413, "payload_too_large"], [422, "rejected"],
+]) test(`a definitive ${status}/${error} bet rejection unlocks the slip and starts a corrected request`, async () => {
   const bodies = [];
   const s = slipContext(async (path, options) => {
     bodies.push(options.body.toString());
@@ -528,16 +529,23 @@ test("pending placement blocks price replacement and cancellation until success"
 
 for (const failure of [
   new Error("Response lost"),
+  ...[400, 403, 409, 422].map(status => ({ status, error: "upstream_error", message: "unknown" })),
+  ...[400, 403, 409].map(status => ({ status, error: "rejected", message: "mismatched code" })),
+  { status: 422, error: "bad_request", message: "mismatched code" },
   { status: 404, error: "upstream_error", message: "unknown" },
   { status: 413, error: "upstream_error", message: "unknown" },
   { status: 413, error: "outcome_unknown", message: "unknown" },
   { status: 504, error: "outcome_unknown", message: "unknown" },
   { status: 500, error: "internal_error", message: "unknown" },
-]) test(`an uncertain placement cannot be replaced or cancelled (${failure.message}, ${failure.status ?? "network"})`, async () => {
+]) test(`an uncertain placement cannot be replaced or cancelled (${failure.status ?? "network"}/${failure.error ?? "network"})`, async () => {
   const calls = [];
   const s = slipContext(async (path, options) => {
     calls.push({ path, body: options.body.toString() });
-    if (calls.length === 1) throw failure;
+    if (calls.length === 1) throw new Error("Response lost");
+    if (calls.length === 2) {
+      if (failure.status) return { ok: false, status: failure.status, json: async () => ({ error: failure.error, message: failure.message }) };
+      throw failure;
+    }
     return { ok: true, json: async () => ({ seq: 7 }) };
   });
   s.pick("HOME");
@@ -555,6 +563,14 @@ for (const failure of [
   s.element("slipStake").value = "99.00";
   await s.submit();
   assert.deepEqual(calls[1], calls[0]);
+  assert.equal(vm.runInContext("selection", s.c), original);
+  assert.equal(s.element("slipCancel").disabled, true);
+  assert.equal(s.element("priceAWAY").disabled, true);
+  s.pick("AWAY");
+  s.element("slipCancel").handlers.click();
+  assert.equal(vm.runInContext("selection", s.c), original);
+  await s.submit();
+  assert.deepEqual(calls[2], calls[0]);
   assert.equal(vm.runInContext("selection", s.c), null);
   assert.equal(s.element("slipCancel").disabled, false);
   assert.equal(s.element("priceAWAY").disabled, false);

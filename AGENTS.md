@@ -160,8 +160,9 @@ change it describes:
   Keep it, and keep the race test in `WebAppTest`.
 - Retain a slip's original player, stake, selection and bet ID while placement is
   pending or uncertain. Block price changes and Cancel, including after fixture
-  polling, until acceptance or a definitive rejection. `404/not_found` and
-  `413/payload_too_large` are definitive; an unrecognized error must retain the retry payload.
+  polling, until acceptance or a known definitive status/error pair from the API.
+  `404/not_found` and `413/payload_too_large` are definitive; never classify by
+  HTTP status alone. An unknown or mismatched error code must retain the retry payload.
 - API POST form bodies are capped at 16 KiB (16,384 bytes) of encoded data, before
   UTF-8 or form decoding. Oversized bodies return HTTP 413 (`payload_too_large`) before
   routing, without performing the operation. Reject oversized declared lengths

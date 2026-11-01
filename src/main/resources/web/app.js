@@ -404,9 +404,15 @@ $("slip").addEventListener("submit", async e => {
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     if (player === submittedSelection.player) say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
-    if ([400, 403, 409, 422].includes(err.status) ||
-        (err.status === 404 && err.error === "not_found") ||
-        (err.status === 413 && err.error === "payload_too_large")) {
+    const definitiveErrors = {
+      400: ["bad_request"],
+      403: ["invalid_host", "cross_origin"],
+      404: ["not_found"],
+      409: ["insufficient_funds", "idempotency_conflict", "version_conflict", "storage_reset"],
+      413: ["payload_too_large"],
+      422: ["rejected"],
+    };
+    if (Number.isInteger(err.status) && definitiveErrors[err.status]?.includes(err.error)) {
       submittedSelection.params = null;
       submittedSelection.betId = uuid();
     }
