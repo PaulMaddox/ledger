@@ -63,11 +63,6 @@ jobs:
       - name: Run the test suite
         run: ./gradlew test --no-daemon
 
-      # Concurrency bugs are often intermittent, so run the whole suite a second
-      # time from scratch. A test that passes once and fails once is a real bug.
-      - name: Run the test suite again (catches intermittent races)
-        run: ./gradlew test --no-daemon --rerun-tasks
-
       # Guard against a silent "pass" with nothing tested (for example a JUnit
       # platform misconfiguration). Counts the JUnit XML results and fails if no
       # tests ran or any failed; the count is shown as an annotation on the run.

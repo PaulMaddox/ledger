@@ -75,13 +75,21 @@ spec:
               memory: 2Gi
           startupProbe:
             exec:
-              command: ["/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/health/live"]
             periodSeconds: 5
+            timeoutSeconds: 5
             failureThreshold: 120
           readinessProbe:
             exec:
-              command: ["/bin/bash", "-ec", "exec 3<>/dev/tcp/127.0.0.1/8080"]
+              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/"]
             periodSeconds: 10
+            timeoutSeconds: 5
+          livenessProbe:
+            exec:
+              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/health/live"]
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 6
           volumeMounts:
             - name: data
               mountPath: /data
@@ -114,6 +122,11 @@ spec:
           readinessProbe:
             tcpSocket:
               port: https
+          livenessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 10
+            failureThreshold: 6
           volumeMounts:
             - name: proxy
               mountPath: /etc/caddy

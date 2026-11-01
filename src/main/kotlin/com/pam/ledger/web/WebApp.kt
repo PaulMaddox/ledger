@@ -43,9 +43,12 @@ import java.security.KeyPairGenerator
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.time.Instant
+import java.time.Clock
 import java.util.Base64
 import java.util.Properties
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -225,6 +228,9 @@ class LedgerWebApp private constructor(
     private val stats get() = active.stats
     private val audit get() = active.audit
     private lateinit var server: HttpServer
+    private lateinit var maintenance: DemoMaintenance
+    private val requests = Semaphore(32)
+    private val experiments = ReentrantLock()
     val port: Int get() = server.address.port
 
     companion object {
@@ -233,7 +239,14 @@ class LedgerWebApp private constructor(
         private const val MAX_FORM_BODY_BYTES = 16 * 1024
         private val signingKeyBootstrapLock = Any()
 
-        fun start(opts: WebOptions): LedgerWebApp {
+        fun start(opts: WebOptions, clock: Clock = Clock.systemUTC()): LedgerWebApp {
+            // JDK HTTP configuration is read once, before the first server is created.
+            // Bound slow uploads/downloads and idle connections as well as active handlers.
+            System.getProperties().apply {
+                putIfAbsent("sun.net.httpserver.maxConnections", "64")
+                putIfAbsent("sun.net.httpserver.maxReqTime", "10")
+                putIfAbsent("sun.net.httpserver.maxRspTime", "30")
+            }
             val allowedHosts = opts.allowedRequestHosts()
             val dir = opts.dataDir ?: Files.createTempDirectory("pam-ledger-web")
             Files.createDirectories(dir)
@@ -246,15 +259,29 @@ class LedgerWebApp private constructor(
                     System.err.println("Demo store failed recovery; console remains available for reset: ${e.message}")
                     null
                 }
-                val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
+                // HTTP stream monitors pin virtual-thread carriers on JDK 21; slow uploads
+                // must not starve the handler that rejects excess requests.
+                val executor = Executors.newFixedThreadPool(64).also(resources::add)
                 val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
                 resources.add(AutoCloseable { server.stop(0) })
                 val app = LedgerWebApp(dir, LEDGER_ID, services, allowedHosts,
                     opts.publicOrigin?.let(::publicOrigin), resources.filter { it !== services })
                 app.server = server
+                // Startup catch-up can replace the generation tracked above, then fail persistence.
+                resources.add(AutoCloseable {
+                    app.lifecycle.write {
+                        val current = app.services
+                        app.services = null
+                        current?.close()
+                    }
+                })
+                app.maintenance = DemoMaintenance(dir, clock,
+                    reset = { app.lifecycle.write { app.resetStorage() } },
+                    checkCapacity = { app.checkDemoCapacity() }).also(resources::add)
                 server.executor = executor
                 server.createContext("/") { ex -> app.handle(ex) }
 
+                app.maintenance.start()
                 server.start()
                 return app
             } catch (failure: Throwable) {
@@ -346,9 +373,18 @@ class LedgerWebApp private constructor(
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
 
     private fun handle(ex: HttpExchange) {
+        // A busy API is not a dead HTTP executor; liveness bypasses admission, not the executor.
+        val liveness = ex.requestMethod == "GET" && ex.requestURI.rawPath == "/health/live"
+        if (!liveness && !requests.tryAcquire()) {
+            try { respond(ex, 503, mapOf("error" to "overloaded", "message" to "too many demo requests")) }
+            finally { ex.close() }
+            return
+        }
+        var experiment = false
         try {
             val uri = ex.requestURI
             validateRequestOrigin(ex)
+            if (liveness) return respond(ex, 200, mapOf("status" to "alive"))
             if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
@@ -357,6 +393,11 @@ class LedgerWebApp private constructor(
                 URLDecoder.decode(it.replace("+", "%2B"), Charsets.UTF_8)
             }
             val request = Request(ex.requestMethod, segments, params)
+            if (request.method == "POST" && segments in listOf(
+                    listOf("regulator", "audit"), listOf("regulator", "tamper"), listOf("chaos"))) {
+                experiments.lock()
+                experiment = true
+            }
             val expectedServices = services
             fun checkGeneration() {
                 if (services !== expectedServices) {
@@ -403,6 +444,8 @@ class LedgerWebApp private constructor(
             runCatching { respond(ex, status, mapOf("error" to code, "message" to (e.message ?: code))) }
         } finally {
             ex.close()
+            if (experiment) experiments.unlock()
+            if (!liveness) requests.release()
         }
     }
 
@@ -578,6 +621,10 @@ class LedgerWebApp private constructor(
 
     private fun clearStorage(r: Request): Any {
         require(r.str("confirmation") == "CLEAR DEMO STORAGE") { "type CLEAR DEMO STORAGE to confirm permanent deletion" }
+        return resetStorage()
+    }
+
+    private fun resetStorage(): Any {
         val previous = services
         services = null
         offlineReason = "Reset in progress or failed. Use Administrator reset to start again."
@@ -607,6 +654,26 @@ class LedgerWebApp private constructor(
         return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
     }
 
+    internal fun maintainDemo() = maintenance.checkNow()
+
+    // The demo storage limit stops the demo, not the production writer, before the next daily purge.
+    internal fun checkDemoCapacity(maxBytes: Long = 12_000_000_000L) = lifecycle.write {
+        val current = services ?: return@write
+        val bytes = Files.list(directory).use { files ->
+            files.filter { file ->
+                val name = file.fileName.toString()
+                name == Book.FIXTURES_FILE || listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE).any {
+                    name == it || name.startsWith("$it.torn-")
+                }
+            }.mapToLong { Files.size(it) }.sum()
+        }
+        if (bytes >= maxBytes) {
+            services = null
+            offlineReason = "Demo capacity reached. Use Administrator reset or wait for the daily 03:00 UAE reset."
+            current.close()
+        }
+    }
+
     private fun runLiveChaos(scenario: String): Map<String, Any?> {
         ChaosLab.validate(scenario)
         val current = services ?: throw HttpError(503, "ledger_unavailable",
@@ -626,6 +693,7 @@ class LedgerWebApp private constructor(
         val simulatorCustomers = simulator.customers
         val simulatorOpsPerMinute = simulator.opsPerMinute
         val simulatorAutoFixtures = simulator.autoFixtures
+        val simulatorRunStartedNanos = simulator.runStartedNanos
         // Anchor the exact stopped prefix before any main-store file mutation.
         services = null
         offlineReason = "Main-store chaos in progress or interrupted. Use Administrator reset if needed."
@@ -637,9 +705,9 @@ class LedgerWebApp private constructor(
             val recovered = openServices(directory, signer)
             recovered.simulator.configure(simulatorCustomers, simulatorOpsPerMinute, simulatorAutoFixtures)
             when (simulatorState) {
-                Simulator.State.RUNNING -> recovered.simulator.start()
+                Simulator.State.RUNNING -> recovered.simulator.start(simulatorRunStartedNanos)
                 Simulator.State.PAUSED -> {
-                    recovered.simulator.start()
+                    recovered.simulator.start(simulatorRunStartedNanos)
                     recovered.simulator.pause()
                 }
                 Simulator.State.STOPPED -> Unit
@@ -852,7 +920,7 @@ class LedgerWebApp private constructor(
                 services = null
                 previous?.close()
             }
-        }) + resources)
+        }) + resources + maintenance)
     }
 }
 
