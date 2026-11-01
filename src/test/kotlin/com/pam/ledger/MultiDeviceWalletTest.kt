@@ -5,7 +5,6 @@ import com.pam.ledger.TestSupport.LEDGER_ID
 import com.pam.ledger.TestSupport.config
 import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
-import java.util.Collections
 import java.util.concurrent.ConcurrentHashMap
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CopyOnWriteArrayList
@@ -49,6 +48,36 @@ import kotlin.test.assertTrue
 class MultiDeviceWalletTest {
     private val signer = Ed25519TreeHeadSigner.generate()
     private val cur = "EUR"
+
+    /** One screen's complete observation sequence, compressed without dropping repeated reads. */
+    private class BalanceObservations {
+        data class Run(val balance: Long, var count: Long)
+        val runs = ArrayList<Run>()
+
+        fun record(balance: Long) {
+            val last = runs.lastOrNull()
+            if (last?.balance == balance) {
+                last.count = Math.incrementExact(last.count)
+            } else {
+                runs += Run(balance, 1)
+            }
+        }
+
+        val count: Long get() = runs.fold(0L) { total, run -> Math.addExact(total, run.count) }
+    }
+
+    @Test
+    fun `R3 - observation compression preserves every read and transition`() {
+        val observations = BalanceObservations()
+        val reads = listOf(10L, 10L, 0L, 0L, 10L, -1L, -1L)
+        reads.forEach(observations::record)
+        assertEquals(reads, observations.runs.flatMap { run -> List(run.count.toInt()) { run.balance } })
+        assertEquals(reads.size.toLong(), observations.count)
+        repeat(100_000) { observations.record(-1) }
+        assertEquals(4, observations.runs.size)
+        assertEquals(100_002L, observations.runs.last().count)
+        assertEquals(100_007L, observations.count)
+    }
 
     // ---------------------------------------------------------------------
     //  Ledger-derived evidence helpers
@@ -227,7 +256,7 @@ class MultiDeviceWalletTest {
         val placedQueue = ConcurrentLinkedQueue<String>()       // bets awaiting settlement
         val settledBets = ConcurrentHashMap.newKeySet<String>()
         val allReceipts = CopyOnWriteArrayList<Receipt>()
-        val observedCash = Collections.synchronizedList(ArrayList<Long>())
+        val observedCash = List(3) { BalanceObservations() }
         val checkpoints = CopyOnWriteArrayList<SignedTreeHead>()
         val rejectedForFunds = AtomicLong()
 
@@ -245,9 +274,10 @@ class MultiDeviceWalletTest {
             val background = ArrayList<java.util.concurrent.Future<*>>()
 
             // Balance screens: 3 devices polling the balance as fast as they can (R2, R3).
-            repeat(3) {
+            repeat(3) { screen ->
                 background += pool.submit {
-                    while (!stop.get()) observedCash += wallet.cashBalance(player, cur)
+                    val observations = observedCash[screen]
+                    while (!stop.get()) observations.record(wallet.cashBalance(player, cur))
                 }
             }
 
@@ -328,12 +358,26 @@ class MultiDeviceWalletTest {
                     }
                 }
             }
-            devices.forEach { it.get(3, TimeUnit.MINUTES) } // rethrows any device failure
-            stop.set(true)
-            pool.shutdown()
-            assertTrue(pool.awaitTermination(3, TimeUnit.MINUTES), "workers did not finish")
-            // Background workers (feed, screens, regulator) must also have finished cleanly.
-            background.forEach { it.get() }
+            var workerFailure: Throwable? = null
+            try {
+                devices.forEach { it.get(3, TimeUnit.MINUTES) } // rethrows any device failure
+                stop.set(true)
+                pool.shutdown()
+                assertTrue(pool.awaitTermination(3, TimeUnit.MINUTES), "workers did not finish")
+                // Background workers (feed, screens, regulator) must also have finished cleanly.
+                background.forEach { it.get() }
+            } catch (failure: Throwable) {
+                workerFailure = failure
+                throw failure
+            } finally {
+                stop.set(true)
+                pool.shutdownNow()
+                if (!pool.awaitTermination(30, TimeUnit.SECONDS)) {
+                    val cleanup = AssertionError("storm workers did not stop after cleanup")
+                    val failure = workerFailure
+                    if (failure != null) failure.addSuppressed(cleanup) else throw cleanup
+                }
+            }
 
             // Bets that failed placement were put in `stakes` but never queued. Remove them from the model.
             val placedInLedger = stakes.keys.filter { ledger.findByIdempotencyKey("bet:$it:place") != null }.toSet()
@@ -357,7 +401,7 @@ class MultiDeviceWalletTest {
 
             // R3: every balance any screen ever displayed is one the ledger really held.
             val legitimate = cashHistory.toHashSet()
-            val phantoms = observedCash.filterNot { it in legitimate }
+            val phantoms = observedCash.flatMap { screen -> screen.runs.map { it.balance } }.filterNot { it in legitimate }
             assertTrue(phantoms.isEmpty(), "R3: devices saw balances the ledger never committed: ${phantoms.take(5)}")
 
             // R5: independent client-side model agrees with the ledger to the cent.
@@ -385,7 +429,8 @@ class MultiDeviceWalletTest {
             }
 
             println("STORM: ${ledger.head().size} entries, ${placedInLedger.size} bets, ${settledBets.size} feed-settled, " +
-                "${rejectedForFunds.get()} rejected for funds, ${observedCash.size} balance reads, ${sths.size} checkpoints")
+                "${rejectedForFunds.get()} rejected for funds, " +
+                "${observedCash.fold(0L) { total, screen -> Math.addExact(total, screen.count) }} balance reads, ${sths.size} checkpoints")
         }
 
         // Finally, an independent auditor reaches the same verdict from the files alone.

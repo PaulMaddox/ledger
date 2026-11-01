@@ -46,9 +46,9 @@ const uuid = () => {
 async function api(path, { method = "GET", params } = {}) {
   const body = params ? new URLSearchParams(params) : undefined;
   const res = await fetch("/api/" + path, { method, body });
+  if (res.ok) return res.json();
   const data = await res.json().catch(() => ({}));
-  if (!res.ok) throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
-  return data;
+  throw { status: res.status, error: data.error || "error", message: data.message || res.statusText };
 }
 const say = (el, ok, html) => { el.className = el.className.replace(/\b(ok|bad)\b/g, "").trim() + (ok === null ? "" : ok ? " ok" : " bad"); el.innerHTML = html; };
 const errText = e => esc(e.message || String(e));
@@ -211,7 +211,7 @@ async function verifyEntry(seq, target) {
 const views = {};
 let current = null;
 function show(name) {
-  if (!views[name]) name = "customer";
+  if (!views[name]) name = "about";
   if (current && views[current].leave) views[current].leave();
   current = name;
   document.querySelectorAll(".view").forEach(v => { v.hidden = v.id !== "view-" + name; });
@@ -219,6 +219,7 @@ function show(name) {
   views[name].enter();
 }
 window.addEventListener("hashchange", () => show(location.hash.slice(1)));
+views.about = { enter() {} };
 
 /** setInterval that runs immediately, skips overlapping calls, and can be stopped. */
 function poll(fn, ms) {
@@ -251,8 +252,11 @@ let walletSubmitting = false;
 let fixturesCache = [];
 
 function updateSlipControls() {
+  const unresolved = !!selection?.params;
   $("slip").querySelector('button[type="submit"]').disabled = slipSubmitting;
-  $("slipStake").disabled = !!selection?.params;
+  $("slipStake").disabled = unresolved;
+  $("slipCancel").disabled = unresolved;
+  $("custFixtures").querySelectorAll("[data-fx]").forEach(b => { b.disabled = unresolved; });
 }
 
 async function loadPlayers() {
@@ -362,10 +366,11 @@ async function loadCustFixtures() {
     <div class="fx"><div class="teams">${esc(f.home)} v ${esc(f.away)} <span>${esc(f.id)}</span></div>
       <div class="prices">${["HOME", "DRAW", "AWAY"].map(s => `<button type="button" data-fx="${esc(f.id)}" data-sel="${s}" aria-pressed="${selection && selection.fixture === f.id && selection.sel === s}"><span>${s.toLowerCase()}</span><b>${odds(f.odds[s])}</b></button>`).join("")}</div>
     </div>`).join("") || `<p class="hint">No open fixtures. The operator can add one.</p>`, ["fx", "sel"]);
+  updateSlipControls();
 }
 $("custFixtures").addEventListener("click", e => {
   const b = e.target.closest("[data-fx]");
-  if (!b) return;
+  if (!b || selection?.params) return;
   const f = fixturesCache.find(x => x.id === b.dataset.fx);
   selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: `${f.home} v ${f.away}`, betId: uuid(), params: null };
   $("slipText").innerHTML = `<b>${esc(selection.sel)}</b> in ${esc(selection.label)} @ <b>${odds(selection.odds)}</b>`;
@@ -373,7 +378,10 @@ $("custFixtures").addEventListener("click", e => {
   updateSlipControls();
   loadCustFixtures();
 });
-$("slipCancel").addEventListener("click", () => { selection = null; $("slip").hidden = true; loadCustFixtures(); });
+$("slipCancel").addEventListener("click", () => {
+  if (selection?.params) return;
+  selection = null; $("slip").hidden = true; loadCustFixtures();
+});
 $("slip").addEventListener("submit", async e => {
   e.preventDefault();
   if (!selection || slipSubmitting) return;
@@ -396,7 +404,15 @@ $("slip").addEventListener("submit", async e => {
     if (selection === submittedSelection) { selection = null; $("slip").hidden = true; }
   } catch (err) {
     if (player === submittedSelection.player) say($("betResult"), false, err.error === "insufficient_funds" ? "Refused: insufficient funds." : errText(err));
-    if ([400, 403, 409, 422].includes(err.status)) {
+    const definitiveErrors = {
+      400: ["bad_request"],
+      403: ["invalid_host", "cross_origin"],
+      404: ["not_found"],
+      409: ["insufficient_funds", "idempotency_conflict", "version_conflict", "storage_reset"],
+      413: ["payload_too_large"],
+      422: ["rejected"],
+    };
+    if (Number.isInteger(err.status) && definitiveErrors[err.status]?.includes(err.error)) {
       submittedSelection.params = null;
       submittedSelection.betId = uuid();
     }
@@ -858,40 +874,38 @@ $("clearForm").addEventListener("submit", async e => {
 // ============================== chaos monkey ==============================
 let stopChaos = null, chaosSubmitting = false, chaosAvailable = false;
 function updateChaosControls() {
-  const enabled = chaosAvailable && !chaosSubmitting && $("chaosConfirmation").value === "CHAOS ON MAIN STORE";
+  const enabled = chaosAvailable && !chaosSubmitting;
   document.querySelectorAll("[data-chaos], [data-tamper]").forEach(b => { b.disabled = !enabled; });
 }
-$("chaosConfirmation").addEventListener("input", updateChaosControls);
 async function refreshChaos() {
   try {
     const data = await api("chaos");
     if (current !== "chaos") return;
     chaosAvailable = data.available;
     say($("chaosStoreStatus"), data.available ? null : false, data.available ?
-      "Main store available. Each experiment stops the simulator; changes remain in the real ledger." :
+      "Main store available. Live transaction races leave the simulator running; file and signer faults drain services before the experiment." :
       `${esc(data.reason)} <a href="#administrator">Reset the main store</a> before running another experiment.`);
-    const enabled = chaosAvailable && !chaosSubmitting && $("chaosConfirmation").value === "CHAOS ON MAIN STORE";
+    const enabled = chaosAvailable && !chaosSubmitting;
     renderControls($("chaosScenarios"), data.scenarios.map(s =>
-      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" ${enabled ? "" : "disabled"}>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join(""), ["chaos"]);
+      `<div class="chaos-scenario"><div><b>${esc(s.name)}</b><p>${esc(s.description)}</p></div><button type="button" data-chaos="${esc(s.id)}" data-live="${s.live}" ${enabled ? "" : "disabled"}>Run experiment<span class="sr">: ${esc(s.name)}</span></button></div>`).join(""), ["chaos"]);
     updateChaosControls();
     $("chaosHistory").innerHTML = data.history.length ? data.history.map(r =>
-      `<article><div class="panel-head"><b>${esc(r.name)}</b><span class="pill ${r.passed ? "ok" : "bad"}">${r.passed ? "Expected protection observed" : "Protection failed"}</span></div><p>${esc(r.evidence)}</p><p class="hint">${esc(timeOf(r.t))} · ${r.millis} ms · ${esc(r.scope)} · ${r.available ? "reopened" : "STOPPED - reset required"}</p></article>`).join("") :
+      `<article><div class="panel-head"><b>${esc(r.name)}</b><span class="pill ${r.passed ? "ok" : "bad"}">${r.passed ? "Expected protection observed" : "Protection failed"}</span></div><p>${esc(r.evidence)}</p><p class="hint">${esc(timeOf(r.t))} · ${r.millis} ms · ${esc(r.scope)} · ${r.available ? (r.scope.includes("LIVE") ? "ledger available" : "reopened") : "STOPPED - reset required"}</p></article>`).join("") :
       `<p class="hint">No experiments yet. Run a scenario to see its measured outcome here.</p>`;
   } catch (e) { say($("chaosResult"), false, `Chaos lab unavailable: ${errText(e)}`); }
 }
 $("chaosScenarios").addEventListener("click", async e => {
   const button = e.target.closest("[data-chaos]");
-  if (button) await runMainChaos(button.dataset.chaos, $("chaosResult"));
+  if (button) await runMainChaos(button.dataset.chaos, $("chaosResult"), button.dataset.live === "true");
 });
-async function runMainChaos(scenario, target) {
-  if (chaosSubmitting || !chaosAvailable || $("chaosConfirmation").value !== "CHAOS ON MAIN STORE") return;
+async function runMainChaos(scenario, target, live = false) {
+  if (chaosSubmitting || !chaosAvailable) return;
   chaosSubmitting = true;
-  const confirmation = $("chaosConfirmation").value;
-  $("chaosConfirmation").value = "";
   updateChaosControls();
-  say(target, null, "Stopping services and running against the MAIN DATA STORE…");
+  say(target, null, live ? "Running a live transaction race on the MAIN DATA STORE; simulator stays active…" :
+    "Draining services before running against the MAIN DATA STORE…");
   try {
-    const r = await api("chaos", { method: "POST", params: { scenario, confirmation } });
+    const r = await api("chaos", { method: "POST", params: { scenario } });
     say(target, r.passed, `<div class="verdict ${r.passed ? "ok" : "bad"}">${esc(r.name)}: ${r.passed ? "expected protection observed" : "protection FAILED"}</div><p>${esc(r.evidence)}</p>${r.available ? "" : '<a href="#administrator">Clear storage to start again</a>'}`);
   } catch (error) { say(target, false, `Experiment failed to complete: ${errText(error)}. Check Administrator for storage status and reset.`); }
   finally { chaosSubmitting = false; await refreshChaos(); }
@@ -903,4 +917,4 @@ views.chaos = {
 
 // ============================== start ==============================
 const firstView = location.hash.slice(1);
-show(firstView || "customer");
+show(firstView || "about");

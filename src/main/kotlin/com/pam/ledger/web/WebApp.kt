@@ -46,9 +46,12 @@ import java.security.KeyPairGenerator
 import java.security.spec.PKCS8EncodedKeySpec
 import java.security.spec.X509EncodedKeySpec
 import java.time.Instant
+import java.time.Clock
 import java.util.Base64
 import java.util.Properties
 import java.util.concurrent.Executors
+import java.util.concurrent.Semaphore
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
 import kotlin.concurrent.write
@@ -228,17 +231,29 @@ class LedgerWebApp private constructor(
     private val stats get() = active.stats
     private val audit get() = active.audit
     private lateinit var server: HttpServer
+    private lateinit var maintenance: DemoMaintenance
+    private val requests = Semaphore(32)
+    private val experiments = ReentrantLock()
     val port: Int get() = server.address.port
 
     companion object {
         const val LEDGER_ID = "sportsbook-web"
         val CUSTOMERS = listOf("alice", "bob", "carol", "dave", "erin", "farid", "grace", "hiro", "ines", "jamal", "kofi", "lena")
+        private const val MAX_FORM_BODY_BYTES = 16 * 1024
         private val signingKeyBootstrapLock = Any()
-        private const val MAX_BODY_BYTES = 16_384
         private const val MAX_URI_LENGTH = 8_192
         private const val MAX_PARAMETERS = 32
 
-        fun start(opts: WebOptions): LedgerWebApp {
+        fun start(opts: WebOptions, clock: Clock = Clock.systemUTC()): LedgerWebApp {
+            // JDK HTTP configuration is read once, before the first server is created.
+            // Bound slow uploads/downloads and idle connections as well as active handlers.
+            System.getProperties().apply {
+                putIfAbsent("sun.net.httpserver.maxConnections", "64")
+                putIfAbsent("sun.net.httpserver.maxReqTime", "10")
+                putIfAbsent("sun.net.httpserver.maxRspTime", "30")
+                // Closing a rejected upload must not drain beyond the bounded body read.
+                putIfAbsent("sun.net.httpserver.drainAmount", "0")
+            }
             val allowedHosts = opts.allowedRequestHosts()
             val dir = opts.dataDir ?: Files.createTempDirectory("pam-ledger-web")
             Files.createDirectories(dir)
@@ -251,15 +266,29 @@ class LedgerWebApp private constructor(
                     System.err.println("Demo store failed recovery; console remains available for reset: ${e.message}")
                     null
                 }
-                val executor = Executors.newVirtualThreadPerTaskExecutor().also(resources::add)
+                // HTTP stream monitors pin virtual-thread carriers on JDK 21; slow uploads
+                // must not starve the handler that rejects excess requests.
+                val executor = Executors.newFixedThreadPool(64).also(resources::add)
                 val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
                 resources.add(AutoCloseable { server.stop(0) })
                 val app = LedgerWebApp(dir, LEDGER_ID, services, allowedHosts,
                     opts.publicOrigin?.let(::publicOrigin), resources.filter { it !== services })
                 app.server = server
+                // Startup catch-up can replace the generation tracked above, then fail persistence.
+                resources.add(AutoCloseable {
+                    app.lifecycle.write {
+                        val current = app.services
+                        app.services = null
+                        current?.close()
+                    }
+                })
+                app.maintenance = DemoMaintenance(dir, clock,
+                    reset = { app.lifecycle.write { app.resetStorage() } },
+                    checkCapacity = { app.checkDemoCapacity() }).also(resources::add)
                 server.executor = executor
                 server.createContext("/") { ex -> app.handle(ex) }
 
+                app.maintenance.start()
                 server.start()
                 return app
             } catch (failure: Throwable) {
@@ -354,20 +383,47 @@ class LedgerWebApp private constructor(
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
 
     private fun handle(ex: HttpExchange) {
+        ex.responseHeaders.set("Content-Security-Policy", "frame-ancestors 'none'")
+        ex.responseHeaders.set("X-Frame-Options", "DENY")
+        ex.responseHeaders.set("Connection", "close")
+        // A busy API is not a dead HTTP executor; liveness bypasses admission, not the executor.
+        val liveness = ex.requestMethod == "GET" && ex.requestURI.rawPath == "/health/live"
+        if (!liveness && !requests.tryAcquire()) {
+            try { respond(ex, 503, mapOf("error" to "overloaded", "message" to "too many demo requests")) }
+            finally { ex.close() }
+            return
+        }
+        var experiment = false
         try {
-            ex.responseHeaders.set("Content-Security-Policy", "frame-ancestors 'none'")
-            ex.responseHeaders.set("X-Frame-Options", "DENY")
+            val contentLength = ex.requestHeaders.getFirst("Content-Length")
+            if (ex.requestHeaders.getFirst("Transfer-Encoding") == null &&
+                (contentLength == null || contentLength.toLongOrNull() == 0L)) {
+                // The JDK marks even a zero-length stream at EOF only after a read.
+                // Without draining, leaving it unread would silently retire keep-alive.
+                check(ex.requestBody.read() == -1) { "unexpected body without request framing" }
+                ex.responseHeaders.remove("Connection")
+            }
             val uri = ex.requestURI
             validateRequestOrigin(ex)
+            if (liveness) return respond(ex, 200, mapOf("status" to "alive"))
             if (uri.toString().length > MAX_URI_LENGTH) throw HttpError(414, "uri_too_long", "request URI is too long")
             if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
-            if (ex.requestMethod == "POST") parseForm(readFormBody(ex), params)
+            if (ex.requestMethod == "POST") {
+                val body = readFormBody(ex)
+                ex.responseHeaders.remove("Connection")
+                parseForm(body, params)
+            }
             val segments = uri.rawPath.removePrefix("/api/").trimEnd('/').split('/').map {
                 decodeComponent(it, form = false)
             }
             val request = Request(ex.requestMethod, segments, params)
+            if (request.method == "POST" && segments in listOf(
+                    listOf("regulator", "audit"), listOf("regulator", "tamper"), listOf("chaos"))) {
+                experiments.lock()
+                experiment = true
+            }
             val expectedServices = services
             fun checkGeneration() {
                 if (services !== expectedServices) {
@@ -376,14 +432,21 @@ class LedgerWebApp private constructor(
             }
             val result = if (request.method == "POST" && segments in listOf(
                     listOf("administrator", "clear"), listOf("chaos"), listOf("regulator", "tamper"))) {
-                lifecycle.write {
-                    checkGeneration()
-                    when (segments) {
-                        listOf("administrator", "clear") -> clearStorage(request)
-                        listOf("regulator", "tamper") -> runChaos(request.str("mode"), request.str("confirmation")).let {
-                            it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                if (segments == listOf("chaos") && ChaosLab.isLiveScenario(params["scenario"] ?: "")) {
+                    lifecycle.read {
+                        checkGeneration()
+                        runLiveChaos(request.str("scenario"))
+                    }
+                } else {
+                    lifecycle.write {
+                        checkGeneration()
+                        when (segments) {
+                            listOf("administrator", "clear") -> clearStorage(request)
+                            listOf("regulator", "tamper") -> runChaos(request.str("mode")).let {
+                                it + mapOf("ok" to (it["passed"] != true), "note" to it["evidence"])
+                            }
+                            else -> runChaos(request.str("scenario"))
                         }
-                        else -> runChaos(request.str("scenario"), request.str("confirmation"))
                     }
                 }
             } else lifecycle.read { checkGeneration(); route(request) }
@@ -407,6 +470,8 @@ class LedgerWebApp private constructor(
             runCatching { respond(ex, status, mapOf("error" to code, "message" to (e.message ?: code))) }
         } finally {
             ex.close()
+            if (experiment) experiments.unlock()
+            if (!liveness) requests.release()
         }
     }
 
@@ -446,6 +511,34 @@ class LedgerWebApp private constructor(
         }
     }
 
+    private fun readFormBody(ex: HttpExchange): String {
+        fun reject(): Nothing {
+            ex.responseHeaders.set("Connection", "close")
+            throw HttpError(413, "payload_too_large", "form body must not exceed $MAX_FORM_BODY_BYTES bytes")
+        }
+        val contentLength = ex.requestHeaders.getFirst("Content-Length")?.let {
+            it.toLongOrNull()?.takeIf { n -> n >= 0 } ?: throw IllegalArgumentException("invalid Content-Length")
+        }
+        if (contentLength != null && contentLength > MAX_FORM_BODY_BYTES) reject()
+        // One extra byte detects overflow. This overload avoids a zero-length read
+        // after filling the buffer, which can wait for another chunk header on the JDK server.
+        val body = ByteArray(MAX_FORM_BODY_BYTES + 1)
+        val size = ex.requestBody.readNBytes(body, 0, body.size)
+        if (size > MAX_FORM_BODY_BYTES) reject()
+        val contentType = ex.requestHeaders.getFirst("Content-Type")
+        if (contentType != null) {
+            val parts = contentType.lowercase().split(';').map { it.trim() }
+            if (parts[0] != "application/x-www-form-urlencoded" ||
+                parts.drop(1).any { it != "charset=utf-8" && it != "charset=\"utf-8\"" }) {
+                throw HttpError(415, "unsupported_media_type", "expected a UTF-8 URL-encoded form")
+            }
+        }
+        if (size > 0 && contentType == null) {
+            throw HttpError(415, "unsupported_media_type", "expected a UTF-8 URL-encoded form")
+        }
+        return decodeUtf8(body, size)
+    }
+
     private fun parseForm(raw: String?, into: MutableMap<String, String>) {
         if (raw.isNullOrEmpty()) return
         for (pair in raw.split('&', limit = MAX_PARAMETERS + 1)) {
@@ -458,30 +551,8 @@ class LedgerWebApp private constructor(
         }
     }
 
-    private fun readFormBody(ex: HttpExchange): String {
-        val length = ex.requestHeaders.getFirst("Content-Length")?.let {
-            it.toLongOrNull()?.takeIf { n -> n >= 0 } ?: throw IllegalArgumentException("invalid Content-Length")
-        }
-        if (length != null && length > MAX_BODY_BYTES) throw HttpError(413, "body_too_large", "request body is too large")
-        val contentType = ex.requestHeaders.getFirst("Content-Type")
-        if (contentType != null) {
-            val parts = contentType.lowercase().split(';').map { it.trim() }
-            if (parts[0] != "application/x-www-form-urlencoded" ||
-                parts.drop(1).any { it != "charset=utf-8" && it != "charset=\"utf-8\"" }) {
-                throw HttpError(415, "unsupported_media_type", "expected a UTF-8 URL-encoded form")
-            }
-        }
-        // Content-Length alone cannot bound chunked requests or dishonest clients.
-        val bytes = ex.requestBody.readNBytes(MAX_BODY_BYTES + 1)
-        if (bytes.size > MAX_BODY_BYTES) throw HttpError(413, "body_too_large", "request body is too large")
-        if (bytes.isNotEmpty() && contentType == null) {
-            throw HttpError(415, "unsupported_media_type", "expected a UTF-8 URL-encoded form")
-        }
-        return decodeUtf8(bytes)
-    }
-
-    private fun decodeUtf8(bytes: ByteArray): String = try {
-        Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes)).toString()
+    private fun decodeUtf8(bytes: ByteArray, size: Int = bytes.size): String = try {
+        Charsets.UTF_8.newDecoder().decode(ByteBuffer.wrap(bytes, 0, size)).toString()
     } catch (e: CharacterCodingException) {
         throw IllegalArgumentException("request is not valid UTF-8", e)
     }
@@ -517,14 +588,26 @@ class LedgerWebApp private constructor(
     }
 
     private fun serveStatic(ex: HttpExchange, path: String) {
-        val name = when (path) { "/", "/index.html" -> "index.html"; "/app.js" -> "app.js"; "/app.css" -> "app.css"; else -> null }
+        val name = when {
+            path in setOf("/", "/index.html") -> "index.html"
+            path == "/app.js" -> "app.js"
+            path == "/app.css" -> "app.css"
+            path == "/about/" -> "about.html"
+            path.matches(Regex("/about/screenshots/[a-z0-9-]+\\.png")) -> path.removePrefix("/about/")
+            else -> null
+        }
         val bytes = name?.let { javaClass.getResourceAsStream("/web/$it")?.use { s -> s.readAllBytes() } }
         if (bytes == null) {
             ex.sendResponseHeaders(404, -1)
             return
         }
-        val type = when { name.endsWith(".js") -> "text/javascript"; name.endsWith(".css") -> "text/css"; else -> "text/html" }
-        ex.responseHeaders.add("Content-Type", "$type; charset=utf-8")
+        val type = when {
+            name.endsWith(".js") -> "text/javascript"
+            name.endsWith(".css") -> "text/css"
+            name.endsWith(".png") -> "image/png"
+            else -> "text/html"
+        }
+        ex.responseHeaders.add("Content-Type", if (type == "image/png") type else "$type; charset=utf-8")
         ex.responseHeaders.add("Cache-Control", "no-store")
         ex.sendResponseHeaders(200, bytes.size.toLong())
         ex.responseBody.use { it.write(bytes) }
@@ -617,6 +700,10 @@ class LedgerWebApp private constructor(
 
     private fun clearStorage(r: Request): Any {
         require(r.str("confirmation") == "CLEAR DEMO STORAGE") { "type CLEAR DEMO STORAGE to confirm permanent deletion" }
+        return resetStorage()
+    }
+
+    private fun resetStorage(): Any {
         val previous = services
         services = null
         offlineReason = "Reset in progress or failed. Use Administrator reset to start again."
@@ -646,11 +733,47 @@ class LedgerWebApp private constructor(
         return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
     }
 
-    private fun runChaos(scenario: String, confirmation: String): Map<String, Any?> {
-        ChaosLab.validate(scenario, confirmation)
+    internal fun maintainDemo() = maintenance.checkNow()
+
+    // The demo storage limit stops the demo, not the production writer, before the next daily purge.
+    internal fun checkDemoCapacity(maxBytes: Long = 12_000_000_000L) = lifecycle.write {
+        val current = services ?: return@write
+        val bytes = Files.list(directory).use { files ->
+            files.filter { file ->
+                val name = file.fileName.toString()
+                name == Book.FIXTURES_FILE || listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE).any {
+                    name == it || name.startsWith("$it.torn-")
+                }
+            }.mapToLong { Files.size(it) }.sum()
+        }
+        if (bytes >= maxBytes) {
+            services = null
+            offlineReason = "Demo capacity reached. Use Administrator reset or wait for the daily 03:00 UAE reset."
+            current.close()
+        }
+    }
+
+    private fun runLiveChaos(scenario: String): Map<String, Any?> {
+        ChaosLab.validate(scenario)
+        val current = services ?: throw HttpError(503, "ledger_unavailable",
+            "Main store is stopped. Use Administrator reset before another experiment.")
+        val result = chaos.runLive(scenario, current.ledger, current.wallet, current.book)
+        // Publish the experiment's committed customers before acknowledging it to the console.
+        current.readModel.catchUp()
+        return result
+    }
+
+    private fun runChaos(scenario: String): Map<String, Any?> {
+        ChaosLab.validate(scenario)
         val previous = services ?: throw HttpError(503, "ledger_unavailable",
             "Main store is stopped. Use Administrator reset before another experiment.")
-        // Anchor the exact stopped prefix. The simulator is drained before this final checkpoint.
+        val simulator = previous.simulator
+        val simulatorState = simulator.state
+        val simulatorCustomers = simulator.customers
+        val simulatorOpsPerMinute = simulator.opsPerMinute
+        val simulatorAutoFixtures = simulator.autoFixtures
+        val simulatorRunStartedNanos = simulator.runStartedNanos
+        // Anchor the exact stopped prefix before any main-store file mutation.
         services = null
         offlineReason = "Main-store chaos in progress or interrupted. Use Administrator reset if needed."
         previous.close()
@@ -658,7 +781,17 @@ class LedgerWebApp private constructor(
         Ledger.open(LedgerConfig(directory = directory, ledgerId = ledgerId, signer = signer)).use { it.checkpoint() }
         val result = chaos.run(scenario, directory, signer)
         if (result["available"] == true) {
-            services = openServices(directory, signer)
+            val recovered = openServices(directory, signer)
+            recovered.simulator.configure(simulatorCustomers, simulatorOpsPerMinute, simulatorAutoFixtures)
+            when (simulatorState) {
+                Simulator.State.RUNNING -> recovered.simulator.start(simulatorRunStartedNanos)
+                Simulator.State.PAUSED -> {
+                    recovered.simulator.start(simulatorRunStartedNanos)
+                    recovered.simulator.pause()
+                }
+                Simulator.State.STOPPED -> Unit
+            }
+            services = recovered
             offlineReason = null
         } else {
             offlineReason = result["evidence"].toString()
@@ -757,7 +890,6 @@ class LedgerWebApp private constructor(
 
     private fun operator(): Map<String, Any?> {
         val totals = readModel.totals()
-        val open = readModel.openBets()
         return mapOf(
             "players" to readModel.players().size,
             "entries" to totals.entries,
@@ -766,11 +898,9 @@ class LedgerWebApp private constructor(
             "staked" to minorUnits(totals.staked),
             "returned" to minorUnits(totals.returned),
             "ggr" to minorUnits(readModel.balance(Accounts.revenue("EUR"))),
-            "openBets" to open.size,
-            "openStakes" to minorUnits(sumMinorUnits(open.map { it.stake })),
-            "exposure" to minorUnits(open.fold(BigInteger.ZERO) { total, bet ->
-                total.add(BigInteger.valueOf(bet.potentialPayout).subtract(BigInteger.valueOf(bet.stake)))
-            }),
+            "openBets" to totals.openBets,
+            "openStakes" to minorUnits(totals.openStakes),
+            "exposure" to minorUnits(totals.exposure),
             "kinds" to totals.kindCounts,
             "series" to stats.series().map {
                 mapOf("t" to it.t, "tps" to it.txPerSec, "ggr" to minorUnits(it.ggr), "exposure" to minorUnits(it.exposure), "openBets" to it.openBets)
@@ -866,7 +996,7 @@ class LedgerWebApp private constructor(
                 services = null
                 previous?.close()
             }
-        }) + resources)
+        }) + resources + maintenance)
     }
 }
 

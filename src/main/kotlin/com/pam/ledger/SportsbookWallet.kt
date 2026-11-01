@@ -53,8 +53,11 @@ class SportsbookWallet(private val ledger: Ledger) {
     }
 
     private fun depositRequest(playerId: String, amount: Long, currency: String, paymentRef: String): TransactionRequest {
-        checkPlayer(playerId, currency)
-        require(paymentRef.isNotBlank()) { "payment reference must not be blank" }
+        // Legacy retries must still reach the ledger's content fingerprint check.
+        if (!hasDeposit(paymentRef)) {
+            checkPlayer(playerId, currency)
+            require(paymentRef.isNotBlank()) { "payment reference must not be blank" }
+        }
         require(amount > 0) { "deposit must be positive" }
         return TransactionRequest(
             idempotencyKey = "deposit:$paymentRef",
@@ -136,6 +139,10 @@ class SportsbookWallet(private val ledger: Ledger) {
     /** Player accepted a cash-out offer of [amount]. */
     fun cashOut(betId: String, amount: Long) = settle(betId, "BET_CASHED_OUT", amount)
 
+    /** Submit a cash-out whose definitive future survives a caller's timeout. */
+    fun cashOutAsync(betId: String, amount: Long) =
+        ledger.submit(settlementRequest(betId, "BET_CASHED_OUT", amount))
+
     fun cashBalance(playerId: String, currency: String) = ledger.balance(Accounts.cash(playerId, currency))
     fun openBetsBalance(playerId: String, currency: String) = ledger.balance(Accounts.openBets(playerId, currency))
 
@@ -168,10 +175,12 @@ class SportsbookWallet(private val ledger: Ledger) {
     private data class Placement(val seq: Long, val playerId: String, val stake: Long, val currency: String)
 
     private fun placementRequest(playerId: String, betId: String, stake: Long, currency: String, selection: String): TransactionRequest {
-        checkPlayer(playerId, currency)
-        // Admission must leave room for the longer settlement key, not just placement.
-        require(betId.isNotBlank() && betId.length <= Validation.MAX_KEY_LENGTH - settlementKey("").length) {
-            "bet id must be 1..${Validation.MAX_KEY_LENGTH - settlementKey("").length} chars"
+        if (!hasBetPlacement(betId)) {
+            checkPlayer(playerId, currency)
+            // Admission must leave room for the longer settlement key, not just placement.
+            require(betId.isNotBlank() && betId.length <= Validation.MAX_KEY_LENGTH - settlementKey("").length) {
+                "bet id must be 1..${Validation.MAX_KEY_LENGTH - settlementKey("").length} chars"
+            }
         }
         require(stake > 0) { "stake must be positive" }
         return TransactionRequest(

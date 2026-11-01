@@ -37,7 +37,11 @@ import kotlin.random.Random
  *  At most 512 operations are in flight. Beyond that, operations are shed (and
  *  counted) rather than queued, so an excessive setting cannot exhaust memory.
  */
-class Simulator(private val book: Book, private val wallet: SportsbookWallet) : AutoCloseable {
+class Simulator(
+    private val book: Book,
+    private val wallet: SportsbookWallet,
+    private val nanoTime: () -> Long = System::nanoTime,
+) : AutoCloseable {
 
     enum class State { STOPPED, RUNNING, PAUSED }
 
@@ -102,7 +106,9 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
     private val workers = Executors.newVirtualThreadPerTaskExecutor()
     private val ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "simulator").apply { isDaemon = true } }
     private var carry = 0.0
-    private var lastRoundNanos = System.nanoTime()
+    private var lastRoundNanos = nanoTime()
+    internal var runStartedNanos = 0L
+        private set
 
     init {
         ticker.scheduleAtFixedRate({ runCatching { tick() } }, 100, 100, TimeUnit.MILLISECONDS)
@@ -117,23 +123,36 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
         this.autoFixtures = autoFixtures
     }
 
-    @Synchronized fun start() {
+    @Synchronized fun start() = start(nanoTime())
+
+    // Recoverable chaos must not grant an unattended run another fifteen minutes.
+    @Synchronized internal fun start(originalStartNanos: Long) {
         if (state != State.STOPPED) return
         synchronized(events) { run = Run(); events.clear() }
         carry = 0.0
         startedAtMillis = System.currentTimeMillis()
-        lastRoundNanos = System.nanoTime()
+        runStartedNanos = originalStartNanos
+        lastRoundNanos = nanoTime()
         state = State.RUNNING
+        expire()
     }
 
     @Synchronized fun pause() { if (state == State.RUNNING) state = State.PAUSED }
-    @Synchronized fun resume() { if (state == State.PAUSED) state = State.RUNNING }
+    @Synchronized fun resume() {
+        expire()
+        if (state == State.PAUSED) state = State.RUNNING
+    }
     @Synchronized fun stop() { state = State.STOPPED }
 
     /** Operations per second the current settings ask for. */
     val targetRate get() = customers * opsPerMinute / 60.0
 
-    @Synchronized private fun tick() {
+    private fun expire() {
+        if (state != State.STOPPED && nanoTime() - runStartedNanos >= MAX_RUN_NANOS) state = State.STOPPED
+    }
+
+    @Synchronized internal fun tick() {
+        expire() // Pausing, reconfiguring or repeated Start requests cannot extend the deadline.
         if (state != State.RUNNING) return
         val counters = run
         carry += targetRate / 10.0
@@ -144,8 +163,8 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
             workers.submit { try { operation(Random, counters) } finally { inFlight.release() } }
         }
         // Keep the book moving: settle the oldest open fixture and open a new one every 15 s.
-        if (autoFixtures && System.nanoTime() - lastRoundNanos > 15_000_000_000L) {
-            lastRoundNanos = System.nanoTime()
+        if (autoFixtures && nanoTime() - lastRoundNanos > 15_000_000_000L) {
+            lastRoundNanos = nanoTime()
             scheduleFixtureRound(counters)
         }
     }
@@ -266,6 +285,7 @@ class Simulator(private val book: Book, private val wallet: SportsbookWallet) : 
 
     companion object {
         const val MAX_CUSTOMERS = 20_000
+        internal val MAX_RUN_NANOS = TimeUnit.MINUTES.toNanos(15)
         private const val MAX_IN_FLIGHT = 512
         private const val MAX_EVENTS = 5_000
         fun customerName(i: Int) = "sim-%05d".format(Locale.ROOT, i)
@@ -286,17 +306,14 @@ class Stats(private val readModel: ReadModel) : AutoCloseable {
 
     private fun sample() {
         val totals = readModel.totals()
-        val open = readModel.openBets()
         val prev = synchronized(points) { points.lastOrNull() }
         val p = Point(
             t = System.currentTimeMillis(),
             entries = totals.entries,
             txPerSec = if (prev == null) 0 else totals.entries - prev.entries,
             ggr = readModel.balance(Accounts.revenue("EUR")),
-            exposure = open.fold(BigInteger.ZERO) { total, bet ->
-                total.add(BigInteger.valueOf(bet.potentialPayout).subtract(BigInteger.valueOf(bet.stake)))
-            },
-            openBets = open.size,
+            exposure = totals.exposure,
+            openBets = totals.openBets,
         )
         synchronized(points) {
             points.addLast(p)

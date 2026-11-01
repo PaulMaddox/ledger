@@ -46,9 +46,26 @@ docs/screenshots/        web console screenshots, used by README.md and the guid
 ./gradlew test                       # full test suite (JUnit 5); gradlew.bat on Windows
 ./gradlew run                        # demo: concurrent betting, audit, proofs
 ./gradlew web                        # web console at http://localhost:8080
+./gradlew installDist                # package the standalone CLI demo
 python3 scripts/build-readme.py      # rebuild docs/index.html after ANY source or guide change
 node scripts/check-guide.mjs         # must print four PASS lines
+node scripts/check-web.mjs           # dependency-free console regressions
 ```
+
+The setup scripts install JDK 21 if needed and download the build tools; the first
+build requires internet access. On Windows, the README's `-ExecutionPolicy Bypass`
+option applies only to the setup process, not to system settings. With JDK 21
+already installed, setup is optional.
+
+The CLI demo places and settles bets concurrently, checks proofs, and audits the
+files it wrote. Rejected overspending attempts are expected; an audit failure
+causes a non-zero exit. Test reports are in `build/reports/tests/test/index.html`.
+After `installDist`, run `build/install/pam-ledger/bin/pam-ledger`; on Windows,
+use `build\install\pam-ledger\bin\pam-ledger.bat`.
+
+Guide tools require Python 3.10+ and Node.js 18+. The setup scripts can install
+them with `--with-guide-tools` on Ubuntu or `-WithGuideTools` on Windows. Use
+`python` instead of `python3` on Windows.
 
 Always use the wrapper (`./gradlew`), never a locally installed `gradle`, so builds use
 the same Gradle version as CI. Do not change `gradle/wrapper/` except to upgrade Gradle
@@ -105,8 +122,8 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 
 - Follow the existing comment style: explain *why*, not *what*, and keep KDoc on public
   APIs. This codebase is meant to be read by auditors as well as engineers.
-- New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`)
-  and the suite run several times; an intermittent failure is a real bug.
+- New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`);
+  an intermittent failure is a real bug, not a reason to rerun until green.
 - Keep error types in the sealed `LedgerException` hierarchy.
 
 ## Keeping the documentation in step
@@ -114,7 +131,10 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 Documentation is part of every change, not a follow-up. In the same pull request as any
 change it describes:
 
-- **README.md** must describe what the code now does: commands, features, layout.
+- **README.md** is the product front page: explain its value, show the console,
+  and link to the live demo, guide and a concise local quick start. Keep CI policy,
+  probe configuration, build internals, report paths and contributor tooling out
+  of it; those belong here or in `deploy/README.md`, not in the product showcase.
 - **The guide** (`docs/readme.src.html`, then rebuild `docs/index.html`) must match the code.
 - **Screenshots** must be regenerated when the visible UI changes (layout, styles,
   wording, or displayed content). Backend or API changes alone do not require new
@@ -138,9 +158,65 @@ change it describes:
   it: balances shown to users come from the ledger itself.
 - Placing a bet and settling its fixture are coordinated by the per-fixture lock in `Book`.
   Keep it, and keep the race test in `WebAppTest`.
+- Retain a slip's original player, stake, selection and bet ID while placement is
+  pending or uncertain. Block price changes and Cancel, including after fixture
+  polling, until acceptance or a known definitive status/error pair from the API.
+  `404/not_found` and `413/payload_too_large` are definitive; never classify by
+  HTTP status alone. An unknown or mismatched error code must retain the retry payload.
+- Treat unreadable or truncated JSON in a successful API response as uncertain,
+  never as an empty success. Parsing failures must retain the original wallet
+  deposit/withdrawal or bet placement payload and idempotency key for retry.
+- API POST form bodies are capped at 16 KiB (16,384 bytes) of encoded data, before
+  UTF-8 or form decoding. Oversized bodies return HTTP 413 (`payload_too_large`) before
+  routing, without performing the operation. Reject oversized declared lengths
+  before reading and keep streaming reads bounded to 16,385 bytes (one extra byte
+  detects overflow), using the buffer-taking `readNBytes(buffer, offset, length)` overload.
+  Disable the JDK server's unread-body draining at startup, so closing a rejected
+  unfinished upload neither reads beyond the cap nor holds the handler waiting for EOF.
 - Keep the front end dependency-free (no frameworks, CDNs or build step) and keep the
   in-browser verification honest: the browser must compute the hashes and check the
   signature itself, never just display the server's verdict.
+
+### API and wallet boundaries
+
+On JDK 21, startup sets `sun.net.httpserver.drainAmount=0` before creating the HTTP
+server. Fully consumed requests still permit keep-alive; unconsumed uploads close
+instead of draining. The handler marks known-empty bodies at EOF and advertises
+`Connection: close` until a form has been fully consumed; otherwise disabling
+draining would silently retire empty GET connections. Never probe an unknown or
+chunked body merely to preserve keep-alive.
+This JDK-specific setting, like the request/response deadlines,
+is read once: a hosting JVM must configure it before its first HTTP server is created.
+An existing explicit property value is not overwritten; a nonzero override restores
+JDK draining and forfeits the bounded-close guarantee.
+
+- Nonempty API POST bodies require UTF-8 `application/x-www-form-urlencoded`
+  (`415/unsupported_media_type` otherwise). Reject malformed UTF-8, percent escapes
+  and fields, and duplicate decoded names, including query/body collisions
+  (`400/bad_request`). Cap combined forms at 32 fields and non-liveness request
+  URIs at 8,192 characters (`414/uri_too_long`).
+- New deposits and placements require nonempty player IDs that fit the escrow
+  account name (235 characters for a three-letter currency). New bet IDs must be
+  nonblank and at most 245 characters, leaving room for settlement keys. Apply
+  these admission checks only to uncommitted operations: legacy deposit and
+  placement retries must still reach the ledger's fingerprint comparison.
+  Older, longer cash accounts can still withdraw. Never change canonical byte
+  formats or historical replay rules to enforce these wallet admission limits.
+- Published or unresolved fixture results block new cash-outs before settlement
+  finishes. Register cash-out futures under the fixture read lock, wait outside
+  it, and retain the original future for same-bet retries after closure until
+  its outcome is definitive. Committed retries reach the ledger's shared
+  settlement-key fingerprint check. The simulator uses this same book boundary.
+- Amounts are positive whole `Long` minor units; the book supplies fixture odds
+  and cash-out prices. Validate simulator actions, settings, booleans and event
+  cursors before mutation. Web deposits cannot claim internal `sim-seed-` references.
+- HTTP responses forbid framing with CSP `frame-ancestors 'none'` and
+  `X-Frame-Options: DENY`; top-level console links remain allowed.
+
+The demo admission cap is not authentication or a production capacity policy.
+Production still needs authenticated player/operator/regulator roles, per-action
+authorization, confirmed payment integration and per-user request-rate limits.
+Demo deposits do not prove that a payment was confirmed.
 
 ## Changing the guide
 
@@ -162,8 +238,8 @@ change it describes:
   explains why.
 - A PR description states what changed, why, and which checks you ran and their results.
 - Before opening a PR: run the tests, rebuild the guide, and run `check-guide.mjs`.
-- CI (`.github/workflows/ci.yml`) runs on every pull request: the test suite twice (to
-  catch intermittent races), the demo with its audit, a check that `docs/index.html` was
+- CI (`.github/workflows/ci.yml`) runs on every pull request: the test suite once,
+  including race and stress tests, the demo with its audit, a check that `docs/index.html` was
   rebuilt, `check-guide.mjs`, and the README's one-command setup and demo on fresh Ubuntu
   and Windows machines. All CI jobs must pass before a PR can be merged. If CI
   fails, fix the cause; never skip, retry until green, or weaken the check.

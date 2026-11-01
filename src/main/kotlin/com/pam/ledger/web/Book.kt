@@ -22,8 +22,10 @@ import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicInteger
+import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
+import kotlin.concurrent.withLock
 import kotlin.concurrent.write
 import kotlin.random.Random
 
@@ -84,8 +86,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     private val openById = ConcurrentHashMap<String, Fixture>()
     private val counter = AtomicInteger()
     private val persistenceLock = Any()
-    private val pendingByBetId = ConcurrentHashMap<String, PendingPlacement>()
+    private val placementLock = ReentrantLock()
+    private val pendingByBetId = HashMap<String, PendingPlacement>()
+    private val cashOutLock = ReentrantLock()
+    private val pendingCashOuts = HashMap<String, CompletableFuture<Receipt>>()
     internal var placementTimeout: Duration = Duration.ofSeconds(30)
+    internal var cashOutTimeout: Duration = Duration.ofSeconds(30)
 
     init {
         restoreFixtures()
@@ -122,12 +128,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
      * request idempotent: a retried or double-tapped slip is recorded once.
      */
     fun placeBet(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): Receipt {
-        return awaitPlacement(placementFuture(playerId, fixtureId, selection, stake, betId), betId)
+        return awaitOutcome(placementFuture(playerId, fixtureId, selection, stake, betId), "bet:$betId:place", placementTimeout)
     }
 
     /** Wait for the original placement outcome without misreporting a timeout as a refusal. */
     internal fun placeBetDefinitive(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): Receipt {
-        return awaitPlacement(placementFuture(playerId, fixtureId, selection, stake, betId), betId, null)
+        return awaitOutcome(placementFuture(playerId, fixtureId, selection, stake, betId), "bet:$betId:place", null)
     }
 
     private fun placementFuture(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): CompletableFuture<Receipt> {
@@ -145,7 +151,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
                 return@read wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
             }
             var created: PendingPlacement? = null
-            val pending = pendingByBetId.compute(betId) { _, current ->
+            // Queue admission can park. A ConcurrentHashMap.compute monitor would
+            // pin a JDK 21 carrier and can starve every virtual HTTP/simulator thread.
+            val pending = placementLock.withLock {
+                val current = pendingByBetId[betId]
                 if (current != null) {
                     if (current.playerId != playerId || current.fixtureId != fixtureId ||
                         current.selection != selection || current.stake != stake) {
@@ -157,15 +166,16 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
                     // Settlement waits for this future even if the request times out.
                     val submitted = wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
                     val placement = PendingPlacement(playerId, fixtureId, selection, stake, submitted)
+                    pendingByBetId[betId] = placement
                     f.pendingPlacements.add(submitted)
                     created = placement
                     placement
                 }
-            }!!
+            }
             created?.let { placement ->
                 placement.future.whenComplete { _, _ ->
                     f.pendingPlacements.remove(placement.future)
-                    pendingByBetId.remove(betId, placement)
+                    placementLock.withLock { pendingByBetId.remove(betId, placement) }
                 }
             }
             pending.future
@@ -180,20 +190,35 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         return payout(bet.stake, 85)
     }
 
-    fun cashOut(betId: String): Receipt = cashOut(betId, definitive = false)
+    /** Accept an offer while the fixture is open, retaining its future for uncertain retries. */
+    fun cashOut(betId: String): Receipt = awaitOutcome(cashOutFuture(betId), "bet:$betId:settle", cashOutTimeout)
 
     /** Simulator cash-outs use the same fixture guard and wait for a definitive wallet outcome. */
-    internal fun cashOutDefinitive(betId: String): Receipt = cashOut(betId, definitive = true)
+    internal fun cashOutDefinitive(betId: String): Receipt = awaitOutcome(cashOutFuture(betId), "bet:$betId:settle", null)
 
-    private fun cashOut(betId: String, definitive: Boolean): Receipt {
+    private fun cashOutFuture(betId: String): CompletableFuture<Receipt> {
         val bet = readModel.bet(betId) ?: readModel.catchUp().let { readModel.bet(betId) }
             ?: throw NotFoundException("bet $betId not found")
         val f = fixture(bet.fixtureId)
+        val offer = payout(bet.stake, 85)
         return f.lock.read {
-            // Committed retries still reach the ledger's content fingerprint check.
-            require(f.isOpen || wallet.isSettled(betId)) { "fixture ${f.id} has already been settled" }
-            val offer = payout(bet.stake, 85)
-            if (definitive) wallet.cashOutDefinitive(betId, offer) else wallet.cashOut(betId, offer)
+            var created: CompletableFuture<Receipt>? = null
+            val future = cashOutLock.withLock {
+                // Publication can precede the original completion callback; do not resubmit while it is pending.
+                pendingCashOuts[betId]?.takeUnless { it.isDone } ?: run {
+                    // Completed retries still reach the ledger's content fingerprint check.
+                    require(f.isOpen || wallet.isSettled(betId)) { "fixture ${f.id} has already been settled" }
+                    wallet.cashOutAsync(betId, offer).also {
+                        pendingCashOuts[betId] = it
+                        created = it
+                    }
+                }
+            }
+            created?.whenComplete { _, _ ->
+                cashOutLock.withLock { pendingCashOuts.remove(betId, future) }
+            }
+            // Waiting outside the fixture lock lets a result close admission immediately.
+            future
         }
     }
 
@@ -379,12 +404,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         }
     }
 
-    private fun awaitPlacement(future: CompletableFuture<Receipt>, betId: String, timeout: Duration? = placementTimeout): Receipt = try {
+    private fun awaitOutcome(future: CompletableFuture<Receipt>, idempotencyKey: String, timeout: Duration?): Receipt = try {
         if (timeout == null) future.join() else future.get(timeout.toNanos(), TimeUnit.NANOSECONDS)
     } catch (e: CompletionException) {
         throw (e.cause as? RuntimeException ?: e)
     } catch (e: TimeoutException) {
-        throw OutcomeUnknownException("bet:$betId:place")
+        throw OutcomeUnknownException(idempotencyKey)
     } catch (e: ExecutionException) {
         throw (e.cause as? RuntimeException ?: e)
     } catch (e: InterruptedException) {
