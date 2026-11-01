@@ -58,6 +58,24 @@ safe to run again, and CI runs these exact commands on fresh Ubuntu and Windows 
 ledger, so anything done in one view shows up in the others. The first tab, **About**, embeds
 the interactive ledger guide and its screenshots.
 
+**Public demo limits.** Demo history is purged and reseeded every day at **03:00 UAE time**
+(`Asia/Dubai`, 23:00 UTC the previous day), even if the main store was fail-stopped by chaos.
+An overdue purge is caught up before serving requests after restart. Each simulator run
+stops automatically after **15 minutes**, including paused time; configuration changes,
+repeated Start requests and recoverable chaos do not extend it. Already-submitted operations
+finish normally. Starting a new run is an explicit action.
+
+To cap demo storage between purges, a once-per-second capacity check drains and stops
+services when journals, torn-tail quarantine and fixture data total **12 GB**
+(12,000,000,000 bytes; in-flight work may overshoot this high-water mark). There is no entry
+or fixture-count limit. Use Administrator reset or wait for the daily purge to resume.
+HTTP bodies are limited to **16 KiB**, at most **32 requests** are processed concurrently,
+and only **one audit or Chaos Monkey experiment** runs at a time; excess requests receive
+413 or 503.
+The JDK HTTP server defaults to at most 64 connections, a 10-second request-read deadline
+and a 30-second response deadline; JVM `sun.net.httpserver` properties can override these.
+These safeguards belong only to the unauthenticated demo, not the production ledger engine.
+
 ![Simulator: 500 automated customers, each tile streaming its latest actions](docs/screenshots/simulator.png)
 
 - **Simulator.** Choose how many automated customers to run (500 by default) and how active
@@ -121,13 +139,13 @@ the interactive ledger guide and its screenshots.
   searchable; balances and integrity evidence still come from the ledger.
   Live races remain serialized with a virtual-thread-safe lock, so concurrent
   requests cannot pin all JDK 21 HTTP carriers while waiting for their workers.
-  File and signer faults drain services
-  before running; the simulator resumes with a fresh run if the store recovers. Corruption
+  File and signer faults drain services before running; the simulator resumes with
+  fresh counters but its original expiry if the store recovers. Corruption
   correctly fail-stops the ledger, so services remain stopped until reset rather than
   accepting writes against damaged history. Storage attacks mutate the main journal under
   its directory lock; the tamper lab edits deposits, rewrites the chain or rolls back signed
   entries in that same store. Torn-write recovery preserves committed history; detected
-  corruption remains for inspection, without automatic restore. Administrator reset is
+  corruption remains for inspection until manual reset or the daily demo purge, without automatic restore. Administrator reset is
   available even when the ledger is stopped or the app restarts on corrupt storage. Use it
   to start again. History retains the last 30 experiments in memory until reset or app
   restart. These are demo-only, owner-approved exceptions to append-only storage, never

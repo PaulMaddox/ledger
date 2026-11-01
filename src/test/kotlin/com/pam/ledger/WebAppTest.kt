@@ -6,6 +6,7 @@ import com.pam.ledger.web.LedgerWebApp
 import com.pam.ledger.web.ReadModel
 import com.pam.ledger.web.WebOptions
 import com.pam.ledger.web.Simulator
+import com.pam.ledger.web.DemoMaintenance
 import com.pam.ledger.web.parseArgs
 import com.pam.ledger.web.replayPlayerAudit
 import com.pam.ledger.web.allowedRequestHosts
@@ -25,6 +26,8 @@ import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.Executor
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicLong
+import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 import java.util.Locale
 import java.time.Clock
@@ -75,6 +78,244 @@ class WebAppTest {
     private fun withApp(body: (LedgerWebApp) -> Unit) {
         val app = LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir()))
         try { body(app) } finally { app.close() }
+    }
+
+    private class DemoClock(initial: Instant) : Clock() {
+        val now = AtomicReference(initial)
+        override fun instant(): Instant = now.get()
+        override fun getZone(): ZoneId = ZoneOffset.UTC
+        override fun withZone(zone: ZoneId): Clock = Clock.fixed(instant(), zone)
+    }
+
+    @Test
+    fun `daily demo reset uses 03 UAE time regardless of the host timezone`() {
+        val before = Instant.parse("2026-10-31T22:59:59Z")
+        val boundary = Instant.parse("2026-10-31T23:00:00Z")
+        assertEquals(boundary, DemoMaintenance.nextReset(before))
+        assertEquals(Instant.parse("2026-11-01T23:00:00Z"), DemoMaintenance.nextReset(boundary))
+        val clock = DemoClock(before)
+        val directory = tempDir()
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory), clock).use { app ->
+            val key = Files.readAllBytes(directory.resolve("demo-signing-key.properties"))
+            Files.writeString(directory.resolve("keep-me.txt"), "unrelated")
+            Files.writeString(directory.resolve("${Ledger.ENTRIES_FILE}.torn-123"), "quarantine")
+            call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "daily-marker"))
+            app.maintainDemo()
+            assertTrue(call(app, "GET", "players/alice").second.contains("daily-marker"))
+            call(app, "POST", "simulator", mapOf("action" to "start", "customers" to 1, "opsPerMinute" to 1))
+            clock.now.set(boundary)
+            val outcomes = race(8) { i ->
+                if (i == 0) { app.maintainDemo(); 200 to "reset" }
+                else call(app, "GET", "operator")
+            }.map { it.getOrThrow() }
+            outcomes.forEach { (status, body) ->
+                assertTrue(status in setOf(200, 409, 503), "$status $body")
+            }
+            assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+            assertTrue(call(app, "GET", "simulator").second.contains("\"state\":\"STOPPED\""))
+            assertFalse(call(app, "GET", "players/alice").second.contains("daily-marker"))
+            assertFalse(Files.exists(directory.resolve("${Ledger.ENTRIES_FILE}.torn-123")))
+            assertEquals("unrelated", Files.readString(directory.resolve("keep-me.txt")))
+            assertTrue(key.contentEquals(Files.readAllBytes(directory.resolve("demo-signing-key.properties"))))
+            call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "after-daily"))
+            app.maintainDemo()
+            assertTrue(call(app, "GET", "players/alice").second.contains("after-daily"), "only one purge per boundary")
+            assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        }
+        // A different host timezone and restart must not defer an overdue persisted deadline.
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory),
+            Clock.fixed(Instant.parse("2026-11-02T00:00:00Z"), ZoneId.of("America/New_York"))).use { app ->
+            assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+            assertFalse(call(app, "GET", "players/alice").second.contains("after-daily"))
+        }
+    }
+
+    @Test
+    fun `daily purge recovers corrupt demo storage and retries a failed reset`() {
+        val directory = tempDir()
+        val clock = DemoClock(Instant.parse("2026-10-31T22:59:59Z"))
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory), clock).use { app ->
+            assertTrue(chaos(app, "checksum").second.contains("\"available\":false"))
+            clock.now.set(Instant.parse("2026-10-31T23:00:00Z"))
+            app.maintainDemo()
+            assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+            assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        }
+        val attempts = AtomicLong()
+        val nextDay = DemoClock(Instant.parse("2026-11-01T23:00:00Z"))
+        DemoMaintenance(directory, nextDay, reset = {
+            if (attempts.incrementAndGet() == 1L) throw java.io.IOException("reset unavailable")
+        }, checkCapacity = {}).use { maintenance ->
+            assertFailsWith<java.io.IOException> { maintenance.checkNow() }
+            maintenance.checkNow()
+            maintenance.checkNow()
+            assertEquals(2L, attempts.get())
+        }
+    }
+
+    @Test
+    fun `maintenance shutdown waits for an active drain without interrupting it`() {
+        val entered = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val interrupted = AtomicBoolean()
+        val maintenance = DemoMaintenance(tempDir(), Clock.systemUTC(), reset = {}, checkCapacity = {
+            if (Thread.currentThread().name == "demo-maintenance") {
+                entered.countDown()
+                try { release.await() } catch (e: InterruptedException) { interrupted.set(true) }
+            }
+        })
+        try {
+            maintenance.start()
+            assertTrue(entered.await(5, TimeUnit.SECONDS))
+            val closing = CompletableFuture.runAsync { maintenance.close() }
+            Thread.sleep(100)
+            assertFalse(closing.isDone, "shutdown must join the active drain")
+            release.countDown()
+            closing.get(5, TimeUnit.SECONDS)
+            assertFalse(interrupted.get())
+        } finally {
+            release.countDown()
+            maintenance.close()
+        }
+    }
+
+    @Test
+    fun `failed startup deadline persistence releases the replacement service generation`() {
+        val directory = tempDir()
+        val deadline = directory.resolve("demo-reset-at.txt")
+        Files.writeString(deadline, "2026-10-30T23:00:00Z")
+        val reads = AtomicLong()
+        val clock = object : Clock() {
+            override fun getZone(): ZoneId = ZoneOffset.UTC
+            override fun withZone(zone: ZoneId): Clock = this
+            override fun instant(): Instant {
+                // The second read occurs after catch-up has opened its replacement services.
+                if (reads.incrementAndGet() == 2L) {
+                    Files.delete(deadline)
+                    Files.createDirectory(deadline)
+                    Files.writeString(deadline.resolve("blocked"), "prevent deadline replacement")
+                }
+                return Instant.parse("2026-10-31T23:00:00Z")
+            }
+        }
+        assertFailsWith<java.io.IOException> {
+            LedgerWebApp.start(WebOptions(port = 0, dataDir = directory), clock)
+        }
+        Files.delete(deadline.resolve("blocked"))
+        Files.delete(deadline)
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)).use { app ->
+            assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+            assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        }
+    }
+
+    @Test
+    fun `simulator expires at fifteen minutes including pause and concurrent resume`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                val now = AtomicLong(42)
+                Simulator(book, wallet, now::get).use { simulator ->
+                    simulator.configure(1, 1, false)
+                    simulator.start()
+                    now.addAndGet(Simulator.MAX_RUN_NANOS - 1)
+                    simulator.start() // Repeated Start and configuration do not renew a running session.
+                    simulator.configure(2, 1, false)
+                    simulator.tick()
+                    assertEquals(Simulator.State.RUNNING, simulator.state)
+                    simulator.pause()
+                    now.incrementAndGet()
+                    race(8) { i -> if (i % 2 == 0) simulator.resume() else simulator.tick() }
+                        .forEach { it.getOrThrow() }
+                    assertEquals(Simulator.State.STOPPED, simulator.state)
+                    simulator.start()
+                    assertEquals(Simulator.State.RUNNING, simulator.state, "an explicit new run gets its own deadline")
+                    simulator.stop()
+                }
+                Simulator(book, wallet, now::get).use { recovered ->
+                    recovered.start(42)
+                    assertEquals(Simulator.State.STOPPED, recovered.state, "chaos recovery preserves the expired deadline")
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `demo data limit drains services until reset`() {
+        withApp { app ->
+            call(app, "POST", "simulator", mapOf("action" to "start", "customers" to 1, "opsPerMinute" to 1))
+            app.checkDemoCapacity(maxBytes = Long.MAX_VALUE)
+            assertTrue(call(app, "GET", "overview").second.contains("\"available\":true"))
+            app.checkDemoCapacity(maxBytes = 1)
+            val overview = call(app, "GET", "overview").second
+            assertTrue(overview.contains("\"available\":false") && overview.contains("Demo capacity reached"), overview)
+            assertEquals(503, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "capacity")).first)
+            reset(app)
+            assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+            assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+        }
+    }
+
+    @Test
+    fun `demo rejects oversized fixed and chunked request bodies without ledger changes`() = withApp { app ->
+        val payload = "ref=" + "x".repeat(16 * 1024)
+        for (publisher in listOf(HttpRequest.BodyPublishers.ofString(payload),
+            HttpRequest.BodyPublishers.ofInputStream { payload.byteInputStream() })) {
+            val response = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/api/players/alice/deposit"))
+                .header("Origin", "http://127.0.0.1:${app.port}")
+                .POST(publisher).build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(413, response.statusCode(), response.body())
+        }
+        Socket("127.0.0.1", app.port).use { socket ->
+            socket.soTimeout = 5_000
+            val bytes = payload.toByteArray()
+            socket.getOutputStream().write(("POST /api/players/alice/deposit HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:${app.port}\r\nOrigin: http://127.0.0.1:${app.port}\r\n" +
+                "Transfer-Encoding: chunked\r\n\r\n${bytes.size.toString(16)}\r\n").toByteArray() + bytes + "\r\n".toByteArray())
+            // No final chunk: rejecting at the bound must not wait for the client to finish uploading.
+            assertTrue(socket.getInputStream().bufferedReader().readLine().contains("413"))
+        }
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+    }
+
+    @Test
+    fun `demo sheds excess concurrent requests and releases slots after clients disconnect`() = withApp { app ->
+        val sockets = ArrayList<Socket>()
+        try {
+            repeat(32) {
+                val socket = Socket("127.0.0.1", app.port)
+                sockets += socket
+                socket.getOutputStream().write(("POST /api/players/alice/deposit HTTP/1.1\r\n" +
+                    "Host: 127.0.0.1:${app.port}\r\nOrigin: http://127.0.0.1:${app.port}\r\n" +
+                    "Content-Length: 1\r\n\r\n").toByteArray())
+            }
+            val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+            var status: Int
+            do { status = call(app, "GET", "overview").first }
+            while (status == 200 && System.nanoTime() < deadline)
+            assertEquals(503, status)
+        } finally {
+            sockets.forEach { it.close() }
+        }
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var result: Pair<Int, String>
+        do { result = call(app, "GET", "overview") }
+        while (result.first == 503 && System.nanoTime() < deadline)
+        assertEquals(200, result.first, result.second)
+        assertTrue(result.second.contains("\"entries\":12"))
+    }
+
+    @Test
+    fun `demo times out stalled uploads without changing the ledger`() = withApp { app ->
+        Socket("127.0.0.1", app.port).use { socket ->
+            socket.soTimeout = 15_000
+            socket.getOutputStream().write(("POST /api/players/alice/deposit HTTP/1.1\r\n" +
+                "Host: 127.0.0.1:${app.port}\r\nOrigin: http://127.0.0.1:${app.port}\r\n" +
+                "Content-Length: 1\r\n\r\n").toByteArray())
+            assertEquals(-1, socket.getInputStream().read(), "the HTTP request deadline closes an unfinished upload")
+        }
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
     }
 
     private fun reset(app: LedgerWebApp) {
