@@ -13,7 +13,7 @@ Exact balances. Safe concurrency. Evidence you can verify yourself.
 
 ## Every balance has a history
 
-A wallet is more than its latest number. PAM Ledger records the movements behind
+A wallet is more than its latest number. This ledger records the movements behind
 it, protects the money under competing requests, and lets you inspect the evidence.
 
 - **Account for every cent.** Money is conserved, and player balances cannot go negative.
