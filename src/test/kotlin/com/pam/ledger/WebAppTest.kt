@@ -30,6 +30,7 @@ import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 import java.util.UUID
 import java.util.Locale
+import java.util.Properties
 import java.time.Clock
 import java.time.Duration
 import java.time.Instant
@@ -416,17 +417,25 @@ class WebAppTest {
         app: LedgerWebApp, host: String, method: String = "GET", origin: String? = null,
         path: String = if (method == "POST") "/api/players/alice/deposit" else "/api/overview",
         fetchSite: String? = null,
+        body: ByteArray? = null,
+        contentType: String? = "application/x-www-form-urlencoded",
+        chunked: Boolean = false,
     ): String {
-        val body = if (method == "POST") "amount=1&ref=allowed-host-test" else ""
+        val bytes = body ?: (if (method == "POST") "amount=1&ref=allowed-host-test" else "").toByteArray(Charsets.UTF_8)
         return Socket("127.0.0.1", app.port).use { socket ->
             socket.soTimeout = 5_000
             val request = buildString {
                 append("$method $path HTTP/1.1\r\nHost: $host\r\nConnection: close\r\n")
                 if (origin != null) append("Origin: $origin\r\n")
                 if (fetchSite != null) append("Sec-Fetch-Site: $fetchSite\r\n")
-                append("Content-Type: application/x-www-form-urlencoded\r\nContent-Length: ${body.length}\r\n\r\n$body")
+                if (contentType != null) append("Content-Type: $contentType\r\n")
+                if (chunked) append("Transfer-Encoding: chunked\r\n\r\n")
+                else append("Content-Length: ${bytes.size}\r\n\r\n")
             }
             socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+            if (chunked) socket.getOutputStream().write("${bytes.size.toString(16)}\r\n".toByteArray())
+            socket.getOutputStream().write(bytes)
+            if (chunked) socket.getOutputStream().write("\r\n0\r\n\r\n".toByteArray())
             socket.getInputStream().readBytes().toString(Charsets.UTF_8)
         }
     }
@@ -870,6 +879,126 @@ class WebAppTest {
     }
 
     @Test
+    fun `console pages forbid framing without blocking top-level navigation`() = withApp { app ->
+        for (path in listOf("/", "/index.html")) {
+            val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}$path"))
+                .header("Sec-Fetch-Site", "cross-site").GET().build()
+            val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+            assertEquals(200, response.statusCode())
+            assertEquals("frame-ancestors 'none'", response.headers().firstValue("Content-Security-Policy").orElse(""))
+            assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElse(""))
+        }
+    }
+
+    @Test
+    fun `oversized bodies including chunked requests and oversized URIs are rejected`() = withApp { app ->
+        val host = "127.0.0.1:${app.port}"
+        for (chunked in listOf(false, true)) {
+            val response = rawRequest(app, host, "POST", "http://$host",
+                body = ("amount=1&ref=" + "x".repeat(16_384)).toByteArray(), chunked = chunked)
+            assertTrue(response.startsWith("HTTP/1.1 413"), response)
+            assertTrue(response.contains("\"error\":\"payload_too_large\""), response)
+            assertTrue(response.lineSequence().any { it.equals("Connection: close", true) }, response)
+        }
+        val response = rawRequest(app, host, path = "/api/players?q=" + "x".repeat(8_192))
+        assertTrue(response.startsWith("HTTP/1.1 414"), response)
+        assertTrue(response.contains("\"error\":\"uri_too_long\""), response)
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10000\""))
+        assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "after-large-request")).first)
+    }
+
+    @Test
+    fun `malformed ambiguous and unsupported forms cannot mutate the ledger`() = withApp { app ->
+        val host = "127.0.0.1:${app.port}"
+        val origin = "http://$host"
+        for (form in listOf(
+            "amount=1&ref=first&ref=second",
+            "amount=1&%61mount=2&ref=encoded-duplicate",
+            "amount=1&ref=bad%FF",
+            "amount=1&ref=bad%C0%AF",
+            "amount=1&ref=bad%E2%82",
+            "amount=1&ref=bad%XY",
+            "amount=1&ref=bad%",
+            "amount=1&ref=good&ignored",
+            "amount=1&ref=good&=empty-name",
+            "amount=1&ref=good&" + (1..31).joinToString("&") { "p$it=value" },
+        )) {
+            val response = rawRequest(app, host, "POST", origin, body = form.toByteArray())
+            assertTrue(response.startsWith("HTTP/1.1 400"), response)
+        }
+        val duplicate = rawRequest(app, host, "POST", origin,
+            path = "/api/players/alice/deposit?ref=query", body = "amount=1&ref=body".toByteArray())
+        assertTrue(duplicate.startsWith("HTTP/1.1 400"), duplicate)
+        val invalidBytes = rawRequest(app, host, "POST", origin,
+            body = "amount=1&ref=".toByteArray() + byteArrayOf(0xff.toByte()))
+        assertTrue(invalidBytes.startsWith("HTTP/1.1 400"), invalidBytes)
+        val invalidPath = rawRequest(app, host, "POST", origin, path = "/api/players/%FF/deposit")
+        assertTrue(invalidPath.startsWith("HTTP/1.1 400"), invalidPath)
+        for (type in listOf(null, "text/plain", "application/json", "application/x-www-form-urlencoded; charset=iso-8859-1")) {
+            val response = rawRequest(app, host, "POST", origin, contentType = type)
+            assertTrue(response.startsWith("HTTP/1.1 415"), response)
+        }
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10000\""))
+        val valid = rawRequest(app, host, "POST", origin, contentType = "application/x-www-form-urlencoded; charset=UTF-8",
+            body = "amount=1&ref=valid-%E2%82%AC%2B%2F".toByteArray())
+        assertTrue(valid.startsWith("HTTP/1.1 200"), valid)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
+    }
+
+    @Test
+    fun `invalid simulator requests leave all settings and state unchanged`() = withApp { app ->
+        val before = call(app, "GET", "simulator").second
+        for (params in listOf(
+            mapOf("customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "false", "action" to "invalid"),
+            mapOf("customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "False", "action" to "start"),
+            mapOf("customers" to "1", "opsPerMinute" to "601", "action" to "start"),
+            mapOf("customers" to "20001", "opsPerMinute" to "1", "action" to "start"),
+            mapOf("opsPerMinute" to "10"),
+            mapOf("autoFixtures" to "false"),
+        )) {
+            assertEquals(400, call(app, "POST", "simulator", params).first)
+            assertEquals(before, call(app, "GET", "simulator").second)
+        }
+        for (after in listOf("-1", "1.5", "9223372036854775808", "invalid")) {
+            assertEquals(400, call(app, "GET", "simulator/events", mapOf("after" to after)).first)
+        }
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "false",
+        )).first)
+    }
+
+    @Test
+    fun `wallet identifiers must fit their complete lifecycle before any write`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            val player = "p".repeat(235)
+            wallet.deposit(player, 1000, "EUR", "identifier-funds")
+            val before = ledger.head().size
+            for (id in listOf("", "p".repeat(236))) {
+                assertFailsWith<IllegalArgumentException> { wallet.deposit(id, 1, "EUR", "bad-player") }
+                assertFailsWith<IllegalArgumentException> { wallet.placeBetAsync(id, "bad-player", 1, "EUR") }
+            }
+            for (id in listOf("", "p".repeat(241))) {
+                assertFailsWith<IllegalArgumentException> { wallet.withdraw(id, 1, "EUR", "bad-player") }
+            }
+            for (id in listOf("", " ", "b".repeat(246))) {
+                assertFailsWith<IllegalArgumentException> { wallet.placeBetAsync(player, id, 100, "EUR") }
+                assertFailsWith<IllegalArgumentException> { wallet.placeBet(player, id, 100, "EUR") }
+            }
+            assertFailsWith<IllegalArgumentException> { wallet.deposit(player, 1, "EUR", "") }
+            assertFailsWith<IllegalArgumentException> { wallet.withdraw(player, 1, "EUR", "") }
+            assertEquals(before, ledger.head().size)
+            assertEquals(1000, wallet.cashBalance(player, "EUR"))
+            val betId = "b".repeat(245)
+            wallet.placeBet(player, betId, 100, "EUR")
+            wallet.voidBet(betId)
+            assertTrue(wallet.voidBet(betId).replayed)
+            assertEquals(1000, wallet.cashBalance(player, "EUR"))
+            assertEquals(0, wallet.openBetsBalance(player, "EUR"))
+        }
+    }
+
+    @Test
     fun `form bodies accept 16 KiB and reject larger encoded bodies without mutations`() = withApp { app ->
         val limit = 16 * 1024
         for (chunked in listOf(false, true)) {
@@ -920,13 +1049,174 @@ class WebAppTest {
                     val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
                     assertTrue(reader.readLine().startsWith("HTTP/1.1 413"))
                     val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
+                    assertTrue(headers.any { it.equals("Connection: close", true) }, headers.toString())
                     val length = headers.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
                     val body = CharArray(length) { reader.read().also { assertTrue(it >= 0) }.toChar() }.concatToString()
                     assertTrue(body.contains("\"error\":\"payload_too_large\""), body)
+                    assertEquals(-1, reader.read(), "rejected upload must close without waiting for the rest of the body")
                 }
                 assertEquals(before, call(app, "GET", "players/alice").second)
             }
         }
+    }
+
+    @Test
+    fun `unread rejected uploads advertise connection close without draining`() = withApp { app ->
+        val before = call(app, "GET", "players/alice").second
+        for (framing in listOf("Content-Length: 20", "Transfer-Encoding: chunked")) {
+            Socket("127.0.0.1", app.port).use { socket ->
+                socket.soTimeout = 5_000
+                socket.getOutputStream().write(
+                    ("POST /api/players/alice/deposit?amount=1&ref=unread-rejection HTTP/1.1\r\n" +
+                        "Host: 127.0.0.1:${app.port}\r\nConnection: keep-alive\r\n$framing\r\n\r\n")
+                        .toByteArray(Charsets.UTF_8))
+                val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
+                assertTrue(reader.readLine().startsWith("HTTP/1.1 403"))
+                val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
+                assertTrue(headers.any { it.equals("Connection: close", true) }, headers.toString())
+                val length = headers.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+                val body = CharArray(length) { reader.read().also { assertTrue(it >= 0) }.toChar() }.concatToString()
+                assertTrue(body.contains("\"error\":\"cross_origin\""), body)
+                assertEquals(-1, reader.read(), "origin rejection must not wait for the withheld request body")
+            }
+            assertEquals(before, call(app, "GET", "players/alice").second)
+        }
+    }
+
+    @Test
+    fun `fully consumed form requests keep their connection reusable`() = withApp { app ->
+        Socket("127.0.0.1", app.port).use { socket ->
+            socket.soTimeout = 5_000
+            val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
+            fun readResponse(status: Int): String {
+                val statusLine = reader.readLine()
+                assertTrue(statusLine?.startsWith("HTTP/1.1 $status") == true,
+                    "the request must reuse the same connection: $statusLine")
+                val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
+                assertFalse(headers.any { it.equals("Connection: close", true) }, headers.toString())
+                val length = headers.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+                return CharArray(length) { reader.read().also { assertTrue(it >= 0) }.toChar() }.concatToString()
+            }
+            for ((index, ref) in listOf("keep-alive-one", "keep-alive-two").withIndex()) {
+                val path = if (index == 0) "/health/live" else "/api/not-found"
+                val emptyLength = if (index == 0) "" else "Content-Length: 0\r\n"
+                socket.getOutputStream().write(
+                    ("GET $path HTTP/1.1\r\nHost: 127.0.0.1:${app.port}\r\n" +
+                        "Connection: keep-alive\r\n$emptyLength\r\n").toByteArray(Charsets.UTF_8))
+                readResponse(if (index == 0) 200 else 404)
+                val prefix = "amount=1&ref=$ref&padding="
+                val form = prefix + if (index == 0) "x".repeat(16 * 1024 - prefix.length) else ""
+                val request = buildString {
+                    append("POST /api/players/alice/deposit HTTP/1.1\r\n")
+                    append("Host: 127.0.0.1:${app.port}\r\nOrigin: http://127.0.0.1:${app.port}\r\n")
+                    append("Content-Type: application/x-www-form-urlencoded\r\n")
+                    append("Connection: keep-alive\r\nContent-Length: ${form.length}\r\n\r\n$form")
+                }
+                socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+                val body = readResponse(200)
+                assertTrue(body.contains("\"replayed\":false"), body)
+            }
+            socket.getOutputStream().write(
+                ("POST /api/regulator/audit HTTP/1.1\r\nHost: 127.0.0.1:${app.port}\r\n" +
+                    "Origin: http://127.0.0.1:${app.port}\r\nConnection: keep-alive\r\nContent-Length: 0\r\n\r\n")
+                    .toByteArray(Charsets.UTF_8))
+            assertTrue(readResponse(200).contains("\"ok\":true"))
+            socket.getOutputStream().write(
+                ("GET /api/players/alice HTTP/1.1\r\nHost: 127.0.0.1:${app.port}\r\nConnection: keep-alive\r\n\r\n")
+                    .toByteArray(Charsets.UTF_8))
+            assertTrue(readResponse(200).contains("\"cash\":\"10002\""))
+        }
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10002\""))
+    }
+
+    @Test
+    fun `legacy long player cash accounts still replay and permit withdrawals`() {
+        val directory = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val player = "p".repeat(240)
+        Ledger.open(config(directory, signer)).use { ledger ->
+            ledger.append(TransactionRequest(
+                idempotencyKey = "deposit:legacy-long-player", kind = "DEPOSIT",
+                postings = listOf(
+                    Posting(SportsbookWallet.Accounts.pspClearing("EUR"), "EUR", -100),
+                    Posting(SportsbookWallet.Accounts.cash(player, "EUR"), "EUR", 100),
+                ),
+                metadata = mapOf("playerId" to player, "paymentRef" to "legacy-long-player"),
+            ))
+        }
+        Ledger.open(config(directory, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            val before = ledger.head().size
+            assertTrue(wallet.deposit(player, 100, "EUR", "legacy-long-player").replayed)
+            assertTrue(wallet.depositDefinitive(player, 100, "EUR", "legacy-long-player").replayed)
+            assertFailsWith<IdempotencyConflictException> {
+                wallet.deposit(player, 101, "EUR", "legacy-long-player")
+            }
+            assertFailsWith<IdempotencyConflictException> {
+                wallet.deposit("other", 100, "EUR", "legacy-long-player")
+            }
+            assertFailsWith<IllegalArgumentException> { wallet.deposit(player, 1, "EUR", "new-long-player") }
+            assertEquals(before, ledger.head().size)
+            assertEquals(100, wallet.cashBalance(player, "EUR"))
+            wallet.withdraw(player, 100, "EUR", "legacy-long-withdrawal")
+            assertTrue(wallet.withdraw(player, 100, "EUR", "legacy-long-withdrawal").replayed)
+            assertEquals(0, wallet.cashBalance(player, "EUR"))
+        }
+        assertTrue(LedgerVerifier.verify(directory, TestSupport.LEDGER_ID, listOf(signer.publicKey)).ok)
+    }
+
+    @Test
+    fun `legacy long bet identifiers replay placements without bypassing fingerprints`() {
+        val directory = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val betId = "b".repeat(246)
+        Ledger.open(config(directory, signer)).use { ledger ->
+            SportsbookWallet(ledger).deposit("p", 1_000, "EUR", "legacy-bet-funds")
+            ledger.append(TransactionRequest(
+                idempotencyKey = "bet:$betId:place", kind = "BET_PLACED",
+                postings = listOf(
+                    Posting(SportsbookWallet.Accounts.cash("p", "EUR"), "EUR", -100),
+                    Posting(SportsbookWallet.Accounts.openBets("p", "EUR"), "EUR", 100),
+                ),
+                metadata = mapOf("betId" to betId, "playerId" to "p", "selection" to "F1|HOME|200"),
+            ))
+        }
+        Ledger.open(config(directory, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                val before = ledger.head().size
+                assertTrue(wallet.placeBet("p", betId, 100, "EUR", "F1|HOME|200").replayed)
+                assertTrue(wallet.placeBetAsync("p", betId, 100, "EUR", "F1|HOME|200").join().replayed)
+                assertTrue(book.placeBet("p", "F1", "HOME", 100, betId).replayed)
+                assertFailsWith<IdempotencyConflictException> { book.placeBet("p", "F1", "HOME", 101, betId) }
+                assertFailsWith<IdempotencyConflictException> { book.placeBet("p", "F1", "AWAY", 100, betId) }
+                assertFailsWith<IllegalArgumentException> { wallet.placeBet("p", "c".repeat(246), 100, "EUR") }
+                assertEquals(before, ledger.head().size)
+                assertEquals(900, wallet.cashBalance("p", "EUR"))
+                assertEquals(100, wallet.openBetsBalance("p", "EUR"))
+            }
+        }
+        assertTrue(LedgerVerifier.verify(directory, TestSupport.LEDGER_ID, listOf(signer.publicKey)).ok)
+    }
+
+    @Test
+    fun `HTTP admission rejects empty players unresolvable bets and reserved seed references`() = withApp { app ->
+        assertEquals(400, call(app, "POST", "players//deposit", mapOf("amount" to 1, "ref" to "empty-player")).first)
+        assertEquals(400, call(app, "POST", "players/" + "p".repeat(236) + "/deposit", mapOf("amount" to 1, "ref" to "long-player")).first)
+        assertEquals(400, call(app, "POST", "players/alice/deposit", mapOf(
+            "amount" to 1, "ref" to "sim-seed-sim-00001",
+        )).first)
+        assertEquals(400, call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "b".repeat(246),
+        )).first)
+        assertTrue(call(app, "GET", "players/alice").second.contains("\"cash\":\"10000\""))
+        val betId = "b".repeat(245)
+        assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+            "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to betId,
+        )).first)
+        assertEquals(200, call(app, "POST", "fixtures/F1/settle", mapOf("result" to "AWAY")).first)
+        assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
     }
 
     @Test
@@ -1283,6 +1573,197 @@ class WebAppTest {
                 readModel.catchUp()
                 assertTrue(readModel.openBetsOn(fixture.id).isEmpty())
             }
+        }
+    }
+
+    /** A known result closes cash-out even while settlement is awaiting a placement callback. */
+    @Test
+    fun `cash-out refuses published results before loss settlement reaches the writer`() {
+        val delayed = AtomicBoolean(false)
+        val completions = ConcurrentLinkedQueue<Runnable>()
+        val executor = Executor { task -> if (delayed.get()) completions.add(task) else task.run() }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000, "EUR", "closed-cashout-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model).apply { placementTimeout = Duration.ofMillis(25) }
+                val fixture = book.addFixture(Random(0))
+                delayed.set(true)
+                assertFailsWith<OutcomeUnknownException> {
+                    book.placeBet("p", fixture.id, "HOME", 100, "closed-cashout")
+                }
+                val committed = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                while (completions.isEmpty() && System.nanoTime() < committed) Thread.sleep(5)
+                assertTrue(completions.isNotEmpty(), "placement must commit before closing the fixture")
+                val settlement = CompletableFuture.supplyAsync { book.settle(fixture.id, "AWAY") }
+                try {
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (fixture.result == null && System.nanoTime() < deadline) Thread.sleep(5)
+                    assertEquals("AWAY", fixture.result)
+                    assertFalse(settlement.isDone)
+                    assertFailsWith<IllegalArgumentException> { book.cashOut("closed-cashout") }
+                    assertFailsWith<IllegalArgumentException> { book.cashOutDefinitive("closed-cashout") }
+                    assertEquals(900, wallet.cashBalance("p", "EUR"))
+                } finally {
+                    delayed.set(false)
+                    while (true) (completions.poll() ?: break).run()
+                }
+                assertEquals(1, settlement.get(5, TimeUnit.SECONDS).lost)
+                assertEquals("BET_LOST", ledger.findByIdempotencyKey("bet:closed-cashout:settle")!!.entry.kind)
+            }
+        }
+    }
+
+    @Test
+    fun `cash-out retries retain an admitted future after fixture closure before commit`() {
+        val blocked = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val armed = AtomicBoolean(false)
+        val clock = object : Clock() {
+            override fun getZone(): ZoneId = ZoneOffset.UTC
+            override fun withZone(zone: ZoneId): Clock = this
+            override fun instant(): Instant {
+                if (armed.compareAndSet(true, false)) {
+                    blocked.countDown()
+                    check(release.await(10, TimeUnit.SECONDS)) { "test did not release the writer" }
+                }
+                return Instant.now()
+            }
+        }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(clock = clock)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000, "EUR", "pending-cashout-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model).apply { cashOutTimeout = Duration.ofMillis(25) }
+                val fixture = book.addFixture(Random(0))
+                val betId = "pending-cashout"
+                book.placeBet("p", fixture.id, "HOME", 100, betId)
+                var settlement: CompletableFuture<Book.Settlement>? = null
+                var retry: CompletableFuture<Receipt>? = null
+                armed.set(true)
+                try {
+                    assertFailsWith<OutcomeUnknownException> { book.cashOut(betId) }
+                    assertTrue(blocked.await(5, TimeUnit.SECONDS), "cash-out must still be uncommitted")
+                    assertFalse(wallet.isSettled(betId))
+                    settlement = CompletableFuture.supplyAsync { book.settle(fixture.id, "AWAY") }
+                    val closed = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (fixture.result == null && System.nanoTime() < closed) Thread.sleep(5)
+                    assertEquals("AWAY", fixture.result)
+                    race(2) { book.cashOut(betId) }.forEach {
+                        assertTrue(it.exceptionOrNull() is OutcomeUnknownException, it.toString())
+                    }
+                    retry = CompletableFuture.supplyAsync { book.cashOutDefinitive(betId) }
+                    assertFalse(wallet.isSettled(betId))
+                    assertFalse(settlement.isDone)
+                } finally {
+                    release.countDown()
+                }
+                val receipt = checkNotNull(retry).get(5, TimeUnit.SECONDS)
+                checkNotNull(settlement).get(5, TimeUnit.SECONDS)
+                val replay = book.cashOut(betId)
+                assertTrue(replay.replayed)
+                assertEquals(receipt.seq, replay.seq)
+                assertEquals("BET_CASHED_OUT", ledger.findByIdempotencyKey("bet:$betId:settle")!!.entry.kind)
+                assertEquals(1, (0L until ledger.head().size).count { ledger.entry(it).entry.idempotencyKey == "bet:$betId:settle" })
+                assertEquals(985, wallet.cashBalance("p", "EUR"))
+                assertEquals(0, wallet.openBetsBalance("p", "EUR"))
+                assertTrue(fixture.settlementComplete)
+            }
+        }
+    }
+
+    @Test
+    fun `cash-out retries await the original completion after its commit is visible`() {
+        val delayed = AtomicBoolean(false)
+        val completions = ConcurrentLinkedQueue<Runnable>()
+        val executor = Executor { task -> if (delayed.get()) completions.add(task) else task.run() }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000, "EUR", "delayed-cashout-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model).apply { cashOutTimeout = Duration.ofMillis(25) }
+                val fixture = book.addFixture(Random(0))
+                val betId = "delayed-cashout"
+                book.placeBet("p", fixture.id, "HOME", 100, betId)
+                var retryThread: Thread? = null
+                delayed.set(true)
+                try {
+                    assertFailsWith<OutcomeUnknownException> { book.cashOut(betId) }
+                    val committed = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (completions.isEmpty() && System.nanoTime() < committed) Thread.sleep(5)
+                    assertTrue(completions.isNotEmpty())
+                    assertTrue(wallet.isSettled(betId))
+                    book.settle(fixture.id, "AWAY")
+                    val retry = CompletableFuture<Receipt>()
+                    retryThread = Thread.ofVirtual().start {
+                        runCatching { book.cashOutDefinitive(betId) }
+                            .fold({ retry.complete(it) }, { retry.completeExceptionally(it) })
+                    }
+                    val waiting = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    while (retryThread.state != Thread.State.WAITING && System.nanoTime() < waiting) Thread.sleep(5)
+                    assertEquals(Thread.State.WAITING, retryThread.state)
+                    checkNotNull(completions.poll()).run()
+                    assertEquals(ledger.findByIdempotencyKey("bet:$betId:settle")!!.entry.seq, retry.get(5, TimeUnit.SECONDS).seq)
+                    assertTrue(completions.isEmpty(), "retry must not submit a second ledger future")
+                } finally {
+                    delayed.set(false)
+                    while (true) (completions.poll() ?: break).run()
+                    retryThread?.join(5_000)
+                }
+                assertEquals(985, wallet.cashBalance("p", "EUR"))
+                assertEquals(0, wallet.openBetsBalance("p", "EUR"))
+            }
+        }
+    }
+
+    @Test
+    fun `cash-out racing fixture closure settles once and committed retries still replay`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 10_000, "EUR", "cashout-race-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                repeat(10) { round ->
+                    val fixture = book.addFixture(Random(round))
+                    val betId = "cashout-race-$round"
+                    book.placeBet("p", fixture.id, "HOME", 100, betId)
+                    val outcomes = race(2) { i ->
+                        if (i == 0) book.cashOut(betId) else book.settle(fixture.id, "AWAY")
+                    }
+                    outcomes[1].getOrThrow()
+                    outcomes[0].exceptionOrNull()?.let { assertTrue(it is IllegalArgumentException || it is IdempotencyConflictException) }
+                    val entry = ledger.findByIdempotencyKey("bet:$betId:settle")!!.entry
+                    assertTrue(entry.kind in setOf("BET_CASHED_OUT", "BET_LOST"))
+                    if (entry.kind == "BET_CASHED_OUT") assertTrue(book.cashOut(betId).replayed)
+                    assertEquals(1, (0L until ledger.head().size).count { ledger.entry(it).entry.idempotencyKey == "bet:$betId:settle" })
+                    assertEquals(0, wallet.openBetsBalance("p", "EUR"))
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `restored known and unresolved results cannot cash out pending bets`() {
+        for (result in listOf("AWAY", "LEGACY_UNRESOLVED")) {
+            val directory = tempDir()
+            val app = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
+            try {
+                assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+                    "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "restored-cashout",
+                )).first)
+            } finally { app.close() }
+            val state = Properties().apply {
+                Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
+                setProperty("fixture.0.result", result)
+                setProperty("fixture.0.complete", "false")
+            }
+            Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { state.store(it, "pending result") }
+            val restarted = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
+            try {
+                assertEquals(400, call(restarted, "POST", "bets/restored-cashout/cashout").first)
+                assertTrue(call(restarted, "GET", "players/alice").second.contains("\"cash\":\"9900\""))
+                assertTrue(call(restarted, "POST", "regulator/audit").second.contains("\"ok\":true"))
+            } finally { restarted.close() }
         }
     }
 

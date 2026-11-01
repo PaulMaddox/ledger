@@ -52,7 +52,8 @@ internal fun payout(amount: Long, hundredths: Int): Long {
  *  placements hold the READ lock while they check the result and register their
  *  non-cancellable ledger future. Settlement takes the WRITE lock to close the
  *  fixture, then waits for every registered future before collecting bets. A
- *  timed-out request therefore cannot leave a late placement behind.
+ *  timed-out request therefore cannot leave a late placement behind. Cash-outs
+ *  also hold the READ lock so no new offer can be accepted after a known result.
  */
 class Book(private val wallet: SportsbookWallet, private val readModel: ReadModel, private val directory: Path? = null) {
 
@@ -87,7 +88,10 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     private val persistenceLock = Any()
     private val placementLock = ReentrantLock()
     private val pendingByBetId = HashMap<String, PendingPlacement>()
+    private val cashOutLock = ReentrantLock()
+    private val pendingCashOuts = HashMap<String, CompletableFuture<Receipt>>()
     internal var placementTimeout: Duration = Duration.ofSeconds(30)
+    internal var cashOutTimeout: Duration = Duration.ofSeconds(30)
 
     init {
         restoreFixtures()
@@ -124,12 +128,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
      * request idempotent: a retried or double-tapped slip is recorded once.
      */
     fun placeBet(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): Receipt {
-        return awaitPlacement(placementFuture(playerId, fixtureId, selection, stake, betId), betId)
+        return awaitOutcome(placementFuture(playerId, fixtureId, selection, stake, betId), "bet:$betId:place", placementTimeout)
     }
 
     /** Wait for the original placement outcome without misreporting a timeout as a refusal. */
     internal fun placeBetDefinitive(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): Receipt {
-        return awaitPlacement(placementFuture(playerId, fixtureId, selection, stake, betId), betId, null)
+        return awaitOutcome(placementFuture(playerId, fixtureId, selection, stake, betId), "bet:$betId:place", null)
     }
 
     private fun placementFuture(playerId: String, fixtureId: String, selection: String, stake: Long, betId: String): CompletableFuture<Receipt> {
@@ -186,7 +190,37 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         return payout(bet.stake, 85)
     }
 
-    fun cashOut(betId: String): Receipt = wallet.cashOut(betId, cashOutOffer(betId))
+    /** Accept an offer while the fixture is open, retaining its future for uncertain retries. */
+    fun cashOut(betId: String): Receipt = awaitOutcome(cashOutFuture(betId), "bet:$betId:settle", cashOutTimeout)
+
+    /** Simulator cash-outs use the same fixture guard and wait for a definitive wallet outcome. */
+    internal fun cashOutDefinitive(betId: String): Receipt = awaitOutcome(cashOutFuture(betId), "bet:$betId:settle", null)
+
+    private fun cashOutFuture(betId: String): CompletableFuture<Receipt> {
+        val bet = readModel.bet(betId) ?: readModel.catchUp().let { readModel.bet(betId) }
+            ?: throw NotFoundException("bet $betId not found")
+        val f = fixture(bet.fixtureId)
+        val offer = payout(bet.stake, 85)
+        return f.lock.read {
+            var created: CompletableFuture<Receipt>? = null
+            val future = cashOutLock.withLock {
+                // Publication can precede the original completion callback; do not resubmit while it is pending.
+                pendingCashOuts[betId]?.takeUnless { it.isDone } ?: run {
+                    // Completed retries still reach the ledger's content fingerprint check.
+                    require(f.isOpen || wallet.isSettled(betId)) { "fixture ${f.id} has already been settled" }
+                    wallet.cashOutAsync(betId, offer).also {
+                        pendingCashOuts[betId] = it
+                        created = it
+                    }
+                }
+            }
+            created?.whenComplete { _, _ ->
+                cashOutLock.withLock { pendingCashOuts.remove(betId, future) }
+            }
+            // Waiting outside the fixture lock lets a result close admission immediately.
+            future
+        }
+    }
 
     /** Close the fixture with [result] (HOME, DRAW, AWAY or VOID) and settle every open bet on it. */
     fun settle(fixtureId: String, result: String): Settlement {
@@ -370,12 +404,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         }
     }
 
-    private fun awaitPlacement(future: CompletableFuture<Receipt>, betId: String, timeout: Duration? = placementTimeout): Receipt = try {
+    private fun awaitOutcome(future: CompletableFuture<Receipt>, idempotencyKey: String, timeout: Duration?): Receipt = try {
         if (timeout == null) future.join() else future.get(timeout.toNanos(), TimeUnit.NANOSECONDS)
     } catch (e: CompletionException) {
         throw (e.cause as? RuntimeException ?: e)
     } catch (e: TimeoutException) {
-        throw OutcomeUnknownException("bet:$betId:place")
+        throw OutcomeUnknownException(idempotencyKey)
     } catch (e: ExecutionException) {
         throw (e.cause as? RuntimeException ?: e)
     } catch (e: InterruptedException) {

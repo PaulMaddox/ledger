@@ -33,7 +33,8 @@ Follow revenue and exposure, settle fixtures, and watch transactions arrive.
 ### Customer
 
 Manage a wallet, place bets and cash out. Race five devices for the same balance,
-then inspect the receipts.
+then inspect the receipts. Published fixture results close new cash-outs;
+retries preserve the original money movement.
 
 ![Customer wallet, five-device race, betting markets and transaction history](docs/screenshots/customer.png)
 
