@@ -35,15 +35,23 @@ internal class DemoMaintenance(
         }, 1, 1, TimeUnit.SECONDS)
     }
 
+    private var pendingDeadline: Instant? = null
+
     @Synchronized internal fun checkNow() {
         if (!clock.instant().isBefore(deadline)) {
             reset()
-            // Advance only after a successful reset; failure leaves the demo stopped and due.
-            val next = nextReset(clock.instant())
-            saveDeadline(next)
-            deadline = next
+            // A completed purge must not repeat merely because persistence fails.
+            deadline = nextReset(clock.instant())
+            pendingDeadline = deadline
         }
-        checkCapacity()
+        try {
+            pendingDeadline?.let { next ->
+                saveDeadline(next)
+                pendingDeadline = null
+            }
+        } finally {
+            checkCapacity()
+        }
     }
 
     private fun saveDeadline(value: Instant) {
