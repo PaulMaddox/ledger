@@ -520,6 +520,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="web-console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
+  <p class="prose">The <a href="https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/">live web console</a> brings customer, operator, regulator, simulator, administrator and Chaos Monkey views together on one ledger.</p>
   <p class="prose">The five-device test captures its customer before loading the balance, aborts if selection changes before betting, and never displays late results in another customer's view.</p>
   <p class="prose">Startup failures close acquired services and release the ledger's writer lock before reporting the original error.</p>
   <p class="prose">Automated customer IDs use locale-independent ASCII digits so browser tiles, events and ledger accounts refer to the same customers.</p>
@@ -600,8 +601,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     </tbody>
   </table></div>
   <div class="prose" style="display:grid;gap:8px">
-    <h3>Every test, with its source</h3>
-    <p>Select a test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
+    <h3>Ledger tests, with their source</h3>
+    <p>Select a ledger test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
   </div>
   <div class="tests" id="testList"></div>
 </section>
@@ -1468,7 +1469,6 @@ const TEST_GROUPS = {
   "ConcurrencyTest.kt": "Races, idempotent retries, optimistic locking and a heavy stress run.",
   "IntegrityTest.kt": "Tampering, rollback, untrusted keys, torn writes and corruption.",
   "MerkleTest.kt": "Exhaustive proof checks for every tree size up to 70.",
-  "WebAppTest.kt": "The web console API, embedded guide assets, restart and payout safety, browser request checks, simulator events, regulator snapshots, and placement/settlement races.",
 };
 const testSlug = name => "t-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 function codeLines(src, firstLine) {
