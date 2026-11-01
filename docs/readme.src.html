@@ -520,9 +520,15 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
 <section id="web-console">
   <div class="eyebrow">Try it live</div>
   <h2>The web console</h2>
-  <p class="prose">Live Chaos Monkey experiments serialize with a virtual-thread-safe lock: on JDK 21, waiting requests must release their HTTP carrier threads so nested race workers can run. CI exercises the concurrent-request regression with two carriers.</p>
-  <p class="prose">Run <code>./gradlew web</code> (Windows: <code>.\gradlew.bat web</code>) and open <code>http://localhost:8080</code>. The first tab, <b>About</b>, embeds this interactive guide; the other tabs provide customer wallets, operator dashboards, browser-verified proofs, simulation, Administrator performance graphs and Chaos Monkey experiments on the main demo store. Transaction races run live alongside the simulator and catch the read model up before replying, so committed experiment customers are immediately searchable; balances and integrity evidence still come from the ledger. File and signer faults drain services first, and detected corruption fail-stops the ledger until reset. See <a href="https://github.com/PaulMaddox/ledger/blob/main/deploy/README.md">the single-instance AKS deployment guide</a> for public HTTPS: deploy the Bicep-generated template through the Azure portal, create the namespace and configure the GitHub environment once. Bicep provisions the registry, managed identity, OIDC trust and scoped permissions without changing the existing cluster; GitHub Actions deploys the exact main-branch commit after CI succeeds, with one writer and persistent storage. CI runs the tests and demo audit; deployment builds and packages without repeating them. The container includes the generated About guide and its screenshots. This unauthenticated demo leaves damaged storage for inspection until you use Administrator reset to start again, an explicit demo-only exception to the production ledger's append-only rule.</p>
-  <p class="prose">API POST form bodies are limited to <b>16 KiB (16,384 bytes)</b> of encoded data, before UTF-8 or form decoding. Larger bodies return HTTP <b>413</b> (<code>payload_too_large</code>) without performing the operation. Declared oversized lengths are rejected before reading; chunked uploads use a bounded read of at most 16,385 bytes, including one byte to detect overflow.</p>
+  <p class="prose">A <a href="https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/">web console</a> is available with multiple personas, all working against the same live ledger:</p>
+  <ul class="prose">
+    <li><b>Simulator.</b> Run automated customers making bets, deposits, withdrawals and cash-outs, and watch their activity live.</li>
+    <li><b>Customer.</b> Manage a wallet, place bets, cash out, race five devices for the same balance, and verify transactions in the browser.</li>
+    <li><b>Operator.</b> Track revenue, exposure and throughput, settle fixtures, and follow the live transaction feed.</li>
+    <li><b>Regulator.</b> Audit ledger history independently and verify signed checkpoints, inclusion proofs and consistency proofs.</li>
+    <li><b>Administrator.</b> Monitor server performance and permanently reset demo storage.</li>
+    <li><b>Chaos Monkey.</b> Run transaction races, simulate outages, and tamper with demo history to see how verification and recovery respond.</li>
+  </ul>
   <figure class="shot wide">
     <a href="screenshots/simulator.png"><img src="screenshots/simulator.png" alt="Simulator view: controls, live counters, and a wall of tiles, one per automated customer, each streaming its latest actions" loading="lazy"></a>
     <figcaption><b>Simulator.</b> Automated customers and their live activity.</figcaption>
@@ -578,8 +584,8 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     </tbody>
   </table></div>
   <div class="prose" style="display:grid;gap:8px">
-    <h3>Every test, with its source</h3>
-    <p>Select a test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
+    <h3>Ledger tests, with their source</h3>
+    <p>Select a ledger test to read exactly what it does; line numbers match the repository. Test names in the table above jump straight to the matching test.</p>
   </div>
   <div class="tests" id="testList"></div>
 </section>
@@ -1446,7 +1452,6 @@ const TEST_GROUPS = {
   "ConcurrencyTest.kt": "Races, idempotent retries, optimistic locking and a heavy stress run.",
   "IntegrityTest.kt": "Tampering, rollback, untrusted keys, torn writes and corruption.",
   "MerkleTest.kt": "Exhaustive proof checks for every tree size up to 70.",
-  "WebAppTest.kt": "The web console API, embedded guide assets, restart and payout safety, browser request checks, simulator events, regulator snapshots, and placement/settlement races.",
 };
 const testSlug = name => "t-" + name.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
 function codeLines(src, firstLine) {
