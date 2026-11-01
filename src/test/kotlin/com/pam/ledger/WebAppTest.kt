@@ -824,6 +824,66 @@ class WebAppTest {
     }
 
     @Test
+    fun `form bodies accept 16 KiB and reject larger encoded bodies without mutations`() = withApp { app ->
+        val limit = 16 * 1024
+        for (chunked in listOf(false, true)) {
+            val bodies = listOf(limit - 1, limit, limit + 1, limit * 4).map { size ->
+                ("padding=" + "x".repeat(size - "padding=".length)).toByteArray(Charsets.UTF_8)
+            } + listOf(
+                "padding=" + "€".repeat(limit / 3),
+                "padding=" + "%61".repeat(limit / 3),
+            ).map { it.toByteArray(Charsets.UTF_8) }
+            for (body in bodies) {
+                val before = call(app, "GET", "fixtures").second
+                val publisher = if (chunked) HttpRequest.BodyPublishers.ofInputStream { body.inputStream() }
+                    else HttpRequest.BodyPublishers.ofByteArray(body)
+                val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/api/fixtures"))
+                    .header("Origin", "http://127.0.0.1:${app.port}")
+                    .header("Content-Type", "application/x-www-form-urlencoded")
+                    .POST(publisher).timeout(Duration.ofSeconds(5)).build()
+                val response = http.send(request, HttpResponse.BodyHandlers.ofString())
+                assertEquals(if (body.size <= limit) 200 else 413, response.statusCode(), response.body())
+                if (body.size > limit) {
+                    assertTrue(response.body().contains("\"error\":\"payload_too_large\""), response.body())
+                    assertEquals(before, call(app, "GET", "fixtures").second)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `oversized form uploads are rejected before the client finishes streaming`() {
+        LedgerWebApp.start(WebOptions(port = 0, host = "0.0.0.0", dataDir = tempDir(),
+            allowedHosts = setOf("ledger.example"))).use { app ->
+            val before = call(app, "GET", "players/alice").second
+            for (chunked in listOf(false, true)) {
+                Socket("127.0.0.1", app.port).use { socket ->
+                    socket.soTimeout = 5_000
+                    val framing = if (chunked) "Transfer-Encoding: chunked" else "Content-Length: ${Long.MAX_VALUE}"
+                    val request = buildString {
+                        append("POST /api/players/alice/deposit?amount=1&ref=oversized HTTP/1.1\r\n")
+                        append("Host: ledger.example:${app.port}\r\nOrigin: http://ledger.example:${app.port}\r\n")
+                        append("Content-Type: application/x-www-form-urlencoded\r\n$framing\r\n\r\n")
+                        // No terminating chunk or full fixed-length body: rejection must not wait for EOF.
+                        if (chunked) {
+                            val body = "padding=" + "x".repeat(16 * 1024 + 1 - "padding=".length)
+                            append("${body.length.toString(16)}\r\n$body\r\n")
+                        }
+                    }
+                    socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
+                    val reader = socket.getInputStream().bufferedReader(Charsets.UTF_8)
+                    assertTrue(reader.readLine().startsWith("HTTP/1.1 413"))
+                    val headers = generateSequence { reader.readLine() }.takeWhile { it.isNotEmpty() }.toList()
+                    val length = headers.single { it.startsWith("Content-Length:", true) }.substringAfter(':').trim().toInt()
+                    val body = CharArray(length) { reader.read().also { assertTrue(it >= 0) }.toChar() }.concatToString()
+                    assertTrue(body.contains("\"error\":\"payload_too_large\""), body)
+                }
+                assertEquals(before, call(app, "GET", "players/alice").second)
+            }
+        }
+    }
+
+    @Test
     fun `cross-origin mutations are rejected and encoded path segments decode once`() = withApp { app ->
         val before = call(app, "GET", "players/alice").second
         val blocked = call(
@@ -1592,6 +1652,176 @@ class WebAppTest {
                 model.catchUp()
                 assertEquals(listOf("open-0", "open-2", "open-3"), model.openBets().map { it.betId })
             }
+        }
+    }
+
+    /** Compare one aggregate snapshot against its immutable committed prefix, not another read-model index. */
+    private fun assertOpenBetTotals(ledger: Ledger, model: ReadModel): ReadModel.Totals {
+        model.catchUp()
+        val totals = model.totals()
+        val open = HashMap<String, Pair<BigInteger, BigInteger>>()
+        for (seq in 0 until totals.entries) {
+            val entry = ledger.entry(seq).entry
+            when (entry.kind) {
+                "BET_PLACED" -> {
+                    val parts = entry.metadata["selection"]?.split("|")
+                    if (parts != null && parts.size == 3) {
+                        val stake = BigInteger.valueOf(entry.postings.first { it.amount > 0 }.amount)
+                        val potential = stake.multiply(BigInteger(parts[2])).divide(BigInteger.valueOf(100))
+                        open[entry.metadata.getValue("betId")] = stake to potential.subtract(stake)
+                    }
+                }
+                "BET_WON", "BET_LOST", "BET_VOIDED", "BET_CASHED_OUT" -> open.remove(entry.metadata.getValue("betId"))
+            }
+        }
+        assertEquals(open.size, totals.openBets)
+        assertEquals(open.values.fold(BigInteger.ZERO) { sum, bet -> sum.add(bet.first) }, totals.openStakes)
+        assertEquals(open.values.fold(BigInteger.ZERO) { sum, bet -> sum.add(bet.second) }, totals.exposure)
+        return totals
+    }
+
+    /** Every outcome removes the original liability once; retries and replay cannot drift the totals. */
+    @Test
+    fun `open bet aggregates follow all outcomes and rebuild after recovery`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val expected = Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                assertEquals(0, assertOpenBetTotals(ledger, model).openBets)
+                wallet.deposit("p", 10_000, "EUR", "aggregate-fund")
+                repeat(6) { i -> wallet.placeBet("p", "aggregate-$i", 101, "EUR", "F${i % 2}|HOME|205") }
+                // Standalone wallet selections are not console fixtures and have never appeared in its open-bet totals.
+                wallet.placeBet("p", "standalone", 100, "EUR", "HOME")
+                val placed = assertOpenBetTotals(ledger, model)
+                assertEquals(6, placed.openBets)
+                assertEquals(BigInteger.valueOf(606), placed.openStakes)
+                assertEquals(BigInteger.valueOf(636), placed.exposure)
+
+                assertTrue(wallet.placeBet("p", "aggregate-0", 101, "EUR", "F0|HOME|205").replayed)
+                assertEquals(placed, assertOpenBetTotals(ledger, model))
+                wallet.voidBet("standalone")
+                assertEquals(6, assertOpenBetTotals(ledger, model).openBets)
+                wallet.settleWin("aggregate-0", 207)
+                assertEquals(5, assertOpenBetTotals(ledger, model).openBets)
+                assertTrue(wallet.settleWin("aggregate-0", 207).replayed)
+                assertFailsWith<IdempotencyConflictException> { wallet.voidBet("aggregate-0") }
+                assertEquals(5, assertOpenBetTotals(ledger, model).openBets)
+                wallet.settleLoss("aggregate-1")
+                assertEquals(4, assertOpenBetTotals(ledger, model).openBets)
+                wallet.voidBet("aggregate-2")
+                assertEquals(3, assertOpenBetTotals(ledger, model).openBets)
+                wallet.cashOut("aggregate-3", 85)
+                assertEquals(2, assertOpenBetTotals(ledger, model).openBets)
+                assertEquals(6, placed.openBets, "previous snapshots must remain immutable")
+                assertOpenBetTotals(ledger, model)
+            }
+        }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                assertEquals(expected, assertOpenBetTotals(ledger, model))
+                val wallet = SportsbookWallet(ledger)
+                wallet.voidBet("aggregate-4")
+                assertEquals(1, assertOpenBetTotals(ledger, model).openBets)
+                wallet.settleLoss("aggregate-5")
+                val empty = assertOpenBetTotals(ledger, model)
+                assertEquals(0, empty.openBets)
+                assertEquals(BigInteger.ZERO, empty.openStakes)
+                assertEquals(BigInteger.ZERO, empty.exposure)
+            }
+        }
+        assertTrue(LedgerVerifier.verify(dir, TestSupport.LEDGER_ID, listOf(signer.publicKey)).ok)
+    }
+
+    /** Individual postings and payouts fit Long even when their dashboard sums do not. */
+    @Test
+    fun `open bet aggregates remain exact beyond Long totals`() {
+        val amount = 4_000_000_000_000_000_000L
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                repeat(3) { i ->
+                    // Separate clearing accounts keep every individual ledger balance representable.
+                    ledger.append(TransactionRequest("aggregate-fund-$i", "DEPOSIT", listOf(
+                        Posting(AccountId("house:clearing-$i:EUR"), "EUR", -amount),
+                        Posting(SportsbookWallet.Accounts.cash("p$i", "EUR"), "EUR", amount),
+                    ), mapOf("playerId" to "p$i")))
+                    wallet.placeBet("p$i", "large-aggregate-$i", amount, "EUR", "F1|HOME|200")
+                }
+                val large = assertOpenBetTotals(ledger, model)
+                val sum = BigInteger.valueOf(amount).multiply(BigInteger.valueOf(3))
+                assertEquals(sum, large.openStakes)
+                assertEquals(sum, large.exposure)
+                assertTrue(sum > BigInteger.valueOf(Long.MAX_VALUE))
+                repeat(3) { i ->
+                    wallet.voidBet("large-aggregate-$i")
+                    assertOpenBetTotals(ledger, model)
+                }
+                // The generic wallet accepts selection metadata without the Book's payout-range guard.
+                wallet.placeBet("p0", "generic-large-payout", amount, "EUR", "F1|HOME|300")
+                assertEquals(BigInteger.valueOf(amount).multiply(BigInteger.valueOf(2)),
+                    assertOpenBetTotals(ledger, model).exposure)
+                wallet.voidBet("generic-large-payout")
+                assertOpenBetTotals(ledger, model)
+                assertEquals(BigInteger.ZERO, model.totals().exposure)
+            }
+        }
+    }
+
+    /** Concurrent catch-up and sampling must return the count and exact sums for the same committed prefix. */
+    @Test
+    fun `open bet aggregate snapshots stay consistent during settlement races`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 100_000, "EUR", "aggregate-race-fund")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                val fixture = book.addFixture(Random(0))
+                repeat(80) { i -> book.placeBet("p", fixture.id, "HOME", 101, "aggregate-race-$i") }
+                race(4) { t ->
+                    when (t) {
+                        0 -> book.settle(fixture.id, "HOME")
+                        1 -> repeat(80) { i ->
+                            try {
+                                wallet.cashOut("aggregate-race-$i", 85)
+                            } catch (e: IdempotencyConflictException) {
+                                // Settlement won this bet's shared idempotency key.
+                            }
+                        }
+                        else -> repeat(40) { assertOpenBetTotals(ledger, model) }
+                    }
+                }.forEach { it.getOrThrow() }
+                val empty = assertOpenBetTotals(ledger, model)
+                assertEquals(0, empty.openBets)
+                assertEquals(BigInteger.ZERO, empty.openStakes)
+                assertEquals(BigInteger.ZERO, empty.exposure)
+            }
+        }
+    }
+
+    /** Polling exposes the same exact aggregate fields before and after a bet closes. */
+    @Test
+    fun `operator response uses exact open bet aggregates`() {
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir())).use { app ->
+            val fixtures = call(app, "GET", "fixtures").second
+            val odds = Regex("\"HOME\":(\\d+)").find(fixtures)!!.groupValues[1].toLong()
+            val placed = call(app, "POST", "players/alice/bets", mapOf(
+                "fixture" to "F6", "selection" to "HOME", "stake" to 101, "betId" to "operator-aggregate",
+            ))
+            assertEquals(200, placed.first, placed.second)
+            // The fixtures route lists newest first; the player query catches the model up.
+            call(app, "GET", "players/alice")
+            val before = call(app, "GET", "operator")
+            assertEquals(200, before.first, before.second)
+            assertTrue(before.second.contains("\"openBets\":1"), before.second)
+            assertTrue(before.second.contains("\"openStakes\":\"101\""), before.second)
+            assertTrue(before.second.contains("\"exposure\":\"${101 * odds / 100 - 101}\""), before.second)
+            assertEquals(200, call(app, "POST", "bets/operator-aggregate/cashout").first)
+            call(app, "GET", "players/alice")
+            val after = call(app, "GET", "operator").second
+            assertTrue(after.contains("\"openBets\":0"), after)
+            assertTrue(after.contains("\"openStakes\":\"0\""), after)
+            assertTrue(after.contains("\"exposure\":\"0\""), after)
         }
     }
 
