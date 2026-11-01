@@ -84,6 +84,9 @@ After **CI** succeeds for a push to `main`, **Deploy web app to AKS** runs
 automatically. You can also open **Actions > Deploy web app to AKS > Run workflow**
 on `main`; successful CI is required for that exact commit.
 
+CI runs the full Kotlin suite once, including race and stress tests, plus audits
+and guide checks. Deployment packages the tested commit without repeating them.
+
 The workflow builds and deploys the CI-tested commit, waits for rollout and
 working HTTPS, then reports the URL:
 
@@ -101,6 +104,13 @@ later application deployments use the same resources.
   switch to rolling updates. Updates briefly interrupt service.
 - The **32 GiB persistent disk** retains demo data and certificate state across
   deployments. Monitor capacity; deleting the namespace or PVC can delete the disk.
+- Ledger health probes require a successful loopback HTTP response within **three
+  seconds**, not just TCP acceptance. Startup and liveness use `/health/live`,
+  which runs on the normal HTTP executor but bypasses API admission and service
+  locks. Readiness uses `/`, so saturated request slots remove the pod from service
+  without restarting it. Six liveness failures, ten seconds apart, restart the
+  container with its existing disk. Startup allows ten minutes for replay; the
+  proxy has independent TCP listener checks. Daily retention still applies.
 - Keep data and keys in-country. Do not export plaintext data or keys, or configure
   out-of-country backups.
 - Keep `--public-origin` set to the exact public HTTPS origin. Preserve Host,
@@ -122,6 +132,16 @@ kubectl logs deployment/ledger-web -n ledger-web -c ledger
 Check permissions, image pulls, DNS and certificate logs. A failed HTTPS check
 means deployment failed. An image rollback must never roll back or delete history;
 check data compatibility first.
+
+If TCP connects but HTTP stalls, capture a JVM virtual-thread dump before restarting.
+Bet registration uses a parking-safe `ReentrantLock`: waiting for ledger queue
+admission inside `ConcurrentHashMap.compute` would pin JDK 21 carriers and starve
+both simulator and HTTP work.
+
+For Azure CLI diagnostics across directories, select the cluster's tenant with
+`kubelogin convert-kubeconfig -l azurecli --tenant-id <cluster-tenant-id>`.
+Check existing roles before requesting new access; never enable local admin accounts
+as an authentication workaround.
 
 ## Change the deployment
 

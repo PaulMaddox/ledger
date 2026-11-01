@@ -61,10 +61,12 @@ class WebAppTest {
         params: Map<String, Any> = emptyMap(),
         headers: Map<String, String> = emptyMap(),
         withOrigin: Boolean = true,
+        timeout: Duration = Duration.ofSeconds(30),
     ): Pair<Int, String> {
         val form = params.entries.joinToString("&") { (k, v) -> "$k=" + URLEncoder.encode(v.toString(), Charsets.UTF_8) }
         val uri = URI.create("http://127.0.0.1:${app.port}/api/$path" + if (method == "GET" && form.isNotEmpty()) "?$form" else "")
         val builder = HttpRequest.newBuilder(uri).method(method, if (method == "POST") HttpRequest.BodyPublishers.ofString(form) else HttpRequest.BodyPublishers.noBody())
+            .timeout(timeout)
             .header("Content-Type", "application/x-www-form-urlencoded")
         if (method == "POST" && withOrigin && headers.keys.none { it.equals("Origin", true) }) {
             builder.header("Origin", "http://127.0.0.1:${app.port}")
@@ -295,6 +297,16 @@ class WebAppTest {
             do { status = call(app, "GET", "overview").first }
             while (status == 200 && System.nanoTime() < deadline)
             assertEquals(503, status)
+            val readiness = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/"))
+                .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(503, readiness.statusCode(), readiness.body())
+            race(8) {
+                val response = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/health/live"))
+                    .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(200, response.statusCode(), response.body())
+                assertEquals("{\"status\":\"alive\"}", response.body())
+            }.forEach { it.getOrThrow() }
+            assertEquals(503, call(app, "GET", "overview").first, "liveness must not release API admission slots")
         } finally {
             sockets.forEach { it.close() }
         }
@@ -304,6 +316,33 @@ class WebAppTest {
         while (result.first == 503 && System.nanoTime() < deadline)
         assertEquals(200, result.first, result.second)
         assertTrue(result.second.contains("\"entries\":12"))
+    }
+
+    @Test
+    fun `liveness preserves origin checks and remains available when ledger services stop`() = withApp { app ->
+        val host = "127.0.0.1:${app.port}"
+        val alive = rawRequest(app, host, path = "/health/live")
+        assertTrue(alive.startsWith("HTTP/1.1 200"), alive)
+        assertTrue(alive.contains("{\"status\":\"alive\"}"), alive)
+        for (response in listOf(
+            rawRequest(app, "attacker.example:${app.port}", path = "/health/live"),
+            rawRequest(app, host, origin = "http://attacker.example", path = "/health/live"),
+            rawRequest(app, host, path = "/health/live", fetchSite = "cross-site"),
+        )) {
+            assertTrue(response.startsWith("HTTP/1.1 403"), response)
+        }
+        for (response in listOf(
+            rawRequest(app, host, path = "/health/live/"),
+            rawRequest(app, host, path = "/health/live-extra"),
+            rawRequest(app, host, method = "POST", origin = "http://$host", path = "/health/live"),
+        )) {
+            assertTrue(response.startsWith("HTTP/1.1 404"), response)
+        }
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+        app.checkDemoCapacity(maxBytes = 1)
+        assertTrue(call(app, "GET", "overview").second.contains("\"available\":false"))
+        val stopped = rawRequest(app, host, path = "/health/live")
+        assertTrue(stopped.startsWith("HTTP/1.1 200"), stopped)
     }
 
     @Test
@@ -719,6 +758,31 @@ class WebAppTest {
     }
 
     @Test
+    fun `busy simulator and automatic fixture rounds keep HTTP responsive`() = withApp { app ->
+        assertEquals(200, call(app, "POST", "simulator", mapOf(
+            "customers" to 500, "opsPerMinute" to 600, "autoFixtures" to true, "action" to "start")).first)
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(35)
+        do {
+            val page = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/"))
+                .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.discarding())
+            assertEquals(200, page.statusCode(), "static HTTP must remain responsive under simulator load")
+            val overview = call(app, "GET", "overview", timeout = Duration.ofSeconds(5))
+            assertEquals(200, overview.first, overview.second)
+            assertTrue(overview.second.contains("\"available\":true"), overview.second)
+            assertEquals(200, call(app, "GET", "simulator/events", timeout = Duration.ofSeconds(5)).first)
+            Thread.sleep(200)
+        } while (System.nanoTime() < deadline)
+        val stopped = call(app, "POST", "simulator", mapOf("action" to "stop"), timeout = Duration.ofSeconds(5))
+        assertEquals(200, stopped.first, stopped.second)
+        assertTrue(Regex("\"succeeded\":(\\d+)").find(stopped.second)!!.groupValues[1].toLong() > 500, stopped.second)
+        assertTrue(Regex("\"fixtureRounds\":(\\d+)").find(stopped.second)!!.groupValues[1].toLong() > 0,
+            "the load test must include real persisted fixture settlement: ${stopped.second}")
+        val audit = call(app, "POST", "regulator/audit")
+        assertEquals(200, audit.first, audit.second)
+        assertTrue(audit.second.contains("\"ok\":true"), audit.second)
+    }
+
+    @Test
     fun `simulator starts, pauses, resumes and stops, and its customers appear in the ledger`() = withApp { app ->
         val start = call(app, "POST", "simulator", mapOf("customers" to 50, "opsPerMinute" to 600, "autoFixtures" to "true", "action" to "start"))
         assertTrue(start.second.contains("\"state\":\"RUNNING\""), start.second)
@@ -1012,6 +1076,76 @@ class WebAppTest {
     }
 
     @Test
+    fun `backpressured bet submissions leave virtual carriers available`() {
+        val delegate = Ed25519TreeHeadSigner.generate()
+        val blockSigning = AtomicBoolean(false)
+        val signing = CountDownLatch(1)
+        val release = CountDownLatch(1)
+        val signer = object : TreeHeadSigner by delegate {
+            override fun sign(message: ByteArray): ByteArray {
+                if (blockSigning.get()) {
+                    signing.countDown()
+                    check(release.await(20, TimeUnit.SECONDS)) { "test did not release signing" }
+                }
+                return delegate.sign(message)
+            }
+        }
+        Ledger.open(config(tempDir(), signer).copy(queueCapacity = 1, submitTimeout = Duration.ofSeconds(10))).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 10_000, "EUR", "backpressure-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                val fixture = book.addFixture(Random(1))
+                blockSigning.set(true)
+                val checkpoint = CompletableFuture.supplyAsync { ledger.checkpoint() }
+                var placements = emptyList<Pair<Thread, CompletableFuture<Receipt>>>()
+                var queued: CompletableFuture<Receipt>? = null
+                var probe: Thread? = null
+                try {
+                    assertTrue(signing.await(5, TimeUnit.SECONDS), "writer must be held before filling its queue")
+                    queued = ledger.submit(TransactionRequest(
+                        idempotencyKey = "deposit:backpressure-queued", kind = "DEPOSIT",
+                        postings = listOf(
+                            Posting(SportsbookWallet.Accounts.pspClearing("EUR"), "EUR", -1),
+                            Posting(SportsbookWallet.Accounts.cash("p", "EUR"), "EUR", 1),
+                        ),
+                        metadata = mapOf("playerId" to "p", "paymentRef" to "backpressure-queued"),
+                    ))
+                    placements = race(2) { i ->
+                        val receipt = CompletableFuture<Receipt>()
+                        val thread = Thread.ofVirtual().start {
+                            runCatching { book.placeBet("p", fixture.id, "HOME", 100, "backpressure-$i") }
+                                .fold({ receipt.complete(it) }, { receipt.completeExceptionally(it) })
+                        }
+                        thread to receipt
+                    }.map { it.getOrThrow() }
+                    val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                    fun waiting() = placements.all { (thread, _) ->
+                        thread.state in setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING)
+                    }
+                    while (!waiting() && System.nanoTime() < deadline) Thread.sleep(5)
+                    assertTrue(waiting(), "both placement threads must be blocked by back-pressure")
+                    val responsive = CompletableFuture<Unit>()
+                    probe = Thread.ofVirtual().start { responsive.complete(Unit) }
+                    responsive.get(2, TimeUnit.SECONDS)
+                    assertTrue(placements.none { it.second.isDone }, "probe must run before the ledger is released")
+                } finally {
+                    release.countDown()
+                    placements.forEach { it.first.join(15_000) }
+                    probe?.join(5_000)
+                }
+                checkpoint.get(5, TimeUnit.SECONDS)
+                queued!!.get(5, TimeUnit.SECONDS)
+                placements.forEach { it.second.get(5, TimeUnit.SECONDS) }
+                assertEquals(2, book.settle(fixture.id, "HOME").won)
+                model.catchUp()
+                assertTrue(model.openBetsOn(fixture.id).isEmpty())
+                assertEquals(2, (0 until ledger.head().size).count { ledger.entry(it).entry.kind == "BET_PLACED" })
+            }
+        }
+    }
+
+    @Test
     fun `settlement waits for a placement after its request times out`() {
         val directory = tempDir()
         val delayed = AtomicBoolean(false)
@@ -1024,9 +1158,10 @@ class WebAppTest {
                 val fixture = book.addFixture(Random(3))
                 wallet.deposit("p", 10_000, "EUR", "funds")
                 delayed.set(true)
-                assertFailsWith<OutcomeUnknownException> {
-                    book.placeBet("p", fixture.id, "HOME", 100, "unknown-slip")
+                race(8) { book.placeBet("p", fixture.id, "HOME", 100, "unknown-slip") }.forEach {
+                    assertTrue(it.exceptionOrNull() is OutcomeUnknownException, it.toString())
                 }
+                assertEquals(1, fixture.pendingPlacements.size, "pending retries must share one registered future")
 
                 val settlement = CompletableFuture.supplyAsync { book.settle(fixture.id, "HOME") }
                 val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(2)
@@ -1036,6 +1171,9 @@ class WebAppTest {
                 delayed.set(false)
                 while (true) (queuedCompletions.poll() ?: break).run()
                 assertEquals(1, settlement.get(5, TimeUnit.SECONDS).won)
+                assertFailsWith<IdempotencyConflictException> {
+                    book.placeBet("p", fixture.id, "HOME", 200, "unknown-slip")
+                }
                 readModel.catchUp()
                 assertTrue(readModel.openBetsOn(fixture.id).isEmpty())
             }
