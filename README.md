@@ -119,6 +119,8 @@ the interactive ledger guide and its screenshots.
   transactions without interrupting simulator traffic. A live experiment catches the
   dashboard read model up before replying, so its committed customer is immediately
   searchable; balances and integrity evidence still come from the ledger.
+  Live races remain serialized with a virtual-thread-safe lock, so concurrent
+  requests cannot pin all JDK 21 HTTP carriers while waiting for their workers.
   File and signer faults drain services
   before running; the simulator resumes with a fresh run if the store recovers. Corruption
   correctly fail-stops the ledger, so services remain stopped until reset rather than
@@ -169,11 +171,12 @@ cluster in resource group `ledger`, Sweden Central. One-time setup uses a
 environment; there are no manual Azure CLI setup commands or app registrations.
 Bicep provisions the registry, managed identity, GitHub OIDC trust and scoped
 permissions without changing the cluster or storing an Azure password.
-After setup, pushes to `main` build and
-test a container, deploy it with a persistent Azure disk, and publish an Azure DNS
-address with automatic HTTPS. The workflow reports the public URL.
-The container includes the generated About guide and its screenshots, so the
-same About-page regression runs during the container build.
+After setup, successful CI on `main` triggers a container build and deployment
+with a persistent Azure disk and automatic HTTPS. The deployment checks out and
+tags the exact CI-tested commit; manual deployments require successful CI for
+that commit too. Tests and the demo audit run in CI, not again in the deployment
+or Docker build. The container still includes the generated About guide and its
+screenshots. The workflow reports the public URL.
 
 This is still an **unauthenticated synthetic-money demo**, not a production wallet.
 It runs exactly one ledger instance; updates briefly interrupt service. Behind a TLS
@@ -197,6 +200,8 @@ also stop their background workers.
 | Run one test class | `./gradlew test --tests "com.pam.ledger.MultiDeviceWalletTest"` | `.\gradlew.bat test --tests "com.pam.ledger.MultiDeviceWalletTest"` |
 
 Test reports are written to `build/reports/tests/test/index.html`.
+The test JVM uses two virtual-thread carriers so concurrent HTTP regressions also
+exercise the constrained scheduling found on small CI and AKS hosts.
 
 ### What the demo does
 

@@ -106,16 +106,21 @@ access to the internet.
 ## Automatic deployments
 
 Merge the deployment change, then open **Actions > Deploy web app to AKS**.
-It runs on every push to main, or manually with **Run workflow** on main. The image
-build runs all Kotlin tests twice and the CLI audit before publishing. The workflow
-also checks the guide and console JavaScript, waits for rollout and verified HTTPS,
-then prints the public URL in its summary:
+It runs after **CI** succeeds for a push to main, or manually with **Run workflow**
+on main. Both paths require successful main-branch CI for the exact deployment
+commit. The workflow checks out that SHA and uses it for both image tags, rather
+than substituting whichever main commit is newest when CI completes.
+
+CI runs the Kotlin suite twice, the CLI audit, guide checks and console JavaScript
+tests. The deployment does not repeat them: the Docker build runs only
+`./gradlew installDist --no-daemon`, then the workflow pushes the images, waits
+for rollout and verified HTTPS, and prints the public URL in its summary:
 
 `https://<AKS_DNS_LABEL>.swedencentral.cloudapp.azure.com/`
 
 The Docker build includes the generated About guide from `src/main/resources`
 and the PNGs from `docs/screenshots`, which Gradle packages into the application.
-The About-page HTTP regression must pass in the container as well as locally.
+The About-page HTTP regression runs in CI with those same packaged resources.
 
 The regulatory stress test retains every balance observation in lossless
 run-length-compressed sequences per screen, including the count and order of
