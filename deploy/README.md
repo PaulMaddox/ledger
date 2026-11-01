@@ -105,9 +105,12 @@ later application deployments use the same resources.
 - The **32 GiB persistent disk** retains demo data and certificate state across
   deployments. Monitor capacity; deleting the namespace or PVC can delete the disk.
 - Ledger health probes require a successful loopback HTTP response within **three
-  seconds**, not just TCP acceptance. Six liveness failures, ten seconds apart,
-  restart the container with its existing disk. Startup allows ten minutes for
-  replay; the proxy has independent TCP listener checks. Daily retention still applies.
+  seconds**, not just TCP acceptance. Startup and liveness use `/health/live`,
+  which runs on the normal HTTP executor but bypasses API admission and service
+  locks. Readiness uses `/`, so saturated request slots remove the pod from service
+  without restarting it. Six liveness failures, ten seconds apart, restart the
+  container with its existing disk. Startup allows ten minutes for replay; the
+  proxy has independent TCP listener checks. Daily retention still applies.
 - Keep data and keys in-country. Do not export plaintext data or keys, or configure
   out-of-country backups.
 - Keep `--public-origin` set to the exact public HTTPS origin. Preserve Host,

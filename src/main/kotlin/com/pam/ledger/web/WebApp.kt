@@ -372,7 +372,9 @@ class LedgerWebApp private constructor(
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
 
     private fun handle(ex: HttpExchange) {
-        if (!requests.tryAcquire()) {
+        // A busy API is not a dead HTTP executor; liveness bypasses admission, not the executor.
+        val liveness = ex.requestMethod == "GET" && ex.requestURI.rawPath == "/health/live"
+        if (!liveness && !requests.tryAcquire()) {
             try { respond(ex, 503, mapOf("error" to "overloaded", "message" to "too many demo requests")) }
             finally { ex.close() }
             return
@@ -381,6 +383,7 @@ class LedgerWebApp private constructor(
         try {
             val uri = ex.requestURI
             validateRequestOrigin(ex)
+            if (liveness) return respond(ex, 200, mapOf("status" to "alive"))
             if (!uri.rawPath.startsWith("/api/")) return serveStatic(ex, uri.path)
             val params = HashMap<String, String>()
             parseForm(uri.rawQuery, params)
@@ -450,7 +453,7 @@ class LedgerWebApp private constructor(
         } finally {
             ex.close()
             if (experiment) experiments.unlock()
-            requests.release()
+            if (!liveness) requests.release()
         }
     }
 

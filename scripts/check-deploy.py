@@ -159,12 +159,16 @@ class DeploymentTests(unittest.TestCase):
         deployment = next(r for r in MANIFESTS if r["kind"] == "Deployment")
         containers = deployment["spec"]["template"]["spec"]["containers"]
         ledger = next(c for c in containers if c["name"] == "ledger")
-        for name in ("startupProbe", "readinessProbe", "livenessProbe"):
+        for name, path in (
+            ("startupProbe", "/health/live"),
+            ("readinessProbe", "/"),
+            ("livenessProbe", "/health/live"),
+        ):
             probe = ledger[name]
             command = probe["exec"]["command"]
             self.assertEqual(command[0], "curl")
             self.assertIn("--fail", command)
-            self.assertEqual(command[-1], "http://127.0.0.1:8080/")
+            self.assertEqual(command[-1], f"http://127.0.0.1:8080{path}")
             self.assertEqual(command[command.index("--max-time") + 1], "3")
             self.assertGreater(probe["timeoutSeconds"], 3)
             self.assertNotIn("tcpSocket", probe)
@@ -200,7 +204,7 @@ class DeploymentTests(unittest.TestCase):
             ledger = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == "ledger")
             command = list(ledger["livenessProbe"]["exec"]["command"])
             command[command.index("--output") + 1] = os.devnull
-            for path, expected in (("/", 0), ("/stalled", 28), ("/failed", 22)):
+            for path, expected in (("/health/live", 0), ("/stalled", 28), ("/failed", 22)):
                 command[-1] = f"http://127.0.0.1:{server.server_port}{path}"
                 result = subprocess.run(command, capture_output=True, text=True, timeout=5)
                 self.assertEqual(result.returncode, expected, result.stderr)

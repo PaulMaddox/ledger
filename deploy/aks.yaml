@@ -75,7 +75,7 @@ spec:
               memory: 2Gi
           startupProbe:
             exec:
-              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/"]
+              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/health/live"]
             periodSeconds: 5
             timeoutSeconds: 5
             failureThreshold: 120
@@ -86,7 +86,7 @@ spec:
             timeoutSeconds: 5
           livenessProbe:
             exec:
-              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/"]
+              command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/health/live"]
             periodSeconds: 10
             timeoutSeconds: 5
             failureThreshold: 6

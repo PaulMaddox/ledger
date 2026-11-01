@@ -297,6 +297,16 @@ class WebAppTest {
             do { status = call(app, "GET", "overview").first }
             while (status == 200 && System.nanoTime() < deadline)
             assertEquals(503, status)
+            val readiness = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/"))
+                .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
+            assertEquals(503, readiness.statusCode(), readiness.body())
+            race(8) {
+                val response = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/health/live"))
+                    .timeout(Duration.ofSeconds(2)).GET().build(), HttpResponse.BodyHandlers.ofString())
+                assertEquals(200, response.statusCode(), response.body())
+                assertEquals("{\"status\":\"alive\"}", response.body())
+            }.forEach { it.getOrThrow() }
+            assertEquals(503, call(app, "GET", "overview").first, "liveness must not release API admission slots")
         } finally {
             sockets.forEach { it.close() }
         }
@@ -306,6 +316,33 @@ class WebAppTest {
         while (result.first == 503 && System.nanoTime() < deadline)
         assertEquals(200, result.first, result.second)
         assertTrue(result.second.contains("\"entries\":12"))
+    }
+
+    @Test
+    fun `liveness preserves origin checks and remains available when ledger services stop`() = withApp { app ->
+        val host = "127.0.0.1:${app.port}"
+        val alive = rawRequest(app, host, path = "/health/live")
+        assertTrue(alive.startsWith("HTTP/1.1 200"), alive)
+        assertTrue(alive.contains("{\"status\":\"alive\"}"), alive)
+        for (response in listOf(
+            rawRequest(app, "attacker.example:${app.port}", path = "/health/live"),
+            rawRequest(app, host, origin = "http://attacker.example", path = "/health/live"),
+            rawRequest(app, host, path = "/health/live", fetchSite = "cross-site"),
+        )) {
+            assertTrue(response.startsWith("HTTP/1.1 403"), response)
+        }
+        for (response in listOf(
+            rawRequest(app, host, path = "/health/live/"),
+            rawRequest(app, host, path = "/health/live-extra"),
+            rawRequest(app, host, method = "POST", origin = "http://$host", path = "/health/live"),
+        )) {
+            assertTrue(response.startsWith("HTTP/1.1 404"), response)
+        }
+        assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
+        app.checkDemoCapacity(maxBytes = 1)
+        assertTrue(call(app, "GET", "overview").second.contains("\"available\":false"))
+        val stopped = rawRequest(app, host, path = "/health/live")
+        assertTrue(stopped.startsWith("HTTP/1.1 200"), stopped)
     }
 
     @Test
