@@ -811,7 +811,6 @@ class LedgerWebApp private constructor(
 
     private fun operator(): Map<String, Any?> {
         val totals = readModel.totals()
-        val open = readModel.openBets()
         return mapOf(
             "players" to readModel.players().size,
             "entries" to totals.entries,
@@ -820,11 +819,9 @@ class LedgerWebApp private constructor(
             "staked" to minorUnits(totals.staked),
             "returned" to minorUnits(totals.returned),
             "ggr" to minorUnits(readModel.balance(Accounts.revenue("EUR"))),
-            "openBets" to open.size,
-            "openStakes" to minorUnits(sumMinorUnits(open.map { it.stake })),
-            "exposure" to minorUnits(open.fold(BigInteger.ZERO) { total, bet ->
-                total.add(BigInteger.valueOf(bet.potentialPayout).subtract(BigInteger.valueOf(bet.stake)))
-            }),
+            "openBets" to totals.openBets,
+            "openStakes" to minorUnits(totals.openStakes),
+            "exposure" to minorUnits(totals.exposure),
             "kinds" to totals.kindCounts,
             "series" to stats.series().map {
                 mapOf("t" to it.t, "tps" to it.txPerSec, "ggr" to minorUnits(it.ggr), "exposure" to minorUnits(it.exposure), "openBets" to it.openBets)
