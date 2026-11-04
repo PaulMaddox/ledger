@@ -1777,6 +1777,59 @@ class WebAppTest {
     }
 
     @Test
+    fun `cash-out concurrent waiters receive only one non-replayed receipt before and after publication`() {
+        val delayed = AtomicBoolean(false)
+        val completions = ConcurrentLinkedQueue<Runnable>()
+        val executor = Executor { task -> if (delayed.get()) completions.add(task) else task.run() }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(completionExecutor = executor)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000, "EUR", "cashout-waiter-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                val fixture = book.addFixture(Random(0))
+                val betId = "cashout-waiters"
+                book.placeBet("p", fixture.id, "HOME", 100, betId)
+                val threads = ConcurrentLinkedQueue<Thread>()
+                val waitingStates = setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING)
+                val waves = mutableListOf<CompletableFuture<List<Result<Receipt>>>>()
+                delayed.set(true)
+                try {
+                    repeat(2) { wave ->
+                        waves += CompletableFuture.supplyAsync {
+                            race(8) { caller ->
+                                threads.add(Thread.currentThread())
+                                if (caller % 2 == 0) book.cashOut(betId) else book.cashOutDefinitive(betId)
+                            }
+                        }
+                        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+                        while ((threads.size != (wave + 1) * 8 || threads.any { it.state !in waitingStates } ||
+                                completions.isEmpty()) && System.nanoTime() < deadline) Thread.sleep(5)
+                        assertEquals((wave + 1) * 8, threads.size)
+                        assertTrue(threads.all { it.state in waitingStates }, "all callers must await the retained future: ${threads.map { it.state }}")
+                        assertTrue(waves.none { it.isDone })
+                        assertTrue(wallet.isSettled(betId))
+                        assertEquals(1, completions.size, "published retries must not submit another ledger future")
+                        if (wave == 0) book.settle(fixture.id, "AWAY")
+                    }
+                    checkNotNull(completions.poll()).run()
+                    val receipts = waves.flatMap { it.get(5, TimeUnit.SECONDS).map { outcome -> outcome.getOrThrow() } }
+                    assertEquals(1, receipts.count { !it.replayed })
+                    val entry = ledger.findByIdempotencyKey("bet:$betId:settle")!!
+                    assertTrue(receipts.all { it.seq == entry.entry.seq })
+                    assertTrue(completions.isEmpty())
+                    assertEquals(1, (0L until ledger.head().size).count { ledger.entry(it).entry.idempotencyKey == "bet:$betId:settle" })
+                    assertEquals(985, wallet.cashBalance("p", "EUR"))
+                    assertEquals(0, wallet.openBetsBalance("p", "EUR"))
+                } finally {
+                    delayed.set(false)
+                    while (true) (completions.poll() ?: break).run()
+                    waves.forEach { it.get(5, TimeUnit.SECONDS) }
+                }
+            }
+        }
+    }
+
+    @Test
     fun `cash-out racing fixture closure settles once and committed retries still replay`() {
         Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
             val wallet = SportsbookWallet(ledger)

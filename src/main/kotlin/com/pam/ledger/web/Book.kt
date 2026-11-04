@@ -218,7 +218,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
                 cashOutLock.withLock { pendingCashOuts.remove(betId, future) }
             }
             // Waiting outside the fixture lock lets a result close admission immediately.
-            future
+            if (created == null) future.thenApply { it.copy(replayed = true) } else future
         }
     }
 

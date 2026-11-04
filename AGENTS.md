@@ -207,7 +207,9 @@ JDK draining and forfeits the bounded-close guarantee.
   finishes. Register cash-out futures under the fixture read lock, wait outside
   it, and retain the original future for same-bet retries after closure until
   its outcome is definitive. Committed retries reach the ledger's shared
-  settlement-key fingerprint check. The simulator uses this same book boundary.
+  settlement-key fingerprint check. Callers sharing an admitted cash-out future
+  receive replay-marked receipts; only its original caller receives the original
+  receipt. The simulator uses this same book boundary.
 - Amounts are positive whole `Long` minor units; the book supplies fixture odds
   and cash-out prices. Validate simulator actions, settings, booleans and event
   cursors before mutation. Web deposits cannot claim internal `sim-seed-` references.
