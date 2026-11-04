@@ -92,6 +92,13 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     private val pendingCashOuts = HashMap<String, CompletableFuture<Receipt>>()
     internal var placementTimeout: Duration = Duration.ofSeconds(30)
     internal var cashOutTimeout: Duration = Duration.ofSeconds(30)
+    /** Most settlement futures kept unresolved at once while settling a fixture. */
+    @Volatile internal var settlementWindow: Int = DEFAULT_SETTLEMENT_WINDOW
+        set(value) {
+            require(value >= 1) { "settlement window must be at least 1" }
+            field = value
+        }
+    internal var settlementTimeout: Duration = Duration.ofSeconds(30)
 
     init {
         restoreFixtures()
@@ -239,25 +246,96 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         pending.forEach { runCatching { it.join() } }
         // Every placement on this fixture has now committed; make sure the read model has seen them.
         readModel.catchUp()
-        var won = 0; var lost = 0; var voided = 0; var already = 0
-        for (bet in readModel.openBetsOn(fixtureId)) {
-            try {
-                when {
-                    result == "VOID" -> { wallet.voidBet(bet.betId); voided++ }
-                    bet.selection == result -> { wallet.settleWin(bet.betId, bet.potentialPayout); won++ }
-                    else -> { wallet.settleLoss(bet.betId); lost++ }
-                }
-            } catch (e: IdempotencyConflictException) {
-                already++ // the player cashed out first: the ledger resolves the bet exactly once
-            }
-        }
+        val tally = SettlementTally()
+        settlePipelined(readModel.openBetsOn(fixtureId), result, tally)
         readModel.catchUp()
         if (readModel.openBetsOn(fixtureId).isEmpty()) {
             if (!f.settlementComplete) {
                 persistFixtures(completionOverrides = mapOf(f.id to true)) { f.settlementComplete = true }
             }
         }
-        return Settlement(fixtureId, result, won, lost, voided, already)
+        return Settlement(fixtureId, result, tally.won, tally.lost, tally.voided, tally.alreadySettled)
+    }
+
+    private enum class SettlementOutcome { WON, LOST, VOIDED }
+    private class SettlementTally { var won = 0; var lost = 0; var voided = 0; var alreadySettled = 0 }
+    private class InFlightSettlement(val betId: String, val outcome: SettlementOutcome, val future: CompletableFuture<Receipt>)
+
+    /**
+     * Submit [bets] in order through at most [settlementWindow] unresolved wallet futures, so the
+     * single writer can group-commit them instead of fsyncing once per bet. This is a client-side
+     * pipeline only: the ledger still validates and commits every settlement itself, under the same
+     * `bet:{id}:settle` key, and the fixture lock is NOT held while waiting.
+     *
+     * Outcomes are collected oldest first. The first definitive failure stops further submissions,
+     * but every future already admitted is still awaited and counted (it commits or fails regardless
+     * of this caller), and the first failure in submission order is then thrown, so the fixture is
+     * never completed while an outcome is unknown. Settlement of a fixture is not atomic: after a
+     * failure some bets, up to [settlementWindow] - 1 beyond the failing one, may have committed, and
+     * a retry reconciles them as replays through the existing keys without paying twice.
+     */
+    private fun settlePipelined(bets: List<ReadModel.BetView>, result: String, tally: SettlementTally) {
+        val window = settlementWindow
+        val inFlight = ArrayDeque<InFlightSettlement>()
+        var failure: Exception? = null
+        var drainDeadline = 0L
+        var submissionStopped = false
+
+        fun collect(item: InFlightSettlement) {
+            val timeout = if (failure == null) settlementTimeout else Duration.ofNanos((drainDeadline - System.nanoTime()).coerceAtLeast(0))
+            try {
+                awaitOutcome(item.future, "bet:${item.betId}:settle", timeout)
+                when (item.outcome) {
+                    SettlementOutcome.WON -> tally.won++
+                    SettlementOutcome.LOST -> tally.lost++
+                    SettlementOutcome.VOIDED -> tally.voided++
+                }
+            } catch (e: IdempotencyConflictException) {
+                tally.alreadySettled++ // the player cashed out first: the ledger resolves the bet exactly once
+            } catch (e: InterruptedException) {
+                throw e
+            } catch (e: Exception) {
+                val first = failure
+                if (first == null) {
+                    failure = e
+                    // After an unknown outcome the writer is probably stuck: only count what already finished.
+                    drainDeadline = System.nanoTime() + if (e is OutcomeUnknownException) 0L else settlementTimeout.toNanos()
+                } else if (e !== first) {
+                    first.addSuppressed(e)
+                }
+            }
+        }
+
+        for (bet in bets) {
+            if (submissionStopped) break
+            while (failure == null && inFlight.isNotEmpty() && (inFlight.size >= window || inFlight.first().future.isDone)) {
+                collect(inFlight.removeFirst())
+            }
+            if (failure != null) break
+            val outcome = when {
+                result == "VOID" -> SettlementOutcome.VOIDED
+                bet.selection == result -> SettlementOutcome.WON
+                else -> SettlementOutcome.LOST
+            }
+            val future = try {
+                when (outcome) {
+                    SettlementOutcome.VOIDED -> wallet.voidBetAsync(bet.betId)
+                    SettlementOutcome.WON -> wallet.settleWinAsync(bet.betId, bet.potentialPayout)
+                    SettlementOutcome.LOST -> wallet.settleLossAsync(bet.betId)
+                }
+            } catch (e: RuntimeException) {
+                // Request building failed: report it in submission order, after earlier outcomes.
+                CompletableFuture.failedFuture(e)
+            }
+            inFlight.addLast(InFlightSettlement(bet.betId, outcome, future))
+            // Refused at admission (overloaded, closed, failed) or unbuildable: more submissions would only
+            // repeat it. A conflict is the one definitive failure that is normal, so it never stops the loop.
+            if (future.isCompletedExceptionally && future.exceptionNow() !is IdempotencyConflictException) {
+                submissionStopped = true
+            }
+        }
+        while (inFlight.isNotEmpty()) collect(inFlight.removeFirst())
+        failure?.let { throw it }
     }
 
     private fun restoreFixtures() {
@@ -419,6 +497,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     companion object {
         internal const val FIXTURES_FILE = "demo-fixtures.properties"
         private const val LEGACY_UNRESOLVED = "LEGACY_UNRESOLVED"
+        internal const val DEFAULT_SETTLEMENT_WINDOW = 16
 
         private val TEAMS = listOf(
             "Falcons", "Harbour City", "Northgate", "Riverside", "Old Town", "Westbrook",

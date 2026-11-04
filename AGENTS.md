@@ -29,6 +29,7 @@ src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1-R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
   WebAppTest.kt              web console API, simulator, bets racing settlement
+  FixtureSettlementTest.kt   pipelined fixture settlement: window, failures, races
 docs/
   readme.src.html        SOURCE of the interactive guide (edit this)
   index.html             BUILT guide served by GitHub Pages (never edit by hand)

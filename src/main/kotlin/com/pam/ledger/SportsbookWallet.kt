@@ -146,6 +146,27 @@ class SportsbookWallet(private val ledger: Ledger) {
     fun cashOutAsync(betId: String, amount: Long) =
         ledger.submit(settlementRequest(betId, "BET_CASHED_OUT", amount))
 
+    /*
+     * Asynchronous settlement lets a caller keep several settlements queued so the
+     * writer can group-commit them. Each uses the same request builder and the same
+     * `bet:{id}:settle` key as its blocking twin, so exactly-once is unchanged. The
+     * request is built on the caller's thread and may throw (unknown bet, negative or
+     * overflowing payout); the future completes only with the ledger's definitive
+     * outcome, and cancelling it cannot cancel an admitted commit.
+     */
+
+    /** Submit a win of [payout] (stake included); see [settleWin]. */
+    fun settleWinAsync(betId: String, payout: Long): CompletableFuture<Receipt> =
+        ledger.submit(settlementRequest(betId, "BET_WON", payout))
+
+    /** Submit a loss; see [settleLoss]. */
+    fun settleLossAsync(betId: String): CompletableFuture<Receipt> =
+        ledger.submit(settlementRequest(betId, "BET_LOST", 0))
+
+    /** Submit a void refunding the stake exactly; see [voidBet]. */
+    fun voidBetAsync(betId: String): CompletableFuture<Receipt> =
+        ledger.submit(settlementRequest(betId, "BET_VOIDED", placement(betId).stake))
+
     fun cashBalance(playerId: String, currency: String) = ledger.balance(Accounts.cash(playerId, currency))
     fun openBetsBalance(playerId: String, currency: String) = ledger.balance(Accounts.openBets(playerId, currency))
 
