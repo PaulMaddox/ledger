@@ -135,6 +135,10 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 - New behaviour needs tests. Concurrency changes need a race test (`TestSupport.race`);
   an intermittent failure is a real bug, not a reason to rerun until green.
 - Keep error types in the sealed `LedgerException` hierarchy.
+- `Journal.scan` reads through a bounded read-ahead buffer but must classify only the file
+  prefix captured at its start, hand each callback its own payload array, and validate a
+  length before allocating. Any change to it must keep `JournalScanTest`'s differential
+  comparison against the one-read-per-record reference passing, unchanged.
 
 ## Keeping the documentation in step
 
