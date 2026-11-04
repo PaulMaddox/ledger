@@ -44,6 +44,12 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         val potentialPayout get() = payout(stake, oddsHundredths)
     }
 
+    /**
+     * A customer's total entry count and the newest [seqs] (oldest first), sampled under one lock hold so both
+     * describe the same indexed prefix. [seqs] is an owned copy that never changes after the lock is released.
+     */
+    data class PlayerHistory(val total: Int, val seqs: List<Long>)
+
     data class Totals(
         val entries: Long, val deposits: BigInteger, val withdrawals: BigInteger,
         val staked: BigInteger, val returned: BigInteger, val kindCounts: Map<String, Long>,
@@ -54,6 +60,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     private var next = 0L
     private val byPlayer = HashMap<String, MutableList<Long>>()
     private val bets = LinkedHashMap<String, BetView>()
+    /** Per player, the console-attributable bet IDs in placement order; settlement state is read from [bets]. */
+    private val placedBetsByPlayer = HashMap<String, MutableList<String>>()
     private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
     private val openBetsByFixture = HashMap<String, MutableSet<String>>()
     private val kindCounts = HashMap<String, Long>()
@@ -109,6 +117,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                         placedSeq = e.seq, placedAtMicros = e.timestampMicros,
                     )
                     bets[betId] = bet
+                    placedBetsByPlayer.getOrPut(player) { ArrayList() }.add(betId)
                     openBetsByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
                     openBetsByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
                     openBetCount++
@@ -147,13 +156,19 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
 
     // ---- Queries (all return copies, safe to use after the lock is released) ----
 
+    /** Every sequence for the player; full-history callers only. The customer page uses [historyForPlayer]. */
     fun seqsForPlayer(player: String): List<Long> = synchronized(lock) { byPlayer[player]?.toList() ?: emptyList() }
+    /** The player's entry count and newest [limit] sequences, copying only that tail while the lock is held. */
+    fun historyForPlayer(player: String, limit: Int = Int.MAX_VALUE): PlayerHistory = synchronized(lock) {
+        require(limit >= 0) { "history limit must be non-negative" }
+        val seqs = byPlayer[player].orEmpty()
+        PlayerHistory(seqs.size, ArrayList(seqs.subList(maxOf(0, seqs.size - limit), seqs.size)))
+    }
+    /** The player's newest [limit] bets, oldest first, each in its current settlement state. */
     fun betsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<BetView> = synchronized(lock) {
         require(limit >= 0) { "bet limit must be non-negative" }
-        byPlayer[player].orEmpty().asReversed().asSequence().mapNotNull { seq ->
-            val entry = ledger.entry(seq).entry
-            if (entry.kind == "BET_PLACED") entry.metadata["betId"]?.let(bets::get) else null
-        }.take(limit).toList().asReversed()
+        val placed = placedBetsByPlayer[player].orEmpty()
+        placed.subList(maxOf(0, placed.size - limit), placed.size).mapNotNull(bets::get)
     }
     fun allBets(): List<BetView> = synchronized(lock) { bets.values.toList() }
     fun openBetsForPlayer(player: String): List<BetView> = synchronized(lock) {

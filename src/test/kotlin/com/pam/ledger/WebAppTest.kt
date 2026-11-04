@@ -2521,6 +2521,208 @@ class WebAppTest {
         }
     }
 
+    /** The full-history implementation the bounded queries replaced; the oracle for every comparison below. */
+    private fun referenceHistory(ledger: Ledger, model: ReadModel, player: String, limit: Int): Triple<Int, List<Long>, List<ReadModel.BetView>> {
+        val seqs = model.seqsForPlayer(player)
+        val bets = seqs.asReversed().asSequence().mapNotNull { seq ->
+            val entry = ledger.entry(seq).entry
+            if (entry.kind == "BET_PLACED") entry.metadata["betId"]?.let(model::bet) else null
+        }.take(limit).toList().asReversed()
+        return Triple(seqs.size, seqs.takeLast(limit), bets)
+    }
+
+    private fun assertMatchesReference(ledger: Ledger, model: ReadModel, player: String) {
+        for (limit in listOf(0, 1, 40, Int.MAX_VALUE)) {
+            val (total, tail, bets) = referenceHistory(ledger, model, player, limit)
+            val history = model.historyForPlayer(player, limit)
+            assertEquals(total, history.total, "$player total at limit $limit")
+            assertEquals(tail, history.seqs, "$player tail at limit $limit")
+            assertEquals(bets, model.betsForPlayer(player, limit), "$player bets at limit $limit")
+        }
+        assertEquals(model.seqsForPlayer(player), model.historyForPlayer(player).seqs)
+        assertFailsWith<IllegalArgumentException> { model.historyForPlayer(player, -1) }
+        assertFailsWith<IllegalArgumentException> { model.betsForPlayer(player, -1) }
+    }
+
+    /** Every query shape of the bounded customer history agrees with the full-history oracle. */
+    @Test
+    fun `bounded customer history matches the full history reference for mixed histories`() {
+        val directory = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val players = listOf("alice", "bob", "deposit-only", "absent", "")
+        Ledger.open(config(directory, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("alice", 1_000_000, "EUR", "alice-fund")
+            wallet.deposit("bob", 1_000_000, "EUR", "bob-fund")
+            wallet.deposit("deposit-only", 1_000_000, "EUR", "deposit-only-fund")
+            repeat(70) { i ->
+                wallet.placeBet("alice", "alice-$i", 1, "EUR", "F1|HOME|200")
+                wallet.placeBet("bob", "bob-$i", 1, "EUR", "F1|AWAY|300")
+                // A standalone wallet placement has no console selection, so no bet view is attributable to it.
+                if (i % 7 == 0) wallet.placeBet("alice", "alice-standalone-$i", 1, "EUR")
+                if (i % 3 == 0) wallet.settleLoss("alice-$i")
+                if (i % 5 == 0) wallet.settleWin("bob-$i", 2)
+            }
+            // A long deposit/withdrawal-only tail follows the last placement.
+            repeat(120) { i ->
+                wallet.deposit("alice", 5, "EUR", "alice-tail-$i")
+                wallet.withdraw("alice", 1, "EUR", "alice-out-$i")
+                wallet.deposit("deposit-only", 5, "EUR", "deposit-only-tail-$i")
+            }
+            ReadModel(ledger).use { model ->
+                model.catchUp()
+                val before = ledger.head().size
+                // Idempotent retries return the original receipt and must not index anything twice.
+                assertTrue(wallet.placeBet("alice", "alice-0", 1, "EUR", "F1|HOME|200").replayed)
+                assertTrue(wallet.deposit("alice", 5, "EUR", "alice-tail-0").replayed)
+                assertEquals(before, ledger.head().size)
+                model.catchUp()
+                assertEquals(70, model.betsForPlayer("alice").size)
+                assertEquals(0, model.betsForPlayer("deposit-only").size)
+                players.forEach { assertMatchesReference(ledger, model, it) }
+                assertEquals(40, model.betsForPlayer("alice", 40).size)
+                assertEquals(0, model.historyForPlayer("absent", 40).total)
+                assertTrue(model.historyForPlayer("absent", 40).seqs.isEmpty())
+
+                // A settlement after placement is visible without retaining the stale placement-time view.
+                val snapshot = model.betsForPlayer("alice", 40)
+                val savedHistory = model.historyForPlayer("alice", 40)
+                val savedSeqs = savedHistory.seqs.toList()
+                assertTrue(snapshot.single { it.betId == "alice-68" }.isOpen)
+                wallet.settleLoss("alice-68")
+                wallet.deposit("alice", 5, "EUR", "alice-after-snapshot")
+                model.catchUp()
+                assertFalse(model.betsForPlayer("alice", 40).single { it.betId == "alice-68" }.isOpen)
+                assertTrue(snapshot.single { it.betId == "alice-68" }.isOpen, "an earlier snapshot is an owned copy")
+                assertEquals(savedSeqs, savedHistory.seqs)
+                assertEquals(savedHistory.total + 2, model.historyForPlayer("alice", 40).total) // the settlement and the deposit
+                players.forEach { assertMatchesReference(ledger, model, it) }
+            }
+        }
+        // Reopening rebuilds the same answers from the verified journal.
+        Ledger.open(config(directory, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                model.catchUp()
+                players.forEach { assertMatchesReference(ledger, model, it) }
+                assertEquals(70, model.betsForPlayer("alice").size)
+                assertFalse(model.bet("alice-68")!!.isOpen)
+            }
+        }
+    }
+
+    /** Sampling the bounded queries while entries commit, place and settle never mixes prefixes or mutates old snapshots. */
+    @Test
+    fun `bounded customer history snapshots stay consistent during catch up placement and settlement`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1_000_000, "EUR", "history-race-fund")
+            ReadModel(ledger).use { model ->
+                val done = AtomicBoolean(false)
+                val sampled = ConcurrentLinkedQueue<Pair<ReadModel.PlayerHistory, List<Long>>>()
+                val settledSeen = ConcurrentLinkedQueue<List<ReadModel.BetView>>()
+                val results = race(6) { t ->
+                    when (t) {
+                        0 -> try {
+                            repeat(150) { i ->
+                                wallet.placeBet("p", "history-race-$i", 1, "EUR", "F1|HOME|200")
+                                wallet.deposit("p", 1, "EUR", "history-race-dep-$i")
+                            }
+                        } finally { done.set(true) }
+                        1 -> {
+                            var i = 0
+                            while (!done.get() || i < 150) {
+                                if (i < 150 && model.bet("history-race-$i") != null) {
+                                    wallet.settleLoss("history-race-$i")
+                                    i++
+                                } else if (done.get() && model.bet("history-race-$i") == null) {
+                                    model.catchUp()
+                                } else Thread.onSpinWait()
+                            }
+                        }
+                        2 -> while (!done.get()) model.catchUp()
+                        else -> while (!done.get()) {
+                            val history = model.historyForPlayer("p", 10)
+                            sampled += history to history.seqs.toList()
+                            settledSeen += model.betsForPlayer("p", 10)
+                        }
+                    }
+                }
+                results.forEach { it.getOrThrow() }
+                assertTrue(sampled.isNotEmpty())
+                for ((history, copy) in sampled) {
+                    assertEquals(copy, history.seqs, "an earlier snapshot never changes after the lock is released")
+                    assertTrue(history.seqs.size <= 10 && history.seqs.size <= history.total)
+                    assertEquals(history.seqs.sorted(), history.seqs)
+                    // Count and tail describe one prefix: the committed player entries up to the tail's last
+                    // sequence number total exactly `total`, and the tail is the end of them.
+                    val last = history.seqs.last()
+                    val prefix = (0..last).filter { ledger.entry(it).entry.metadata["playerId"] == "p" }
+                    assertEquals(prefix.size, history.total)
+                    assertEquals(prefix.takeLast(history.seqs.size), history.seqs)
+                }
+                for (bets in settledSeen) {
+                    assertEquals(bets.map { it.placedSeq }.sorted(), bets.map { it.placedSeq })
+                    assertTrue(bets.all { it.playerId == "p" })
+                }
+                model.catchUp()
+                assertMatchesReference(ledger, model, "p")
+            }
+        }
+    }
+
+    /** Fixed-size answers do not allocate in proportion to lifetime activity. */
+    @Test
+    fun `bounded customer history allocation does not grow with lifetime activity`() {
+        val threads = java.lang.management.ManagementFactory.getThreadMXBean() as com.sun.management.ThreadMXBean
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            for (player in listOf("small", "large")) wallet.deposit(player, 1_000_000, "EUR", "$player-fund")
+            repeat(60) { i ->
+                for (player in listOf("small", "large")) wallet.placeBet(player, "$player-$i", 1, "EUR", "F1|HOME|200")
+            }
+            race(8) { t ->
+                repeat(250) { i -> wallet.deposit("large", 1, "EUR", "large-tail-$t-$i") }
+                repeat(2) { i -> wallet.deposit("small", 1, "EUR", "small-tail-$t-$i") }
+            }.forEach { it.getOrThrow() }
+            ReadModel(ledger).use { model ->
+                model.catchUp()
+                fun allocated(player: String): Long {
+                    repeat(200) { model.historyForPlayer(player, 40); model.betsForPlayer(player, 40) }
+                    val before = threads.currentThreadAllocatedBytes
+                    repeat(100) { model.historyForPlayer(player, 40); model.betsForPlayer(player, 40) }
+                    return threads.currentThreadAllocatedBytes - before
+                }
+                val small = allocated("small")
+                val large = allocated("large")
+                assertEquals(1 + 60 + 2_000, model.historyForPlayer("large").total)
+                assertTrue(large <= small * 11 / 10 + 4096, "bounded history allocated $large bytes for a long history but $small for a short one")
+            }
+        }
+    }
+
+    /** A demo reset discards the old generation's indexes; the new generation rebuilds from its own journal. */
+    @Test
+    fun `customer history indexes are rebuilt after restart and discarded by demo reset`() {
+        val directory = tempDir()
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)).use { app ->
+            repeat(3) { i ->
+                assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
+                    "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "index-gen-$i")).first)
+            }
+            val before = call(app, "GET", "players/alice").second
+            assertTrue(before.contains("index-gen-2") && before.contains("\"entries\":4"), before)
+        }
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)).use { app ->
+            val restarted = call(app, "GET", "players/alice").second
+            assertTrue(restarted.contains("index-gen-0") && restarted.contains("\"entries\":4"), restarted)
+            reset(app)
+            val cleared = call(app, "GET", "players/alice").second
+            assertFalse(cleared.contains("index-gen"), cleared)
+            assertTrue(cleared.contains("\"entries\":1"), cleared)
+            assertTrue(cleared.contains("\"bets\":[]"), cleared)
+        }
+    }
+
     /** A pending placement must retain its settlement guard past the normal 30-second timeout. */
     @Test
     fun `queue overload cannot release a pending placement before settlement`() {
