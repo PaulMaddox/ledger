@@ -134,9 +134,8 @@ means deployment failed. An image rollback must never roll back or delete histor
 check data compatibility first.
 
 If TCP connects but HTTP stalls, capture a JVM virtual-thread dump before restarting.
-Bet registration uses a parking-safe `ReentrantLock`: waiting for ledger queue
-admission inside `ConcurrentHashMap.compute` would pin JDK 21 carriers and starve
-both simulator and HTTP work.
+Bet registration uses a parking-safe `ReentrantLock`: queue admission can wait for
+ledger capacity, so it must not hold `ConcurrentHashMap`'s update lock while waiting.
 
 For Azure CLI diagnostics across directories, select the cluster's tenant with
 `kubelogin convert-kubeconfig -l azurecli --tenant-id <cluster-tenant-id>`.

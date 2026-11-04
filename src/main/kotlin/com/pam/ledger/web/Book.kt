@@ -147,8 +147,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
                 return@read wallet.placeBetAsync(playerId, betId, stake, "EUR", selection = metadata)
             }
             var created: PendingPlacement? = null
-            // Queue admission can park. A ConcurrentHashMap.compute monitor would
-            // pin a JDK 21 carrier and can starve every virtual HTTP/simulator thread.
+            // Queue admission can park, so do not hold ConcurrentHashMap's update lock while waiting.
             val pending = placementLock.withLock {
                 val current = pendingByBetId[betId]
                 if (current != null) {

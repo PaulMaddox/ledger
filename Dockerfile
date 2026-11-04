@@ -1,4 +1,4 @@
-FROM eclipse-temurin:21-jdk-jammy AS build
+FROM eclipse-temurin:27-jdk-resolute AS build
 WORKDIR /build
 COPY gradlew settings.gradle.kts build.gradle.kts ./
 COPY gradle/ gradle/
@@ -11,7 +11,7 @@ FROM caddy:2.10.2-alpine AS proxy
 RUN setcap -r /usr/bin/caddy
 USER 10001:10001
 
-FROM eclipse-temurin:21-jre-jammy AS web
+FROM eclipse-temurin:27-jre-resolute AS web
 RUN curl --version > /dev/null && groupadd --gid 10001 ledger && useradd --uid 10001 --gid ledger --no-create-home ledger
 WORKDIR /app
 COPY --from=build /build/build/install/pam-ledger/lib/ ./lib/

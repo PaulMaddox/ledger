@@ -6,7 +6,7 @@ before your first change: several rules protect properties that tests alone cann
 ## What this is
 
 A cryptographically verifiable, append-only, double-entry ledger for a sportsbook
-player account platform, in Kotlin on JDK 21, plus an interactive guide published
+player account platform, in Kotlin on JDK 27, plus an interactive guide published
 with GitHub Pages. The ledger's job is to make money movements exact, durable and
 provable to a regulator. Correctness outranks speed, features and tidiness.
 
@@ -52,9 +52,9 @@ node scripts/check-guide.mjs         # must print four PASS lines
 node scripts/check-web.mjs           # dependency-free console regressions
 ```
 
-The setup scripts install JDK 21 if needed and download the build tools; the first
+The setup scripts install JDK 27 if needed and download the build tools; the first
 build requires internet access. On Windows, the README's `-ExecutionPolicy Bypass`
-option applies only to the setup process, not to system settings. With JDK 21
+option applies only to the setup process, not to system settings. With JDK 27
 already installed, setup is optional.
 
 The CLI demo places and settles bets concurrently, checks proofs, and audits the

@@ -146,7 +146,6 @@ class ChaosLab {
 
     /** Run business-operation races on the live ledger without interrupting simulator traffic. */
     fun runLive(scenario: String, ledger: Ledger, wallet: SportsbookWallet, book: Book): Map<String, Any?> = liveLock.withLock {
-        // A monitor pins JDK 21 HTTP carriers while this request waits for its virtual race workers.
         require(isLiveScenario(scenario)) { "scenario is not a live transaction experiment" }
         val started = System.nanoTime()
         val (passed, evidence) = liveMoneyExperiment(scenario, wallet, book)

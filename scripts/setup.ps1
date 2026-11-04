@@ -4,7 +4,7 @@
     powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
     powershell -ExecutionPolicy Bypass -File scripts\setup.ps1 -WithGuideTools
 
-  Installs JDK 21 with winget if it is missing, then runs a first build through the
+  Installs JDK 27 with winget if it is missing, then runs a first build through the
   Gradle wrapper, which downloads Gradle, the Kotlin compiler and the test libraries.
   -WithGuideTools also installs Python and Node.js, needed only to edit the guide.
   Safe to run again: anything already installed is left alone.
@@ -40,14 +40,14 @@ function Install-WithWinget([string]$Id) {
   Update-SessionPath
 }
 
-if ((Get-JavaMajor) -ge 21) {
-  Write-Host '==> JDK 21 already installed'
+if ((Get-JavaMajor) -ge 27) {
+  Write-Host '==> JDK 27 already installed'
 } else {
-  Write-Host '==> Installing JDK 21 (Eclipse Temurin)'
-  Install-WithWinget 'EclipseAdoptium.Temurin.21.JDK'
-  $temurin = Get-ChildItem "$env:ProgramFiles\Eclipse Adoptium" -Directory -Filter 'jdk-21*' -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ((Get-JavaMajor) -lt 21 -and -not $temurin) {
-    throw 'JDK 21 is still not available after installing. Open a new terminal and run this script again.'
+  Write-Host '==> Installing JDK 27 (Eclipse Temurin)'
+  Install-WithWinget 'EclipseAdoptium.Temurin.27.JDK'
+  $temurin = Get-ChildItem "$env:ProgramFiles\Eclipse Adoptium" -Directory -Filter 'jdk-27*' -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ((Get-JavaMajor) -lt 27 -and -not $temurin) {
+    throw 'JDK 27 is still not available after installing. Open a new terminal and run this script again.'
   }
 }
 
