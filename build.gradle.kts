@@ -13,7 +13,13 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-kotlin { jvmToolchain(27) }
+kotlin {
+    jvmToolchain(27)
+    // Kotlin 2.4 emits at most JVM 26 bytecode; both languages must agree while running on JDK 27.
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26) }
+}
+
+tasks.withType<JavaCompile>().configureEach { options.release.set(26) }
 
 application { mainClass.set("com.pam.ledger.demo.DemoKt") }
 

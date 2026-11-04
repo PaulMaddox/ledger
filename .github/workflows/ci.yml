@@ -176,3 +176,6 @@ jobs:
         if: runner.os == 'Windows'
         shell: powershell
         run: .\gradlew.bat run
+
+      - name: Check setup JVM selection
+        run: python scripts/check-setup.py

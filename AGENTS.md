@@ -55,7 +55,13 @@ node scripts/check-web.mjs           # dependency-free console regressions
 The setup scripts install JDK 27 if needed and download the build tools; the first
 build requires internet access. On Windows, the README's `-ExecutionPolicy Bypass`
 option applies only to the setup process, not to system settings. With JDK 27
-already installed, setup is optional.
+already installed, setup is optional. Setup selects a complete JDK 27 for both
+`JAVA_HOME` and `PATH` within its process, so a stale `JAVA_HOME` cannot force an
+unsupported Gradle daemon JVM. Keep your terminal's `JAVA_HOME` on JDK 27 for
+subsequent wrapper commands. Kotlin 2.4 currently emits JVM 26 bytecode; both
+compilers target 26 while the build, tests and runtime use JDK 27.
+Run `python3 scripts/check-setup.py` with JDK 27 on `PATH` to exercise both
+valid and stale `JAVA_HOME` selection; CI runs it on Ubuntu and Windows.
 
 The CLI demo places and settles bets concurrently, checks proofs, and audits the
 files it wrote. Rejected overspending attempts are expected; an audit failure

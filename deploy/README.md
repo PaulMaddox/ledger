@@ -110,7 +110,9 @@ later application deployments use the same resources.
   locks. Readiness uses `/`, so saturated request slots remove the pod from service
   without restarting it. Six liveness failures, ten seconds apart, restart the
   container with its existing disk. Startup allows ten minutes for replay; the
-  proxy has independent TCP listener checks. Daily retention still applies.
+  proxy has independent TCP listener checks. The web runtime image explicitly
+  installs `curl` for these probes; do not assume it comes with the JRE base image.
+  Daily retention still applies.
 - Keep data and keys in-country. Do not export plaintext data or keys, or configure
   out-of-country backups.
 - Keep `--public-origin` set to the exact public HTTPS origin. Preserve Host,

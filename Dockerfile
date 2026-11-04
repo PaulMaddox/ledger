@@ -12,7 +12,9 @@ RUN setcap -r /usr/bin/caddy
 USER 10001:10001
 
 FROM eclipse-temurin:27-jre-resolute AS web
-RUN curl --version > /dev/null && groupadd --gid 10001 ledger && useradd --uid 10001 --gid ledger --no-create-home ledger
+RUN apt-get update && apt-get install -y --no-install-recommends curl && \
+    apt-get clean && \
+    curl --version > /dev/null && groupadd --gid 10001 ledger && useradd --uid 10001 --gid ledger --no-create-home ledger
 WORKDIR /app
 COPY --from=build /build/build/install/pam-ledger/lib/ ./lib/
 USER 10001:10001

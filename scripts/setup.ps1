@@ -16,12 +16,31 @@ param([switch]$WithGuideTools)
 $ErrorActionPreference = 'Stop'
 Set-Location (Split-Path $PSScriptRoot -Parent)
 
-# Major version of the java on PATH, or 0 if there is none.
-function Get-JavaMajor {
+# Major version of a candidate Java executable, or 0 if it cannot run.
+function Get-JavaMajor([string]$Executable) {
   # java -version writes to stderr; don't let PowerShell treat that as an error.
   $ErrorActionPreference = 'Continue'
-  try { $line = (& java -version 2>&1 | Select-Object -First 1) | Out-String } catch { return 0 }
+  try { $line = (& $Executable -version 2>&1 | Select-Object -First 1) | Out-String } catch { return 0 }
   if ($line -match 'version "(\d+)') { return [int]$Matches[1] } else { return 0 }
+}
+
+function Select-Jdk {
+  $candidates = @($env:JAVA_HOME)
+  $java = Get-Command java -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1
+  if ($java) { $candidates += Split-Path (Split-Path $java.Source -Parent) -Parent }
+  $candidates += @(Get-ChildItem "$env:ProgramFiles\Eclipse Adoptium" -Directory -Filter 'jdk-27*' -ErrorAction SilentlyContinue |
+    Select-Object -ExpandProperty FullName)
+  foreach ($candidate in $candidates) {
+    if (-not $candidate) { continue }
+    $executable = Join-Path $candidate 'bin\java.exe'
+    if ((Test-Path -LiteralPath (Join-Path $candidate 'bin\javac.exe')) -and
+        (Test-Path -LiteralPath $executable) -and (Get-JavaMajor $executable) -eq 27) {
+      $env:JAVA_HOME = $candidate
+      $env:Path = "$candidate\bin;$env:Path"
+      return $true
+    }
+  }
+  return $false
 }
 
 # After winget installs something, this session still has the old PATH; reload it.
@@ -40,13 +59,13 @@ function Install-WithWinget([string]$Id) {
   Update-SessionPath
 }
 
-if ((Get-JavaMajor) -ge 27) {
+# The wrapper prioritizes JAVA_HOME over PATH; select its JVM as well as the toolchain.
+if (Select-Jdk) {
   Write-Host '==> JDK 27 already installed'
 } else {
   Write-Host '==> Installing JDK 27 (Eclipse Temurin)'
   Install-WithWinget 'EclipseAdoptium.Temurin.27.JDK'
-  $temurin = Get-ChildItem "$env:ProgramFiles\Eclipse Adoptium" -Directory -Filter 'jdk-27*' -ErrorAction SilentlyContinue | Select-Object -First 1
-  if ((Get-JavaMajor) -lt 27 -and -not $temurin) {
+  if (-not (Select-Jdk)) {
     throw 'JDK 27 is still not available after installing. Open a new terminal and run this script again.'
   }
 }

@@ -20,15 +20,28 @@ for arg in "$@"; do
   esac
 done
 
-# Major version of the java on PATH, or 0 if there is none.
+# Major version of a candidate Java executable, or 0 if it cannot run.
 java_major() {
-  command -v java >/dev/null 2>&1 || { echo 0; return; }
-  java -version 2>&1 | head -n 1 | sed -E 's/.*version "([0-9]+).*/\1/;t;s/.*/0/'
+  "$1" -version 2>&1 | head -n 1 | sed -E 's/.*version "([0-9]+).*/\1/;t;s/.*/0/'
 }
 
-# Any JDK 27 counts, even if it isn't the default java, because the build selects
-# JDK 27 itself through its Java toolchain setting.
-if [ "$(java_major)" -ge 27 ] || compgen -G "/usr/lib/jvm/*27*" >/dev/null; then
+select_jdk() {
+  local path_home="" home java_path
+  if java_path=$(command -v java); then
+    path_home=$(dirname "$(dirname "$(readlink -f "$java_path")")")
+  fi
+  for home in "${JAVA_HOME:-}" "$path_home" /usr/lib/jvm/*27*; do
+    if [ -x "$home/bin/java" ] && [ -x "$home/bin/javac" ] && [ "$(java_major "$home/bin/java")" = 27 ]; then
+      export JAVA_HOME="$home"
+      export PATH="$JAVA_HOME/bin:$PATH"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The wrapper prioritizes JAVA_HOME over PATH; the toolchain cannot repair an old daemon JVM.
+if select_jdk; then
   echo "==> JDK 27 already installed"
 else
   echo "==> Installing JDK 27 (Eclipse Temurin; needs sudo)"
@@ -41,6 +54,10 @@ else
     sudo tee /etc/apt/sources.list.d/adoptium.list >/dev/null
   sudo apt-get update
   sudo apt-get install -y temurin-27-jdk
+  if ! select_jdk; then
+    echo "JDK 27 is still unavailable after installation. Set JAVA_HOME to a JDK 27 installation and rerun setup." >&2
+    exit 1
+  fi
 fi
 
 if [ "$with_guide_tools" = true ]; then
@@ -53,8 +70,7 @@ if [ "$with_guide_tools" = true ]; then
   fi
 fi
 
-# First build. The wrapper finds JDK 27 itself (via the build's Java toolchain
-# setting), even if an older JDK is the default.
+# Both the wrapper's JVM and the compilation toolchain now use JDK 27.
 echo "==> First build: downloads Gradle and the libraries (a few minutes the first time)"
 ./gradlew --quiet assemble testClasses
 
