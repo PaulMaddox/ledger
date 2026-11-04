@@ -151,7 +151,7 @@ jobs:
       # Ubuntu runners may default to an older JDK, so setup.sh installs JDK 27 itself.
       - name: Set up (Ubuntu), as documented
         if: runner.os == 'Linux'
-        run: bash -c 'source ./scripts/setup.sh && ./gradlew run'
+        run: bash -ec 'source ./scripts/setup.sh; ./gradlew run'
 
       # winget is not reliably available on GitHub's Windows runners, so JDK 27 is
       # provided here and setup.ps1 takes its "already installed" path. This tests

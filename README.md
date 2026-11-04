@@ -93,7 +93,7 @@ the console, open **<http://localhost:8080>**.
 
 ```bash
 git clone https://github.com/PaulMaddox/ledger.git && cd ledger
-bash -c 'source ./scripts/setup.sh && ./gradlew web'
+bash -ec 'source ./scripts/setup.sh; ./gradlew web'
 ```
 
 </details>

@@ -12,7 +12,7 @@ WINDOWS = os.name == "nt"
 
 
 class SetupTests(unittest.TestCase):
-    def run_setup(self, stale_home, quick_start=False):
+    def run_setup(self, stale_home, quick_start=False, fail_setup=False):
         java = shutil.which("java")
         self.assertIsNotNone(java, "run these checks with JDK 27 on PATH")
         jdk = Path(java).resolve().parent.parent
@@ -27,7 +27,9 @@ class SetupTests(unittest.TestCase):
             shutil.copy2(ROOT / "scripts" / name, scripts / name)
             wrapper = directory / ("gradlew.bat" if WINDOWS else "gradlew")
             if WINDOWS:
-                wrapper.write_text('@echo off\n>> selected-jdk.txt echo %JAVA_HOME%\njava -version\n', encoding="utf-8")
+                wrapper.write_text('@echo off\n>> selected-jdk.txt echo %JAVA_HOME%\n' +
+                                   ('if "%~1"=="--quiet" exit /b 17\n' if fail_setup else '') +
+                                   'java -version\n', encoding="utf-8")
                 powershell = shutil.which("powershell") or shutil.which("pwsh")
                 self.assertIsNotNone(powershell, "PowerShell is required for the Windows setup check")
                 command = [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-File", str(scripts / name)]
@@ -35,12 +37,14 @@ class SetupTests(unittest.TestCase):
                     command = [powershell, "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command",
                                ". .\\scripts\\setup.ps1; .\\gradlew.bat web"]
             else:
-                wrapper.write_text('#!/usr/bin/env bash\nset -e\nprintf "%s\\n" "$JAVA_HOME" >> selected-jdk.txt\njava -version\n',
+                wrapper.write_text('#!/usr/bin/env bash\nset -e\nprintf "%s\\n" "$JAVA_HOME" >> selected-jdk.txt\n' +
+                                   ('if [ "${1:-}" = "--quiet" ]; then exit 17; fi\n' if fail_setup else '') +
+                                   'java -version\n',
                                    encoding="utf-8")
                 wrapper.chmod(0o755)
                 command = ["bash", str(scripts / name)]
                 if quick_start:
-                    command = ["bash", "-c", "source ./scripts/setup.sh && ./gradlew web"]
+                    command = ["bash", "-ec", "source ./scripts/setup.sh; ./gradlew web"]
             env = os.environ.copy()
             if stale_home:
                 old = directory / "old-jdk"
@@ -54,10 +58,14 @@ class SetupTests(unittest.TestCase):
             else:
                 env["JAVA_HOME"] = str(jdk)
             result = subprocess.run(command, cwd=directory, env=env, text=True, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, timeout=30)
-            self.assertEqual(result.returncode, 0, result.stdout)
+            if fail_setup:
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertNotIn("Ready.", result.stdout)
+            else:
+                self.assertEqual(result.returncode, 0, result.stdout)
             self.assertIn("JDK 27 already installed", result.stdout)
             selected = (directory / "selected-jdk.txt").read_text().splitlines()
-            self.assertEqual(len(selected), 2 if quick_start else 1, result.stdout)
+            self.assertEqual(len(selected), 2 if quick_start and not fail_setup else 1, result.stdout)
             self.assertTrue(all(Path(home.strip()).resolve() == jdk for home in selected), result.stdout)
 
     def test_supported_java_home_is_retained(self):
@@ -68,6 +76,9 @@ class SetupTests(unittest.TestCase):
 
     def test_quick_start_retains_selected_jdk_for_the_console(self):
         self.run_setup(stale_home=True, quick_start=True)
+
+    def test_failed_setup_build_prevents_starting_the_console(self):
+        self.run_setup(stale_home=True, quick_start=True, fail_setup=True)
 
 
 if __name__ == "__main__":

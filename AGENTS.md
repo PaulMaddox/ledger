@@ -60,7 +60,9 @@ already installed, setup is optional. Setup selects a complete JDK 27 for both
 unsupported Gradle daemon JVM. Keep your terminal's `JAVA_HOME` on JDK 27 for
 subsequent wrapper commands. The README quick starts source setup and start the
 console in the same child shell, retaining the selected JDK without changing
-the caller's shell settings. Kotlin 2.4 currently emits JVM 26 bytecode; both
+the caller's shell settings. In Bash, source setup as a standalone command with
+errexit enabled, never on the left of `&&`, which disables its failure checks.
+Kotlin 2.4 currently emits JVM 26 bytecode; both
 compilers target 26 while the build, tests and runtime use JDK 27.
 Run `python3 scripts/check-setup.py` with JDK 27 on `PATH` to exercise both
 valid and stale `JAVA_HOME` selection; CI runs it on Ubuntu and Windows.
