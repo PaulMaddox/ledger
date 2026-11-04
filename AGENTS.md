@@ -198,8 +198,9 @@ JDK draining and forfeits the bounded-close guarantee.
 - New deposits and placements require nonempty player IDs that fit the escrow
   account name (235 characters for a three-letter currency). New bet IDs must be
   nonblank and at most 245 characters, leaving room for settlement keys. Apply
-  these admission checks only to uncommitted operations: legacy deposit and
-  placement retries must still reach the ledger's fingerprint comparison.
+  these admission checks only to uncommitted operations: legacy deposit,
+  withdrawal and placement retries must still reach the ledger's fingerprint
+  comparison, including withdrawals with empty player IDs or blank references.
   Older, longer cash accounts can still withdraw. Never change canonical byte
   formats or historical replay rules to enforce these wallet admission limits.
 - Published or unresolved fixture results block new cash-outs before settlement

@@ -1166,6 +1166,63 @@ class WebAppTest {
     }
 
     @Test
+    fun `legacy withdrawal identifiers replay without bypassing fingerprints`() {
+        for ((player, withdrawalId) in listOf("p" to "", "p" to " ", "" to "legacy-empty-player")) {
+            val directory = tempDir()
+            val signer = Ed25519TreeHeadSigner.generate()
+            val request = TransactionRequest(
+                idempotencyKey = "withdrawal:$withdrawalId", kind = "WITHDRAWAL",
+                postings = listOf(
+                    Posting(SportsbookWallet.Accounts.cash(player, "EUR"), "EUR", -100),
+                    Posting(SportsbookWallet.Accounts.pspClearing("EUR"), "EUR", 100),
+                ),
+                metadata = mapOf("playerId" to player, "withdrawalId" to withdrawalId),
+            )
+            val original = Ledger.open(config(directory, signer)).use { ledger ->
+                ledger.append(TransactionRequest(
+                    idempotencyKey = "deposit:legacy-withdrawal-funds", kind = "DEPOSIT",
+                    postings = listOf(
+                        Posting(SportsbookWallet.Accounts.pspClearing("EUR"), "EUR", -200),
+                        Posting(SportsbookWallet.Accounts.cash(player, "EUR"), "EUR", 200),
+                    ),
+                    metadata = mapOf("playerId" to player, "paymentRef" to "legacy-withdrawal-funds"),
+                ))
+                ledger.append(request)
+            }
+            Ledger.open(config(directory, signer)).use { ledger ->
+                val wallet = SportsbookWallet(ledger)
+                val before = ledger.head()
+                for (receipt in listOf(
+                    wallet.withdraw(player, 100, "EUR", withdrawalId),
+                    wallet.withdrawDefinitive(player, 100, "EUR", withdrawalId),
+                )) {
+                    assertTrue(receipt.replayed)
+                    assertEquals(original.seq, receipt.seq)
+                }
+                assertFailsWith<IdempotencyConflictException> {
+                    wallet.withdraw(player, 101, "EUR", withdrawalId)
+                }
+                assertFailsWith<IdempotencyConflictException> {
+                    wallet.withdrawDefinitive(player, 101, "EUR", withdrawalId)
+                }
+                assertFailsWith<IdempotencyConflictException> {
+                    wallet.withdraw(if (player.isEmpty()) "other" else "", 100, "EUR", withdrawalId)
+                }
+                assertFailsWith<IdempotencyConflictException> {
+                    wallet.withdrawDefinitive(if (player.isEmpty()) "other" else "", 100, "EUR", withdrawalId)
+                }
+                assertFailsWith<IllegalArgumentException> { wallet.withdraw("", 1, "EUR", "new-withdrawal") }
+                assertFailsWith<IllegalArgumentException> { wallet.withdraw("p", 1, "EUR", "\t") }
+                assertFailsWith<IllegalArgumentException> { wallet.withdrawDefinitive("", 1, "EUR", "new-withdrawal") }
+                assertFailsWith<IllegalArgumentException> { wallet.withdrawDefinitive("p", 1, "EUR", "\t") }
+                assertEquals(before, ledger.head())
+                assertEquals(100, wallet.cashBalance(player, "EUR"))
+            }
+            assertTrue(LedgerVerifier.verify(directory, TestSupport.LEDGER_ID, listOf(signer.publicKey)).ok)
+        }
+    }
+
+    @Test
     fun `legacy long bet identifiers replay placements without bypassing fingerprints`() {
         val directory = tempDir()
         val signer = Ed25519TreeHeadSigner.generate()

@@ -76,9 +76,12 @@ class SportsbookWallet(private val ledger: Ledger) {
     }
 
     private fun withdrawalRequest(playerId: String, amount: Long, currency: String, withdrawalId: String): TransactionRequest {
-        // Legacy cash accounts may be longer than new escrow-compatible player ids.
-        require(playerId.isNotEmpty()) { "player id must not be empty" }
-        require(withdrawalId.isNotBlank()) { "withdrawal id must not be blank" }
+        // Legacy retries must still reach the ledger's content fingerprint check.
+        if (ledger.findByIdempotencyKey("withdrawal:$withdrawalId") == null) {
+            // Legacy cash accounts may be longer than new escrow-compatible player ids.
+            require(playerId.isNotEmpty()) { "player id must not be empty" }
+            require(withdrawalId.isNotBlank()) { "withdrawal id must not be blank" }
+        }
         require(amount > 0) { "withdrawal must be positive" }
         return TransactionRequest(
             idempotencyKey = "withdrawal:$withdrawalId",
