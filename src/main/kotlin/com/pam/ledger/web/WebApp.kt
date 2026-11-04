@@ -246,6 +246,7 @@ class LedgerWebApp private constructor(
         private val signingKeyBootstrapLock = Any()
         private const val MAX_URI_LENGTH = 8_192
         private const val MAX_PARAMETERS = 32
+        private const val RECENT_COMPLETED_FIXTURES = 30
 
         fun start(opts: WebOptions, clock: Clock = Clock.systemUTC()): LedgerWebApp {
             // JDK HTTP configuration is read once, before the first server is created.
@@ -650,7 +651,7 @@ class LedgerWebApp private constructor(
 
             // ---- Operator ----
             get("fixtures") -> fixtures()
-            post("fixtures") -> fixtureView(book.addFixture())
+            post("fixtures") -> fixtureViews(listOf(book.addFixture())).single()
             post("fixtures", "*", "settle") -> book.settle(p[1], r.str("result")).let {
                 mapOf("fixture" to it.fixtureId, "result" to it.result, "won" to it.won, "lost" to it.lost, "voided" to it.voided, "alreadySettled" to it.alreadySettled)
             }
@@ -817,10 +818,6 @@ class LedgerWebApp private constructor(
 
     private fun receipt(r: Receipt) = mapOf("seq" to r.seq, "chainHash" to r.chainHash, "leafHash" to r.leafHash, "replayed" to r.replayed)
 
-    private fun sumMinorUnits(amounts: Iterable<Long>) = amounts.fold(BigInteger.ZERO) { total, amount ->
-        total.add(BigInteger.valueOf(amount))
-    }
-
     private fun entryView(s: SealedEntry) = mapOf(
         "seq" to s.entry.seq,
         "kind" to s.entry.kind,
@@ -879,23 +876,24 @@ class LedgerWebApp private constructor(
         )
     }
 
-    private fun fixtureView(f: Book.Fixture): Map<String, Any?> {
-        val open = readModel.openBetsOn(f.id)
-        val liability = f.odds.keys.associateWith { sel ->
-            minorUnits(sumMinorUnits(open.filter { it.selection == sel }.map { it.potentialPayout }))
+    /**
+     * Dashboard rows from the read model's incremental aggregates: one lock acquisition, one indexed prefix,
+     * no scan of the underlying bets. Definitions and results come from the Book and are mutable and unsigned.
+     */
+    private fun fixtureViews(fixtures: List<Book.Fixture>): List<Map<String, Any?>> {
+        val summaries = readModel.fixtureSummaries(fixtures.associate { it.id to it.odds.keys })
+        return fixtures.map { f ->
+            val summary = summaries.getValue(f.id)
+            mapOf(
+                "id" to f.id, "home" to f.home, "away" to f.away, "odds" to f.odds, "result" to f.result,
+                "settlementComplete" to f.settlementComplete,
+                "openBets" to summary.openBets, "staked" to minorUnits(summary.staked),
+                "liability" to f.odds.keys.associateWith { minorUnits(summary.liability.getValue(it)) },
+            )
         }
-        return mapOf(
-            "id" to f.id, "home" to f.home, "away" to f.away, "odds" to f.odds, "result" to f.result,
-            "settlementComplete" to f.settlementComplete,
-            "openBets" to open.size, "staked" to minorUnits(sumMinorUnits(open.map { it.stake })), "liability" to liability,
-        )
     }
 
-    private fun fixtures(): List<Map<String, Any?>> {
-        val ordered = book.fixtures().asReversed()
-        val recentCompleted = ordered.asSequence().filter { it.settlementComplete }.take(30).mapTo(HashSet<String>()) { it.id }
-        return ordered.filter { !it.settlementComplete || it.id in recentCompleted }.map(::fixtureView)
-    }
+    private fun fixtures(): List<Map<String, Any?>> = fixtureViews(book.dashboardFixtures(RECENT_COMPLETED_FIXTURES))
 
     private fun operator(): Map<String, Any?> {
         val totals = readModel.totals()

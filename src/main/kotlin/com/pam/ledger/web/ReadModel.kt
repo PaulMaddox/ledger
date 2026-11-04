@@ -50,12 +50,34 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         val openBets: Int, val openStakes: BigInteger, val exposure: BigInteger,
     )
 
+    /**
+     * Open-bet aggregates for one fixture, all describing the same indexed prefix of the ledger
+     * ([indexedEntries]). Immutable: later catch-up never changes a snapshot already returned.
+     * [liability] has one entry per requested selection (zero when nothing is open on it).
+     */
+    data class FixtureSummary(
+        val indexedEntries: Long, val openBets: Int, val staked: BigInteger, val liability: Map<String, BigInteger>,
+    )
+
+    /** Mutable running totals, owned by the read-model lock and never handed out. */
+    private class OpenCounts {
+        var bets = 0
+        var stake = BigInteger.ZERO
+        var liability = BigInteger.ZERO
+    }
+
+    private class FixtureOpen {
+        val total = OpenCounts()
+        val bySelection = HashMap<String, OpenCounts>()
+    }
+
     private val lock = Any()
     private var next = 0L
     private val byPlayer = HashMap<String, MutableList<Long>>()
     private val bets = LinkedHashMap<String, BetView>()
     private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
     private val openBetsByFixture = HashMap<String, MutableSet<String>>()
+    private val openByFixture = HashMap<String, FixtureOpen>()
     private val kindCounts = HashMap<String, Long>()
     private var deposits = BigInteger.ZERO
     private var withdrawals = BigInteger.ZERO
@@ -115,6 +137,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                     val amount = BigInteger.valueOf(stake)
                     openStakes = openStakes.add(amount)
                     exposure = exposure.add(openExposure(bet))
+                    addOpen(bet)
                 }
             }
             "BET_WON", "BET_LOST", "BET_VOIDED", "BET_CASHED_OUT" -> {
@@ -127,6 +150,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                         val amount = BigInteger.valueOf(it.stake)
                         openStakes = openStakes.subtract(amount)
                         exposure = exposure.subtract(openExposure(it))
+                        removeOpen(it)
                     }
                     bets[betId] = it.copy(settledSeq = e.seq, outcome = e.kind.removePrefix("BET_"), payout = payout)
                     openBetsByPlayer[it.playerId]?.remove(betId)
@@ -138,11 +162,36 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         }
     }
 
-    private fun openExposure(bet: BetView): BigInteger {
-        val stake = BigInteger.valueOf(bet.stake)
-        // Aggregating generic wallet history must not introduce a Long payout overflow into catch-up.
-        return stake.multiply(BigInteger.valueOf(bet.oddsHundredths.toLong()))
-            .divide(BigInteger.valueOf(100)).subtract(stake)
+    /**
+     * Stake x odds rounded down, per bet. Equal to [BetView.potentialPayout] whenever that fits Long,
+     * but aggregating generic wallet history must not introduce a Long payout overflow into catch-up.
+     * Fixture liabilities sum these rounded per-bet payouts; they never round an aggregated stake.
+     */
+    private fun openPayout(bet: BetView): BigInteger =
+        BigInteger.valueOf(bet.stake).multiply(BigInteger.valueOf(bet.oddsHundredths.toLong())).divide(BigInteger.valueOf(100))
+
+    private fun openExposure(bet: BetView): BigInteger = openPayout(bet).subtract(BigInteger.valueOf(bet.stake))
+
+    /** Called exactly once per console placement, as it is applied. */
+    private fun addOpen(bet: BetView) {
+        val fixture = openByFixture.getOrPut(bet.fixtureId) { FixtureOpen() }
+        val payout = openPayout(bet)
+        val amount = BigInteger.valueOf(bet.stake)
+        fixture.total.apply { bets++; stake = stake.add(amount) }
+        fixture.bySelection.getOrPut(bet.selection) { OpenCounts() }.apply { bets++; liability = liability.add(payout) }
+    }
+
+    /** Called only for a bet that was open, so retries and conflicting settlements never subtract twice. */
+    private fun removeOpen(bet: BetView) {
+        val fixture = openByFixture.getValue(bet.fixtureId)
+        val payout = openPayout(bet)
+        val amount = BigInteger.valueOf(bet.stake)
+        fixture.total.apply { bets--; stake = stake.subtract(amount) }
+        val selection = fixture.bySelection.getValue(bet.selection)
+        selection.apply { bets--; liability = liability.subtract(payout) }
+        // Drop empty buckets so history of settled fixtures and odd selections costs no memory.
+        if (selection.bets == 0) fixture.bySelection.remove(bet.selection)
+        if (fixture.total.bets == 0) openByFixture.remove(bet.fixtureId)
     }
 
     // ---- Queries (all return copies, safe to use after the lock is released) ----
@@ -173,6 +222,27 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     fun totals(): Totals = synchronized(lock) {
         Totals(next, deposits, withdrawals, staked, returned, HashMap(kindCounts), openBetCount, openStakes, exposure)
     }
+
+    /**
+     * Open-bet aggregates for the requested fixtures (each mapped to the selections whose liability is
+     * wanted), all from one indexed prefix. Work is proportional to the request, never to bets or history.
+     * Unknown fixtures and unrequested selections read as zero. Never base a money decision on this.
+     */
+    fun fixtureSummaries(selectionsByFixture: Map<String, Collection<String>>): Map<String, FixtureSummary> = synchronized(lock) {
+        val result = LinkedHashMap<String, FixtureSummary>(selectionsByFixture.size * 2)
+        for ((fixtureId, selections) in selectionsByFixture) {
+            val open = openByFixture[fixtureId]
+            val liability = LinkedHashMap<String, BigInteger>()
+            for (selection in selections) liability[selection] = open?.bySelection?.get(selection)?.liability ?: BigInteger.ZERO
+            result[fixtureId] = FixtureSummary(
+                next, open?.total?.bets ?: 0, open?.total?.stake ?: BigInteger.ZERO, java.util.Collections.unmodifiableMap(liability),
+            )
+        }
+        java.util.Collections.unmodifiableMap(result)
+    }
+
+    fun fixtureSummary(fixtureId: String, selections: Collection<String>): FixtureSummary =
+        fixtureSummaries(mapOf(fixtureId to selections)).getValue(fixtureId)
 
     fun balance(account: AccountId) = ledger.balance(account)
 

@@ -18,6 +18,7 @@ import java.util.Properties
 import java.util.concurrent.CompletableFuture
 import java.util.concurrent.CompletionException
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.ConcurrentSkipListMap
 import java.util.concurrent.ExecutionException
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
@@ -84,6 +85,19 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
 
     private val fixtures = ConcurrentHashMap<String, Fixture>()
     private val openById = ConcurrentHashMap<String, Fixture>()
+
+    /** Numeric fixture order (F2 before F10); the id breaks ties between spellings of one number. */
+    private data class FixtureKey(val number: Int, val id: String) : Comparable<FixtureKey> {
+        override fun compareTo(other: FixtureKey) = compareValuesBy(this, other, FixtureKey::number, FixtureKey::id)
+    }
+    private fun keyOf(f: Fixture) = FixtureKey(f.id.removePrefix("F").toInt(), f.id)
+
+    // Dashboard indexes over the same Fixture objects, kept in numeric order so bounded views never sort history.
+    // A fixture joins `completed` before it leaves `unfinished`, so a reader that samples `unfinished` first and
+    // `completed` second can never miss it. Completion is permanent after startup.
+    private val byNumber = ConcurrentSkipListMap<FixtureKey, Fixture>()
+    private val unfinished = ConcurrentSkipListMap<FixtureKey, Fixture>()
+    private val completed = ConcurrentSkipListMap<FixtureKey, Fixture>()
     private val counter = AtomicInteger()
     private val persistenceLock = Any()
     private val placementLock = ReentrantLock()
@@ -96,9 +110,41 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
     init {
         restoreFixtures()
         fixtures.values.filter { it.isOpen }.forEach { openById[it.id] = it }
+        fixtures.values.forEach(::indexFixture)
     }
 
-    fun fixtures(): List<Fixture> = fixtures.values.sortedBy { it.id.removePrefix("F").toInt() }
+    private fun indexFixture(f: Fixture) {
+        val key = keyOf(f)
+        byNumber[key] = f
+        if (f.settlementComplete) completed[key] = f else unfinished[key] = f
+    }
+
+    /** Every fixture in numeric order, for settlement, recovery and regulator reports. */
+    fun fixtures(): List<Fixture> = byNumber.values.toList()
+
+    /**
+     * The dashboard's bounded view, newest first: every unfinished or unresolved fixture, however old,
+     * plus the [recentCompleted] highest-numbered completed ones. Work scales with that output, not history.
+     */
+    fun dashboardFixtures(recentCompleted: Int = 30): List<Fixture> {
+        val pending = unfinished.descendingMap().values.toList()
+        val recent = completed.descendingMap().values.asSequence().take(recentCompleted).toList()
+        val merged = ArrayList<Fixture>(pending.size + recent.size)
+        var i = 0
+        var j = 0
+        while (i < pending.size || j < recent.size) {
+            val next = when {
+                j == recent.size -> pending[i++]
+                i == pending.size -> recent[j++]
+                else -> {
+                    val order = keyOf(pending[i]).compareTo(keyOf(recent[j]))
+                    if (order >= 0) pending[i++] else recent[j++]
+                }
+            }
+            if (merged.lastOrNull() !== next) merged += next
+        }
+        return merged
+    }
     /** Current betting candidates, without scanning or sorting historical definitions. */
     fun openFixtures(): List<Fixture> = openById.values.filter { it.isOpen }
     fun fixture(id: String): Fixture = fixtures[id] ?: throw NotFoundException("fixture $id does not exist")
@@ -119,6 +165,7 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         persistFixtures(additional = f) {
             fixtures[f.id] = f
             openById[f.id] = f
+            indexFixture(f)
         }
         return f
     }
@@ -254,7 +301,12 @@ class Book(private val wallet: SportsbookWallet, private val readModel: ReadMode
         readModel.catchUp()
         if (readModel.openBetsOn(fixtureId).isEmpty()) {
             if (!f.settlementComplete) {
-                persistFixtures(completionOverrides = mapOf(f.id to true)) { f.settlementComplete = true }
+                persistFixtures(completionOverrides = mapOf(f.id to true)) {
+                    f.settlementComplete = true
+                    val key = keyOf(f)
+                    completed[key] = f
+                    unfinished.remove(key)
+                }
             }
         }
         return Settlement(fixtureId, result, won, lost, voided, already)
