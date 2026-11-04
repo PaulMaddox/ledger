@@ -6,6 +6,13 @@ import vm from "node:vm";
 import test from "node:test";
 
 const source = readFileSync(new URL("../src/main/resources/web/app.js", import.meta.url), "utf8");
+test("console navigation places Simulator immediately after Customer", () => {
+  const html = readFileSync(new URL("../src/main/resources/web/index.html", import.meta.url), "utf8");
+  const navigation = html.match(/<nav\b[^>]*class="personas"[^>]*>([\s\S]*?)<\/nav>/)[1];
+  assert.deepEqual([...navigation.matchAll(/data-view="([^"]+)"/g)].map(([, view]) => view),
+    ["about", "customer", "simulator", "operator", "regulator", "administrator", "chaos"]);
+});
+
 const cryptoSource = source.split("// ============================== router")[0];
 const str = s => { const b = Buffer.from(s); const n = Buffer.alloc(4); n.writeInt32BE(b.length); return Buffer.concat([n, b]); };
 const i32 = n => { const b = Buffer.alloc(4); b.writeInt32BE(n); return b; };
