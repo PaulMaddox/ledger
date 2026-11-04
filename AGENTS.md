@@ -204,6 +204,9 @@ after their oversized declaration, and chunked bodies stop at the 16,385-byte
 overflow boundary without terminating the stream. Sending excess bytes after
 early rejection can reset TCP and discard a valid response; never hide that
 transport failure with catches or restore unbounded draining.
+Origin-rejection clients withhold their bodies to prove validation precedes reads.
+Raw test clients consume the declared response length and assert it is complete,
+rather than reading beyond the HTTP frame into a connection reset.
 
 - Nonempty API POST bodies require UTF-8 `application/x-www-form-urlencoded`
   (`415/unsupported_media_type` otherwise). Reject malformed UTF-8, percent escapes
