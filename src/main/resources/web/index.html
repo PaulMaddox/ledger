@@ -9,7 +9,7 @@
 <body>
 <!--
   Ledger Console: a single-page dashboard over the running ledger.
-  About links to the guide; six console views share operational telemetry and isolated failure experiments.
+  The About guide and six console views share one header, with operational telemetry and isolated failure experiments.
   All behaviour lives in app.js; all data comes from /api/* on the same server.
 -->
 <header class="topbar">
@@ -36,17 +36,8 @@
 
 <main>
 <!-- ============================== ABOUT ============================== -->
-<section class="view" id="view-about" hidden>
-  <div class="panel">
-    <div class="eyebrow">Exact, durable and provable</div>
-    <h1>Sportsbook Ledger</h1>
-    <p>A double-entry, append-only ledger for player accounts. Every committed money movement can be independently verified against signed history.</p>
-    <p>Explore the console tabs to place bets, watch automated customers and audit the ledger, or open the interactive guide to step through the code and its regulatory properties.</p>
-    <div class="row">
-      <a class="about-link" id="aboutGuide" href="/about/" target="_blank" rel="noopener">Open the interactive guide</a>
-      <span class="hint">Opens in a new tab, keeping this console available.</span>
-    </div>
-  </div>
+<section class="view about-view" id="view-about" hidden>
+  <iframe class="about-frame" src="/about/" title="PAM Ledger documentation" loading="lazy"></iframe>
 </section>
 
 <!-- ============================== CUSTOMER ============================== -->

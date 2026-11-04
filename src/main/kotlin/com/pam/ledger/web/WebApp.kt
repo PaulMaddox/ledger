@@ -386,8 +386,6 @@ class LedgerWebApp private constructor(
     private class HttpError(val status: Int, val code: String, message: String) : RuntimeException(message)
 
     private fun handle(ex: HttpExchange) {
-        ex.responseHeaders.set("Content-Security-Policy", "frame-ancestors 'none'")
-        ex.responseHeaders.set("X-Frame-Options", "DENY")
         ex.responseHeaders.set("Connection", "close")
         // A busy API is not a dead HTTP executor; liveness bypasses admission, not the executor.
         val liveness = ex.requestMethod == "GET" && ex.requestURI.rawPath == "/health/live"

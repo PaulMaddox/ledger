@@ -10,7 +10,7 @@ Requires Playwright for Python and a Chromium-based browser:
     pip install playwright && python3 -m playwright install chromium
 or pass an existing Chrome with --chrome /path/to/chrome.
 Use --regulator-only to refresh the reporting screenshots without exercising Chaos Monkey.
-Use --about-only to check the default About view and its top-level guide link.
+Use --about-only to check the default About view and its embedded interactive guide.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
 build up, then photographs each persona's view into docs/screenshots/. WARNING: the
@@ -55,17 +55,17 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             await page.goto(url)
             await page.locator("#view-about").wait_for(state="visible")
             assert await page.locator("[data-view='about']").get_attribute("aria-selected") == "true"
-            assert await page.locator("iframe").count() == 0
-            await shot("about")
-            async with page.expect_popup() as popup:
-                await page.click("#aboutGuide")
-            guide = await popup.value
-            guide.on("pageerror", lambda e: errors.append(str(e)))
-            await guide.wait_for_load_state()
-            assert await guide.title() == "Sportsbook Ledger Internals"
+            assert await page.locator("iframe").count() == 1
+            guide = page.frame_locator(".about-frame")
             await guide.locator("h1").wait_for(state="visible")
+            assert await guide.locator("title").text_content() == "Sportsbook Ledger Internals"
+            await guide.locator("#modeAttack").click()
+            assert await guide.locator("#modeAttack").get_attribute("aria-pressed") == "true"
+            await guide.locator("#modeNaive").click()
+            assert await guide.locator("#modeNaive").get_attribute("aria-pressed") == "true"
+            await page.locator(".about-frame").evaluate("(frame) => frame.contentWindow.scrollTo(0, 0)")
+            await shot("about")
             assert await page.locator("#view-about").is_visible()
-            await guide.close()
         if about_only:
             await browser.close()
             if errors:
@@ -151,6 +151,6 @@ if __name__ == "__main__":
     ap.add_argument("--warmup", type=int, default=12, help="seconds of simulated traffic before the first screenshot")
     scope = ap.add_mutually_exclusive_group()
     scope.add_argument("--regulator-only", action="store_true", help="capture reporting views only; skip destructive Chaos Monkey scenarios")
-    scope.add_argument("--about-only", action="store_true", help="check and capture About and its guide link only")
+    scope.add_argument("--about-only", action="store_true", help="check and capture About and its embedded guide only")
     a = ap.parse_args()
     asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only))

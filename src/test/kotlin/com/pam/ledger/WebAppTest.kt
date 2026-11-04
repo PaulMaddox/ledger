@@ -462,14 +462,13 @@ class WebAppTest {
         assertEquals(200, console.statusCode())
         assertTrue(console.body().indexOf("data-view=\"about\"") < console.body().indexOf("data-view=\"customer\""))
         assertTrue(console.body().contains("id=\"view-about\""))
-        assertFalse(console.body().contains("<iframe"))
-        assertTrue(console.body().contains("id=\"aboutGuide\" href=\"/about/\" target=\"_blank\" rel=\"noopener\""))
+        assertTrue(console.body().contains("<iframe class=\"about-frame\" src=\"/about/\""))
 
         val guide = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/about/")).GET().build(),
             HttpResponse.BodyHandlers.ofString())
         assertEquals(200, guide.statusCode())
-        assertEquals("frame-ancestors 'none'", guide.headers().firstValue("Content-Security-Policy").orElse(""))
-        assertEquals("DENY", guide.headers().firstValue("X-Frame-Options").orElse(""))
+        assertFalse(guide.headers().firstValue("Content-Security-Policy").isPresent)
+        assertFalse(guide.headers().firstValue("X-Frame-Options").isPresent)
         assertTrue(guide.body().contains("<title>Sportsbook Ledger Internals</title>"))
         assertTrue(guide.body().contains("screenshots/simulator.png"))
 
@@ -883,14 +882,14 @@ class WebAppTest {
     }
 
     @Test
-    fun `console pages forbid framing without blocking top-level navigation`() = withApp { app ->
+    fun `console pages permit framing and top-level navigation`() = withApp { app ->
         for (path in listOf("/", "/index.html")) {
             val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}$path"))
                 .header("Sec-Fetch-Site", "cross-site").GET().build()
             val response = http.send(request, HttpResponse.BodyHandlers.ofString())
             assertEquals(200, response.statusCode())
-            assertEquals("frame-ancestors 'none'", response.headers().firstValue("Content-Security-Policy").orElse(""))
-            assertEquals("DENY", response.headers().firstValue("X-Frame-Options").orElse(""))
+            assertFalse(response.headers().firstValue("Content-Security-Policy").isPresent)
+            assertFalse(response.headers().firstValue("X-Frame-Options").isPresent)
         }
     }
 
