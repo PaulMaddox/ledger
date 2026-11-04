@@ -138,7 +138,10 @@ class JournalScanTest {
 
     private fun payload(rnd: Random, size: Int) = ByteArray(size).also { rnd.nextBytes(it) }
 
-    private fun journal(vararg payloads: ByteArray): ByteArray = payloads.fold(ByteArray(0)) { acc, p -> acc + frame(p) }
+    private fun journal(vararg payloads: ByteArray): ByteArray =
+        ByteBuffer.allocate(payloads.sumOf { Journal.HEADER + it.size }).apply {
+            payloads.forEach { put(frame(it)) }
+        }.array()
 
     private fun boundaries(journal: ByteArray, sizes: List<Int>): List<Long> {
         var p = 0L
