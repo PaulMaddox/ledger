@@ -72,6 +72,11 @@ internal class Journal private constructor(
 
     override fun close() = channel.close()
 
+    /** A positional read like [FileChannel.read]: may return fewer bytes than asked for, or -1 at end of file. */
+    fun interface PositionalRead {
+        fun read(dst: ByteBuffer, position: Long): Int
+    }
+
     /** Result of scanning a journal. */
     data class ScanResult(val records: Int, val validBytes: Long, val tornTailBytes: Long)
 
@@ -114,23 +119,41 @@ internal class Journal private constructor(
             return FileChannel.open(path, READ).use { scan(it, onRecord, from) }
         }
 
-        private fun scan(ch: FileChannel, onRecord: (ByteArray) -> Unit, start: Long = 0L): ScanResult {
-            val size = ch.size()
+        /** Default read-ahead: one channel read supplies many framed records, yet memory stays flat. */
+        const val READ_AHEAD = 256 * 1024
+
+        private fun scan(ch: FileChannel, onRecord: (ByteArray) -> Unit, start: Long = 0L): ScanResult =
+            scan(ch.size(), start, READ_AHEAD, PositionalRead { dst, position -> ch.read(dst, position) }, onRecord)
+
+        /**
+         * The scanner proper. It classifies exactly the first [size] bytes of the file, and never
+         * reads beyond them: bytes appended while the scan runs cannot change which bytes it claims
+         * to have validated, and an incomplete record is simply picked up by a later scan.
+         *
+         * Reads go through a read-ahead buffer of [readAhead] bytes so that one [read] call can
+         * supply many records. The buffer only changes how bytes arrive. Every length limit, CRC32C
+         * check, torn-tail versus corruption decision and callback happens exactly as if each header
+         * and payload had been read separately. A record too big for the buffer is read straight into
+         * its own array, after its length and its fit inside the prefix have been validated.
+         *
+         * Each payload handed to [onRecord] is a fresh array that the callback owns; buffer storage
+         * is never exposed or reused.
+         */
+        internal fun scan(size: Long, start: Long, readAhead: Int, read: PositionalRead, onRecord: (ByteArray) -> Unit): ScanResult {
+            require(readAhead >= HEADER) { "read-ahead $readAhead is smaller than a record header" }
             var pos = start
             var count = 0
-            val header = ByteBuffer.allocate(HEADER)
+            val ahead = ReadAhead(read, size, start, readAhead)
             val crc = CRC32C()
             while (pos < size) {
                 val remaining = size - pos
                 if (remaining < HEADER) return ScanResult(count, pos, remaining) // partial header: torn tail
 
-                header.clear()
-                readFully(ch, header, pos)
-                header.flip()
-                val len = header.int
-                val expectedCrc = header.int
+                ahead.fill(HEADER)
+                val len = ahead.int(0)
+                val expectedCrc = ahead.int(4)
 
-                if (len == 0 && allZero(ch, pos, size)) {
+                if (len == 0 && allZero(read, pos, size)) {
                     // Some filesystems extend a file with zeros before the data lands. Torn tail.
                     return ScanResult(count, pos, remaining)
                 }
@@ -140,42 +163,119 @@ internal class Journal private constructor(
                 val end = pos + HEADER + len
                 if (end > size) return ScanResult(count, pos, remaining) // record runs past EOF: torn tail
 
-                val payload = ByteBuffer.allocate(len)
-                readFully(ch, payload, pos + HEADER)
-                crc.reset()
-                crc.update(payload.array())
-                if (crc.value.toInt() != expectedCrc) {
-                    // A bad CRC on the very last record is a torn write. Anywhere else it is corruption.
-                    if (end == size) return ScanResult(count, pos, remaining)
-                    throw TamperDetectedException("journal corrupt at byte $pos: CRC mismatch in a non-final record")
+                // Only now, with len validated and the whole record known to lie inside the prefix,
+                // is a payload array allocated.
+                val payload: ByteArray
+                if (HEADER + len <= readAhead) {
+                    ahead.fill(HEADER + len)
+                    crc.reset()
+                    ahead.updateCrc(crc, HEADER, len)
+                    if (crc.value.toInt() != expectedCrc) return crcFailure(end, size, count, pos, remaining)
+                    payload = ahead.copy(HEADER, len)
+                    ahead.consume(HEADER + len)
+                } else {
+                    payload = ahead.takeOversized(len)
+                    crc.reset()
+                    crc.update(payload)
+                    if (crc.value.toInt() != expectedCrc) return crcFailure(end, size, count, pos, remaining)
                 }
-                onRecord(payload.array())
+                onRecord(payload)
                 count++
                 pos = end
             }
             return ScanResult(count, pos, 0)
         }
 
-        private fun readFully(ch: FileChannel, buf: ByteBuffer, position: Long) {
+        /** A bad CRC on the very last record is a torn write. Anywhere else it is corruption. */
+        private fun crcFailure(end: Long, size: Long, count: Int, pos: Long, remaining: Long): ScanResult {
+            if (end == size) return ScanResult(count, pos, remaining)
+            throw TamperDetectedException("journal corrupt at byte $pos: CRC mismatch in a non-final record")
+        }
+
+        private fun readFully(read: PositionalRead, buf: ByteBuffer, position: Long) {
             var p = position
             while (buf.hasRemaining()) {
-                val n = ch.read(buf, p)
+                val n = read.read(buf, p)
                 if (n < 0) throw java.io.EOFException("unexpected end of journal")
                 p += n
             }
         }
 
-        private fun allZero(ch: FileChannel, from: Long, to: Long): Boolean {
+        /** True if every byte in [from, to) is zero. Reads nothing at or beyond [to]. */
+        private fun allZero(read: PositionalRead, from: Long, to: Long): Boolean {
             val buf = ByteBuffer.allocate(8192)
             var p = from
             while (p < to) {
                 buf.clear()
-                val n = ch.read(buf, p)
+                buf.limit(minOf(buf.capacity().toLong(), to - p).toInt())
+                val n = read.read(buf, p)
                 if (n <= 0) break
                 for (i in 0 until n) if (buf.get(i).toInt() != 0) return false
                 p += n
             }
             return true
+        }
+
+        /**
+         * Sequential read-ahead over the first [limit] bytes of a file. [fill] tops the buffer up
+         * with as many bytes as fit, in as few reads as the source allows, and tolerates short reads.
+         */
+        private class ReadAhead(private val source: PositionalRead, private val limit: Long, start: Long, capacity: Int) {
+            private val buf = ByteArray(capacity)
+            private val wrapper = ByteBuffer.wrap(buf)
+            private var r = 0 // next unconsumed byte
+            private var w = 0 // end of valid bytes
+            private var next = start // file offset of the first byte not yet read into buf
+
+            /** Make at least [n] unconsumed bytes available; the caller guarantees they lie inside the prefix. */
+            fun fill(n: Int) {
+                if (w - r >= n) return
+                if (r > 0) {
+                    System.arraycopy(buf, r, buf, 0, w - r)
+                    w -= r
+                    r = 0
+                }
+                while (w < n) {
+                    val want = minOf((buf.size - w).toLong(), limit - next).toInt()
+                    check(want > 0) { "read past the captured journal prefix" }
+                    wrapper.limit(w + want).position(w)
+                    val got = source.read(wrapper, next)
+                    if (got < 0) throw java.io.EOFException("unexpected end of journal")
+                    w += got
+                    next += got
+                }
+            }
+
+            /** Big-endian int at [offset] from the next unconsumed byte, as ByteBuffer's default order reads it. */
+            fun int(offset: Int): Int {
+                val i = r + offset
+                return (buf[i].toInt() and 0xFF shl 24) or (buf[i + 1].toInt() and 0xFF shl 16) or
+                    (buf[i + 2].toInt() and 0xFF shl 8) or (buf[i + 3].toInt() and 0xFF)
+            }
+
+            fun updateCrc(crc: CRC32C, offset: Int, length: Int) = crc.update(buf, r + offset, length)
+
+            fun copy(offset: Int, length: Int): ByteArray = buf.copyOfRange(r + offset, r + offset + length)
+
+            fun consume(n: Int) {
+                r += n
+            }
+
+            /**
+             * The record at the cursor is larger than the buffer: its header and the start of its
+             * payload are buffered, and the rest is read straight into the returned array. The record
+             * therefore ends beyond everything buffered, so the buffer is left empty.
+             */
+            fun takeOversized(length: Int): ByteArray {
+                val out = ByteArray(length)
+                val have = w - r - HEADER
+                System.arraycopy(buf, r + HEADER, out, 0, have)
+                r = 0
+                w = 0
+                readFully(source, ByteBuffer.wrap(out, have, length - have), next)
+                next += length - have
+                return out
+            }
         }
 
         /** Preserve the torn bytes in a side file before truncating. Evidence is never deleted. */
