@@ -212,7 +212,9 @@ JDK draining and forfeits the bounded-close guarantee.
   and cash-out prices. Validate simulator actions, settings, booleans and event
   cursors before mutation. Web deposits cannot claim internal `sim-seed-` references.
 - HTTP responses forbid framing with CSP `frame-ancestors 'none'` and
-  `X-Frame-Options: DENY`; top-level console links remain allowed.
+  `X-Frame-Options: DENY`; top-level console links remain allowed. About opens
+  the guide in a new top-level tab, never an iframe. Check this browser flow and
+  refresh its screenshot with `python3 scripts/capture-screenshots.py --about-only`.
 
 The demo admission cap is not authentication or a production capacity policy.
 Production still needs authenticated player/operator/regulator roles, per-action

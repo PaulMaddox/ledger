@@ -462,10 +462,14 @@ class WebAppTest {
         assertEquals(200, console.statusCode())
         assertTrue(console.body().indexOf("data-view=\"about\"") < console.body().indexOf("data-view=\"customer\""))
         assertTrue(console.body().contains("id=\"view-about\""))
+        assertFalse(console.body().contains("<iframe"))
+        assertTrue(console.body().contains("id=\"aboutGuide\" href=\"/about/\" target=\"_blank\" rel=\"noopener\""))
 
         val guide = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/about/")).GET().build(),
             HttpResponse.BodyHandlers.ofString())
         assertEquals(200, guide.statusCode())
+        assertEquals("frame-ancestors 'none'", guide.headers().firstValue("Content-Security-Policy").orElse(""))
+        assertEquals("DENY", guide.headers().firstValue("X-Frame-Options").orElse(""))
         assertTrue(guide.body().contains("<title>Sportsbook Ledger Internals</title>"))
         assertTrue(guide.body().contains("screenshots/simulator.png"))
 

@@ -10,6 +10,7 @@ Requires Playwright for Python and a Chromium-based browser:
     pip install playwright && python3 -m playwright install chromium
 or pass an existing Chrome with --chrome /path/to/chrome.
 Use --regulator-only to refresh the reporting screenshots without exercising Chaos Monkey.
+Use --about-only to check the default About view and its top-level guide link.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
 build up, then photographs each persona's view into docs/screenshots/. WARNING: the
@@ -24,7 +25,7 @@ from playwright.async_api import async_playwright
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False) -> None:
+async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         launch = {"args": ["--no-sandbox"]}
@@ -49,6 +50,27 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             """Just one panel, for moments that happen below the fold."""
             await page.locator(selector).screenshot(path=str(out / f"{name}.png"))
             report(name)
+
+        if not regulator_only:
+            await page.goto(url)
+            await page.locator("#view-about").wait_for(state="visible")
+            assert await page.locator("[data-view='about']").get_attribute("aria-selected") == "true"
+            assert await page.locator("iframe").count() == 0
+            await shot("about")
+            async with page.expect_popup() as popup:
+                await page.click("#aboutGuide")
+            guide = await popup.value
+            guide.on("pageerror", lambda e: errors.append(str(e)))
+            await guide.wait_for_load_state()
+            assert await guide.title() == "Sportsbook Ledger Internals"
+            await guide.locator("h1").wait_for(state="visible")
+            assert await page.locator("#view-about").is_visible()
+            await guide.close()
+        if about_only:
+            await browser.close()
+            if errors:
+                raise SystemExit("page errors while capturing:\n  " + "\n  ".join(errors))
+            return
 
         # Simulator: 500 automated customers, then let traffic build so every view has data.
         await page.goto(url + "#simulator")
@@ -127,6 +149,8 @@ if __name__ == "__main__":
     ap.add_argument("--out", default=str(ROOT / "docs" / "screenshots"), help="output folder")
     ap.add_argument("--chrome", default=None, help="path to an existing Chrome/Chromium executable")
     ap.add_argument("--warmup", type=int, default=12, help="seconds of simulated traffic before the first screenshot")
-    ap.add_argument("--regulator-only", action="store_true", help="capture reporting views only; skip destructive Chaos Monkey scenarios")
+    scope = ap.add_mutually_exclusive_group()
+    scope.add_argument("--regulator-only", action="store_true", help="capture reporting views only; skip destructive Chaos Monkey scenarios")
+    scope.add_argument("--about-only", action="store_true", help="check and capture About and its guide link only")
     a = ap.parse_args()
-    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only))
+    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only))
