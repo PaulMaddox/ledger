@@ -6,7 +6,7 @@ before your first change: several rules protect properties that tests alone cann
 ## What this is
 
 A cryptographically verifiable, append-only, double-entry ledger for a sportsbook
-player account platform, in Kotlin on JDK 21, plus an interactive guide published
+player account platform, in Kotlin on JDK 27, plus an interactive guide published
 with GitHub Pages. The ledger's job is to make money movements exact, durable and
 provable to a regulator. Correctness outranks speed, features and tidiness.
 
@@ -52,10 +52,20 @@ node scripts/check-guide.mjs         # must print four PASS lines
 node scripts/check-web.mjs           # dependency-free console regressions
 ```
 
-The setup scripts install JDK 21 if needed and download the build tools; the first
+The setup scripts install JDK 27 if needed and download the build tools; the first
 build requires internet access. On Windows, the README's `-ExecutionPolicy Bypass`
-option applies only to the setup process, not to system settings. With JDK 21
-already installed, setup is optional.
+option applies only to the launched PowerShell process, not to system settings. With JDK 27
+already installed, setup is optional. Setup selects a complete JDK 27 for both
+`JAVA_HOME` and `PATH` within its process, so a stale `JAVA_HOME` cannot force an
+unsupported Gradle daemon JVM. Keep your terminal's `JAVA_HOME` on JDK 27 for
+subsequent wrapper commands. The README quick starts source setup and start the
+console in the same child shell, retaining the selected JDK without changing
+the caller's shell settings. In Bash, source setup as a standalone command with
+errexit enabled, never on the left of `&&`, which disables its failure checks.
+Kotlin 2.4 currently emits JVM 26 bytecode; both
+compilers target 26 while the build, tests and runtime use JDK 27.
+Run `python3 scripts/check-setup.py` with JDK 27 on `PATH` to exercise both
+valid and stale `JAVA_HOME` selection; CI runs it on Ubuntu and Windows.
 
 The CLI demo places and settles bets concurrently, checks proofs, and audits the
 files it wrote. Rejected overspending attempts are expected; an audit failure
@@ -189,6 +199,14 @@ This JDK-specific setting, like the request/response deadlines,
 is read once: a hosting JVM must configure it before its first HTTP server is created.
 An existing explicit property value is not overwritten; a nonzero override restores
 JDK draining and forfeits the bounded-close guarantee.
+Oversized-upload regressions stage the client: fixed-length bodies are withheld
+after their oversized declaration, and chunked bodies stop at the 16,385-byte
+overflow boundary without terminating the stream. Sending excess bytes after
+early rejection can reset TCP and discard a valid response; never hide that
+transport failure with catches or restore unbounded draining.
+Origin-rejection clients withhold their bodies to prove validation precedes reads.
+Raw test clients consume the declared response length and assert it is complete,
+rather than reading beyond the HTTP frame into a connection reset.
 
 - Nonempty API POST bodies require UTF-8 `application/x-www-form-urlencoded`
   (`415/unsupported_media_type` otherwise). Reject malformed UTF-8, percent escapes

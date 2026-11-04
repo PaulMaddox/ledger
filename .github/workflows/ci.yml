@@ -51,7 +51,7 @@ jobs:
       - uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "27"
 
       # Fail if gradle-wrapper.jar is not an official Gradle release: a tampered
       # wrapper jar would run arbitrary code in CI and on every developer's machine.
@@ -148,31 +148,32 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
-      # Ubuntu runners default to an older JDK, so setup.sh installs JDK 21 itself.
+      # Ubuntu runners may default to an older JDK, so setup.sh installs JDK 27 itself.
       - name: Set up (Ubuntu), as documented
         if: runner.os == 'Linux'
-        run: ./scripts/setup.sh
+        run: bash -ec 'source ./scripts/setup.sh; ./gradlew run'
 
-      - name: Run the demo (Ubuntu), as documented
-        if: runner.os == 'Linux'
-        run: ./gradlew run
-
-      # winget is not reliably available on GitHub's Windows runners, so JDK 21 is
+      # winget is not reliably available on GitHub's Windows runners, so JDK 27 is
       # provided here and setup.ps1 takes its "already installed" path. This tests
       # the script and the wrapper on Windows, but not the winget install itself.
-      - name: Provide JDK 21 (Windows runner only)
+      - name: Provide JDK 27 (Windows runner only)
         if: runner.os == 'Windows'
         uses: actions/setup-java@v5
         with:
           distribution: temurin
-          java-version: "21"
+          java-version: "27"
 
       - name: Set up (Windows), as documented
         if: runner.os == 'Windows'
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+        run: powershell -ExecutionPolicy Bypass -Command ". .\scripts\setup.ps1; .\gradlew.bat run"
 
-      - name: Run the demo (Windows), as documented
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\gradlew.bat run
+      - name: Provide JDK 27 for setup regression checks
+        if: runner.os == 'Linux'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "27"
+
+      - name: Check setup JVM selection
+        run: python scripts/check-setup.py

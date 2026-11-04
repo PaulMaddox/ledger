@@ -1,9 +1,9 @@
 // Build for the sportsbook PAM ledger.
 // Deliberately dependency-free at runtime: every cryptographic primitive used
-// (SHA-256, Ed25519, CRC32C) ships with JDK 21, so the trusted computing base
+// (SHA-256, Ed25519, CRC32C) ships with JDK 27, so the trusted computing base
 // is just the JDK plus the Kotlin standard library.
 plugins {
-    kotlin("jvm") version "2.2.20"
+    kotlin("jvm") version "2.4.10"
     application
 }
 
@@ -13,7 +13,13 @@ dependencies {
     testImplementation(kotlin("test"))
 }
 
-kotlin { jvmToolchain(21) }
+kotlin {
+    jvmToolchain(27)
+    // Kotlin 2.4 emits at most JVM 26 bytecode; both languages must agree while running on JDK 27.
+    compilerOptions { jvmTarget.set(org.jetbrains.kotlin.gradle.dsl.JvmTarget.JVM_26) }
+}
+
+tasks.withType<JavaCompile>().configureEach { options.release.set(26) }
 
 application { mainClass.set("com.pam.ledger.demo.DemoKt") }
 

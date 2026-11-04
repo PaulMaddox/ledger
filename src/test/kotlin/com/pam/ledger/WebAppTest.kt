@@ -420,8 +420,11 @@ class WebAppTest {
         body: ByteArray? = null,
         contentType: String? = "application/x-www-form-urlencoded",
         chunked: Boolean = false,
+        stageOversized: Boolean = false,
+        sendBody: Boolean = true,
     ): String {
         val bytes = body ?: (if (method == "POST") "amount=1&ref=allowed-host-test" else "").toByteArray(Charsets.UTF_8)
+        require(!stageOversized || (method == "POST" && bytes.size > 16_384))
         return Socket("127.0.0.1", app.port).use { socket ->
             socket.soTimeout = 5_000
             val request = buildString {
@@ -433,10 +436,28 @@ class WebAppTest {
                 else append("Content-Length: ${bytes.size}\r\n\r\n")
             }
             socket.getOutputStream().write(request.toByteArray(Charsets.UTF_8))
-            if (chunked) socket.getOutputStream().write("${bytes.size.toString(16)}\r\n".toByteArray())
-            socket.getOutputStream().write(bytes)
-            if (chunked) socket.getOutputStream().write("\r\n0\r\n\r\n".toByteArray())
-            socket.getInputStream().readBytes().toString(Charsets.UTF_8)
+            if (chunked && sendBody) socket.getOutputStream().write("${bytes.size.toString(16)}\r\n".toByteArray())
+            // Sending past early rejection can reset TCP and discard the response when draining is disabled.
+            if (stageOversized) {
+                if (chunked) {
+                    socket.getOutputStream().write(bytes, 0, 16_385)
+                    // The JDK consumes a completed chunk's CRLF before returning its last bytes.
+                    if (bytes.size == 16_385) socket.getOutputStream().write("\r\n".toByteArray())
+                }
+            } else if (sendBody) {
+                socket.getOutputStream().write(bytes)
+                if (chunked) socket.getOutputStream().write("\r\n0\r\n\r\n".toByteArray())
+            }
+            val input = socket.getInputStream()
+            val headers = StringBuilder()
+            while (!headers.endsWith("\r\n\r\n")) {
+                headers.append(input.read().also { assertTrue(it >= 0, "response headers ended early") }.toChar())
+            }
+            val length = headers.lineSequence().single { it.startsWith("Content-Length:", true) }
+                .substringAfter(':').trim().toInt()
+            val response = input.readNBytes(length)
+            assertEquals(length, response.size, "response body must not be truncated")
+            headers.toString() + response.toString(Charsets.UTF_8)
         }
     }
 
@@ -700,7 +721,7 @@ class WebAppTest {
             assertTrue(accepted.startsWith("HTTP/1.1 200"), accepted)
             assertEquals(200, call(app, "GET", "overview").first)
             for (origin in listOf("http://ledger.example", "https://attacker.example", "https://ledger.example:8443", "https://ledger.example/path")) {
-                val refused = rawRequest(app, "ledger.example", "POST", origin)
+                val refused = rawRequest(app, "ledger.example", "POST", origin, sendBody = false)
                 assertTrue(refused.startsWith("HTTP/1.1 403") && refused.contains("cross_origin"), refused)
             }
             for (host in listOf("attacker.example", "ledger.example:80", "ledger.example:8443")) {
@@ -710,7 +731,7 @@ class WebAppTest {
             val spoofed = call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "spoof"),
                 mapOf("Origin" to "https://ledger.example", "X-Forwarded-Host" to "ledger.example", "X-Forwarded-Proto" to "https"))
             assertEquals(403, spoofed.first)
-            val missing = rawRequest(app, "ledger.example", "POST")
+            val missing = rawRequest(app, "ledger.example", "POST", sendBody = false)
             assertTrue(missing.startsWith("HTTP/1.1 403"), missing)
         } finally { app.close() }
     }
@@ -898,7 +919,7 @@ class WebAppTest {
         val host = "127.0.0.1:${app.port}"
         for (chunked in listOf(false, true)) {
             val response = rawRequest(app, host, "POST", "http://$host",
-                body = ("amount=1&ref=" + "x".repeat(16_384)).toByteArray(), chunked = chunked)
+                body = ("amount=1&ref=" + "x".repeat(16_384)).toByteArray(), chunked = chunked, stageOversized = true)
             assertTrue(response.startsWith("HTTP/1.1 413"), response)
             assertTrue(response.contains("\"error\":\"payload_too_large\""), response)
             assertTrue(response.lineSequence().any { it.equals("Connection: close", true) }, response)
@@ -1013,6 +1034,16 @@ class WebAppTest {
             ).map { it.toByteArray(Charsets.UTF_8) }
             for (body in bodies) {
                 val before = call(app, "GET", "fixtures").second
+                if (body.size > limit) {
+                    val host = "127.0.0.1:${app.port}"
+                    val response = rawRequest(app, host, "POST", "http://$host",
+                        path = "/api/fixtures", body = body, chunked = chunked, stageOversized = true)
+                    assertTrue(response.startsWith("HTTP/1.1 413"), response)
+                    assertTrue(response.contains("\"error\":\"payload_too_large\""), response)
+                    assertTrue(response.lineSequence().any { it.equals("Connection: close", true) }, response)
+                    assertEquals(before, call(app, "GET", "fixtures").second)
+                    continue
+                }
                 val publisher = if (chunked) HttpRequest.BodyPublishers.ofInputStream { body.inputStream() }
                     else HttpRequest.BodyPublishers.ofByteArray(body)
                 val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/api/fixtures"))
@@ -1020,11 +1051,7 @@ class WebAppTest {
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .POST(publisher).timeout(Duration.ofSeconds(5)).build()
                 val response = http.send(request, HttpResponse.BodyHandlers.ofString())
-                assertEquals(if (body.size <= limit) 200 else 413, response.statusCode(), response.body())
-                if (body.size > limit) {
-                    assertTrue(response.body().contains("\"error\":\"payload_too_large\""), response.body())
-                    assertEquals(before, call(app, "GET", "fixtures").second)
-                }
+                assertEquals(200, response.statusCode(), response.body())
             }
         }
     }
@@ -1312,7 +1339,8 @@ class WebAppTest {
             val refused = rawRequest(app, "attacker.example:${app.port}", path = path, fetchSite = "cross-site")
             assertTrue(refused.startsWith("HTTP/1.1 403"), refused)
         }
-        val mutation = rawRequest(app, "localhost:${app.port}", "POST", "http://localhost:${app.port}", fetchSite = "cross-site")
+        val mutation = rawRequest(app, "localhost:${app.port}", "POST", "http://localhost:${app.port}",
+            fetchSite = "cross-site", sendBody = false)
         assertTrue(mutation.startsWith("HTTP/1.1 403"), mutation)
     }
 
@@ -1328,7 +1356,7 @@ class WebAppTest {
             }
             val allowed = rawRequest(app, "ledger.example:${app.port}", "POST", "http://ledger.example:${app.port}")
             assertTrue(allowed.startsWith("HTTP/1.1 200"), allowed)
-            val wrongOrigin = rawRequest(app, "ledger.example:${app.port}", "POST", "http://attacker.example:${app.port}")
+            val wrongOrigin = rawRequest(app, "ledger.example:${app.port}", "POST", "http://attacker.example:${app.port}", sendBody = false)
             assertTrue(wrongOrigin.startsWith("HTTP/1.1 403") && wrongOrigin.contains("cross_origin"), wrongOrigin)
             for (host in listOf("attacker.example:${app.port}", "ledger.example:1")) {
                 val refused = rawRequest(app, host)
@@ -1792,15 +1820,17 @@ class WebAppTest {
                 val threads = ConcurrentLinkedQueue<Thread>()
                 val waitingStates = setOf(Thread.State.WAITING, Thread.State.TIMED_WAITING)
                 val waves = mutableListOf<CompletableFuture<List<Result<Receipt>>>>()
+                // A blocked race must not occupy the common-pool worker needed to start its next wave.
+                val raceExecutor = Executor { task -> Thread.ofVirtual().start(task) }
                 delayed.set(true)
                 try {
                     repeat(2) { wave ->
-                        waves += CompletableFuture.supplyAsync {
+                        waves += CompletableFuture.supplyAsync({
                             race(8) { caller ->
                                 threads.add(Thread.currentThread())
                                 if (caller % 2 == 0) book.cashOut(betId) else book.cashOutDefinitive(betId)
                             }
-                        }
+                        }, raceExecutor)
                         val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                         while ((threads.size != (wave + 1) * 8 || threads.any { it.state !in waitingStates } ||
                                 completions.isEmpty()) && System.nanoTime() < deadline) Thread.sleep(5)

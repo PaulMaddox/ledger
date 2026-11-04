@@ -67,6 +67,12 @@ class DeploymentTests(unittest.TestCase):
         self.assertTrue((ROOT / "docs/screenshots/simulator.png").is_file())
         self.assertTrue((ROOT / "src/main/resources/web/about.html").is_file())
 
+    def test_runtime_installs_the_probe_executable(self):
+        runtime = (ROOT / "Dockerfile").read_text().split(" AS web\n", 1)[1]
+        self.assertIn("apt-get install -y --no-install-recommends curl", runtime)
+        self.assertIn("curl --version", runtime)
+        self.assertLess(runtime.index("apt-get install"), runtime.index("USER 10001:10001"))
+
     def test_bootstrap_does_not_modify_cluster_or_create_namespace(self):
         self.assertEqual(
             {r["type"] for r in TEMPLATE["resources"]},
@@ -177,7 +183,8 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(ledger["livenessProbe"]["failureThreshold"], 6)
         proxy = next(c for c in containers if c["name"] == "https")
         self.assertEqual(proxy["livenessProbe"]["tcpSocket"]["port"], "https")
-        self.assertIn("RUN curl --version > /dev/null", (ROOT / "Dockerfile").read_text())
+        runtime = (ROOT / "Dockerfile").read_text().split(" AS web\n", 1)[1]
+        self.assertIn("curl --version > /dev/null", runtime)
 
     def test_http_probe_rejects_an_accepting_but_unresponsive_server(self):
         release = threading.Event()

@@ -4,12 +4,12 @@
 #   ./scripts/setup.sh                    # everything needed to build, test and run the demo
 #   ./scripts/setup.sh --with-guide-tools # also Python and Node.js, for editing the guide
 #
-# Installs JDK 21 if it is missing, then runs a first build through the Gradle
+# Installs JDK 27 if it is missing, then runs a first build through the Gradle
 # wrapper, which downloads Gradle, the Kotlin compiler and the test libraries.
 # Safe to run again: anything already installed is left alone.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 with_guide_tools=false
 for arg in "$@"; do
@@ -20,20 +20,44 @@ for arg in "$@"; do
   esac
 done
 
-# Major version of the java on PATH, or 0 if there is none.
+# Major version of a candidate Java executable, or 0 if it cannot run.
 java_major() {
-  command -v java >/dev/null 2>&1 || { echo 0; return; }
-  java -version 2>&1 | head -n 1 | sed -E 's/.*version "([0-9]+).*/\1/;t;s/.*/0/'
+  "$1" -version 2>&1 | head -n 1 | sed -E 's/.*version "([0-9]+).*/\1/;t;s/.*/0/'
 }
 
-# Any JDK 21 counts, even if it isn't the default java, because the build selects
-# JDK 21 itself through its Java toolchain setting.
-if [ "$(java_major)" -ge 21 ] || compgen -G "/usr/lib/jvm/*21*" >/dev/null; then
-  echo "==> JDK 21 already installed"
+select_jdk() {
+  local path_home="" home java_path
+  if java_path=$(command -v java); then
+    path_home=$(dirname "$(dirname "$(readlink -f "$java_path")")")
+  fi
+  for home in "${JAVA_HOME:-}" "$path_home" /usr/lib/jvm/*27*; do
+    if [ -x "$home/bin/java" ] && [ -x "$home/bin/javac" ] && [ "$(java_major "$home/bin/java")" = 27 ]; then
+      export JAVA_HOME="$home"
+      export PATH="$JAVA_HOME/bin:$PATH"
+      return 0
+    fi
+  done
+  return 1
+}
+
+# The wrapper prioritizes JAVA_HOME over PATH; the toolchain cannot repair an old daemon JVM.
+if select_jdk; then
+  echo "==> JDK 27 already installed"
 else
-  echo "==> Installing JDK 21 (needs sudo)"
+  echo "==> Installing JDK 27 (Eclipse Temurin; needs sudo)"
   sudo apt-get update
-  sudo apt-get install -y openjdk-21-jdk
+  sudo apt-get install -y --no-install-recommends ca-certificates wget gpg
+  sudo install -d -m 0755 /etc/apt/keyrings
+  wget -qO- https://packages.adoptium.net/artifactory/api/gpg/key/public |
+    gpg --dearmor | sudo tee /etc/apt/keyrings/adoptium.gpg >/dev/null
+  echo "deb [signed-by=/etc/apt/keyrings/adoptium.gpg] https://packages.adoptium.net/artifactory/deb $(. /etc/os-release && echo "$VERSION_CODENAME") main" |
+    sudo tee /etc/apt/sources.list.d/adoptium.list >/dev/null
+  sudo apt-get update
+  sudo apt-get install -y temurin-27-jdk
+  if ! select_jdk; then
+    echo "JDK 27 is still unavailable after installation. Set JAVA_HOME to a JDK 27 installation and rerun setup." >&2
+    exit 1
+  fi
 fi
 
 if [ "$with_guide_tools" = true ]; then
@@ -46,8 +70,7 @@ if [ "$with_guide_tools" = true ]; then
   fi
 fi
 
-# First build. The wrapper finds JDK 21 itself (via the build's Java toolchain
-# setting), even if an older JDK is the default.
+# Both the wrapper's JVM and the compilation toolchain now use JDK 27.
 echo "==> First build: downloads Gradle and the libraries (a few minutes the first time)"
 ./gradlew --quiet assemble testClasses
 

@@ -110,7 +110,9 @@ later application deployments use the same resources.
   locks. Readiness uses `/`, so saturated request slots remove the pod from service
   without restarting it. Six liveness failures, ten seconds apart, restart the
   container with its existing disk. Startup allows ten minutes for replay; the
-  proxy has independent TCP listener checks. Daily retention still applies.
+  proxy has independent TCP listener checks. The web runtime image explicitly
+  installs `curl` for these probes; do not assume it comes with the JRE base image.
+  Daily retention still applies.
 - Keep data and keys in-country. Do not export plaintext data or keys, or configure
   out-of-country backups.
 - Keep `--public-origin` set to the exact public HTTPS origin. Preserve Host,
@@ -134,9 +136,8 @@ means deployment failed. An image rollback must never roll back or delete histor
 check data compatibility first.
 
 If TCP connects but HTTP stalls, capture a JVM virtual-thread dump before restarting.
-Bet registration uses a parking-safe `ReentrantLock`: waiting for ledger queue
-admission inside `ConcurrentHashMap.compute` would pin JDK 21 carriers and starve
-both simulator and HTTP work.
+Bet registration uses a parking-safe `ReentrantLock`: queue admission can wait for
+ledger capacity, so it must not hold `ConcurrentHashMap`'s update lock while waiting.
 
 For Azure CLI diagnostics across directories, select the cluster's tenant with
 `kubelogin convert-kubeconfig -l azurecli --tenant-id <cluster-tenant-id>`.

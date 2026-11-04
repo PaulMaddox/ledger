@@ -269,8 +269,7 @@ class LedgerWebApp private constructor(
                     System.err.println("Demo store failed recovery; console remains available for reset: ${e.message}")
                     null
                 }
-                // HTTP stream monitors pin virtual-thread carriers on JDK 21; slow uploads
-                // must not starve the handler that rejects excess requests.
+                // Keep slow uploads on a bounded pool so stalled bodies cannot create unbounded request threads.
                 val executor = Executors.newFixedThreadPool(64).also(resources::add)
                 val server = HttpServer.create(InetSocketAddress(opts.host, opts.port), 0)
                 resources.add(AutoCloseable { server.stop(0) })
