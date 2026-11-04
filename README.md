@@ -92,8 +92,7 @@ the console, open **<http://localhost:8080>**.
 
 ```bash
 git clone https://github.com/PaulMaddox/ledger.git && cd ledger
-./scripts/setup.sh
-./gradlew web
+bash -c 'source ./scripts/setup.sh && ./gradlew web'
 ```
 
 </details>
@@ -103,8 +102,7 @@ git clone https://github.com/PaulMaddox/ledger.git && cd ledger
 
 ```powershell
 git clone https://github.com/PaulMaddox/ledger.git; cd ledger
-powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
-.\gradlew.bat web
+powershell -ExecutionPolicy Bypass -Command ". .\scripts\setup.ps1; .\gradlew.bat web"
 ```
 
 </details>

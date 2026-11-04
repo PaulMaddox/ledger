@@ -9,7 +9,7 @@
 # Safe to run again: anything already installed is left alone.
 set -euo pipefail
 
-cd "$(dirname "$0")/.."
+cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
 with_guide_tools=false
 for arg in "$@"; do

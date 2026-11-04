@@ -183,7 +183,8 @@ class DeploymentTests(unittest.TestCase):
         self.assertEqual(ledger["livenessProbe"]["failureThreshold"], 6)
         proxy = next(c for c in containers if c["name"] == "https")
         self.assertEqual(proxy["livenessProbe"]["tcpSocket"]["port"], "https")
-        self.assertIn("RUN curl --version > /dev/null", (ROOT / "Dockerfile").read_text())
+        runtime = (ROOT / "Dockerfile").read_text().split(" AS web\n", 1)[1]
+        self.assertIn("curl --version > /dev/null", runtime)
 
     def test_http_probe_rejects_an_accepting_but_unresponsive_server(self):
         release = threading.Event()

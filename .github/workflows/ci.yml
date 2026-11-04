@@ -151,11 +151,7 @@ jobs:
       # Ubuntu runners may default to an older JDK, so setup.sh installs JDK 27 itself.
       - name: Set up (Ubuntu), as documented
         if: runner.os == 'Linux'
-        run: ./scripts/setup.sh
-
-      - name: Run the demo (Ubuntu), as documented
-        if: runner.os == 'Linux'
-        run: ./gradlew run
+        run: bash -c 'source ./scripts/setup.sh && ./gradlew run'
 
       # winget is not reliably available on GitHub's Windows runners, so JDK 27 is
       # provided here and setup.ps1 takes its "already installed" path. This tests
@@ -170,12 +166,14 @@ jobs:
       - name: Set up (Windows), as documented
         if: runner.os == 'Windows'
         shell: powershell
-        run: powershell -ExecutionPolicy Bypass -File scripts\setup.ps1
+        run: powershell -ExecutionPolicy Bypass -Command ". .\scripts\setup.ps1; .\gradlew.bat run"
 
-      - name: Run the demo (Windows), as documented
-        if: runner.os == 'Windows'
-        shell: powershell
-        run: .\gradlew.bat run
+      - name: Provide JDK 27 for setup regression checks
+        if: runner.os == 'Linux'
+        uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: "27"
 
       - name: Check setup JVM selection
         run: python scripts/check-setup.py
