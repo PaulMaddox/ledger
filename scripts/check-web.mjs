@@ -27,7 +27,7 @@ function entryBytes(amount = 100n) {
   ]);
 }
 function context(fetch) {
-  const c = vm.createContext({ crypto: webcrypto, atob, TextDecoder, TextEncoder, Uint8Array, DataView, fetch });
+  const c = vm.createContext({ crypto: webcrypto, atob, TextDecoder, TextEncoder, Uint8Array, DataView, fetch, performance });
   vm.runInContext(cryptoSource, c);
   return c;
 }
@@ -82,6 +82,7 @@ function pollingContext() {
             const data = Object.fromEntries([...attributes.matchAll(/data-([\w-]+)="([^"]*)"/g)].map(([, key, val]) =>
               [key, val.replace(/&(amp|lt|gt|quot|#39);/g, (_, entity) => ({ amp: "&", lt: "<", gt: ">", quot: '"', "#39": "'" }[entity]))]));
             return {
+              dataset: data,
               disabled: /\bdisabled\b/.test(attributes),
               getAttribute: name => data[name.slice(5)] ?? null,
               matches: selector => [...selector.matchAll(/\[data-([\w-]+)\]/g)].every(([, key]) => key in data),
@@ -100,13 +101,13 @@ function pollingContext() {
   return { c, document, element, responses, customer, fixtures };
 }
 
-function reportFixture() {
+function reportFixture(selection = "HOME") {
   const hash = (...parts) => createHash("sha256").update(Buffer.concat(parts)).digest();
   let chain = hash(Buffer.from("PAM-LEDGER/genesis/v1"), Buffer.from("sportsbook-web"));
   const entries = [], leaves = [];
   const movements = [
     ["DEPOSIT", "deposit:one", [["house:psp-clearing:EUR", -1000n], ["player:alice:cash:EUR", 1000n]], { playerId: "alice" }],
-    ["BET_PLACED", "bet:one:place", [["player:alice:cash:EUR", -200n], ["player:alice:open-bets:EUR", 200n]], { betId: "one", playerId: "alice", selection: "F1|HOME|200" }],
+    ["BET_PLACED", "bet:one:place", [["player:alice:cash:EUR", -200n], ["player:alice:open-bets:EUR", 200n]], { betId: "one", playerId: "alice", selection: `F1|${selection}|200` }],
     ["BET_WON", "bet:one:settle", [["player:alice:open-bets:EUR", -200n], ["player:alice:cash:EUR", 300n], ["house:revenue:EUR", -100n]], { betId: "one", placementSeq: "1", playerId: "alice" }],
     ["WITHDRAWAL", "withdraw:one", [["player:alice:cash:EUR", -10n], ["house:psp-clearing:EUR", 10n]], { playerId: "alice" }],
   ];
@@ -187,6 +188,95 @@ test("evidence verification rebuilds signed canonical history and financial and 
     const altered = structuredClone(f); change(altered);
     await assert.rejects(c.verifyReportEvidence(altered.report, altered.entries));
   }
+});
+
+test("browser reconciles golf and two-way liabilities and rejects a tampered payout", async () => {
+  for (const selection of ["P1", "P2", "P3", "HOME", "AWAY"]) {
+    const c = context(), f = reportFixture(selection);
+    f.report.manifest.to = "1970-01-01T00:00:01.000002Z";
+    Object.assign(f.report.financial, { withdrawals: "0", payouts: "0", revenue: "0", winPayouts: "0",
+      settledStakes: "0", cashLiability: "800", escrowLiability: "200", closingLiability: "1000",
+      openStakes: "200", openBets: 1, periodEntries: 2, outcomes: {} });
+    Object.assign(f.report.customers[0], { entries: 2, cash: "800", escrow: "200", withdrawals: "0", payouts: "0", netSettledLoss: "0" });
+    Object.assign(f.report.daily[0], { withdrawals: "0", payouts: "0", revenue: "0" });
+    Object.assign(f.report.fixtures[0], { settlements: 0, payouts: "0", revenue: "0", openBets: 1, openStakes: "200",
+      liabilityBySelection: { [selection]: "400" }, worstWinningPayout: "400", outcomes: {}, entrySeqs: [1] });
+    assert.equal((await c.verifyReportEvidence(f.report, f.entries)).fixtures, true);
+    f.report.fixtures[0].liabilityBySelection[selection] = "401";
+    await assert.rejects(c.verifyReportEvidence(f.report, f.entries), /selection payout/);
+  }
+});
+
+test("all 20 multi-sport markets render selection labels and generic operator settlement controls", async () => {
+  const s = pollingContext();
+  s.responses["/api/fixtures"] = Array.from({ length: 20 }, (_, i) => {
+    const codes = i < 6 ? ["HOME", "DRAW", "AWAY"] : i < 16 ? ["HOME", "AWAY"] : ["P1", "P2", "P3"];
+    return { ...s.fixtures[0], id: `F${i + 1}`, sport: i < 6 ? "SOCCER" : i < 11 ? "NFL" : i < 16 ? "TENNIS" : "GOLF",
+      event: "Demo test", odds: Object.fromEntries(codes.map(code => [code, 200])),
+      selections: codes.map(code => ({ code, label: `Participant ${code}`, odds: 200 })),
+      endsAt: 12345, remainingMs: 60000, liability: Object.fromEntries(codes.map(code => [code, "400"])) };
+  });
+  await s.c.loadCustFixtures();
+  assert.equal(s.element("custFixtures").controls.length, 6 * 3 + 10 * 2 + 4 * 3);
+  assert.match(s.element("custFixtures").innerHTML, /Participant P3/);
+  assert.match(s.element("custFixtures").innerHTML, /GOLF/);
+  await s.c.refreshFixtures();
+  const golf = s.element("fixtureTable").controls.filter(b => b.dataset.settle === "F20");
+  assert.deepEqual(golf.map(b => b.dataset.result), ["P1", "P2", "P3", "VOID"]);
+});
+
+test("countdowns use monotonic remaining time, preserve focus and disable prices at zero", async () => {
+  const s = pollingContext();
+  let now = 100;
+  s.c.performance = { now: () => now };
+  Object.assign(s.fixtures[0], { endsAt: 10000000, remainingMs: 12000 });
+  await s.c.loadCustFixtures();
+  const price = s.element("custFixtures").controls[0];
+  price.focus();
+  assert.equal(s.c.countdownText("F1"), "0:12 left");
+  const countdown = { dataset: { countdown: "F1" }, textContent: "", classList: { toggle() {} } };
+  s.document.querySelectorAll = selector => selector === "[data-countdown]" ? [countdown] : [];
+  now += 3000;
+  vm.runInContext("Date.now = () => -9000000000000", s.c);
+  s.c.tickCountdowns();
+  assert.equal(countdown.textContent, "0:09 left");
+  assert.equal(s.document.activeElement, price);
+  assert.equal(price.disabled, false);
+  now += 9000;
+  s.c.tickCountdowns();
+  assert.equal(countdown.textContent, "Finished, settling…");
+  assert.equal(price.disabled, true);
+});
+
+test("expiry blocks an unsubmitted slip but retains an uncertain original placement", async () => {
+  for (const uncertain of [false, true]) {
+    let calls = 0;
+    const s = slipContext(async () => { calls++; throw new TypeError("lost response"); });
+    let now = 0;
+    s.c.performance = { now: () => now };
+    s.pick("HOME");
+    vm.runInContext('anchorFixtures([{ id: "F1", endsAt: 10000000, remainingMs: 1000 }])', s.c);
+    if (uncertain) await s.submit();
+    now = 1000;
+    s.c.tickCountdowns();
+    await s.submit();
+    assert.equal(calls, uncertain ? 2 : 0);
+    assert.equal(s.element("submit").disabled, !uncertain);
+    assert.equal(!!vm.runInContext("selection.params", s.c), uncertain);
+  }
+});
+
+test("countdown anchors discard history but retain the selected slip's deadline", () => {
+  const s = slipContext(async () => {});
+  s.pick("HOME");
+  vm.runInContext(`
+    anchorFixtures([{ id: "F1", endsAt: 10000, remainingMs: 1000 },
+      { id: "F2", endsAt: 10000, remainingMs: 2000 }]);
+    anchorFixtures([{ id: "F3", endsAt: 10000, remainingMs: 3000 }]);
+  `, s.c);
+  assert.equal(vm.runInContext("fixtureDeadlines.has('F1')", s.c), true);
+  assert.equal(vm.runInContext("fixtureDeadlines.has('F2')", s.c), false);
+  assert.equal(vm.runInContext("fixtureDeadlines.size", s.c), 2);
 });
 
 test("evidence replay preserves microsecond and cross-period settlement cutoffs", async () => {
@@ -663,6 +753,7 @@ function slipContext(fetch) {
   const element = id => {
     if (!elements.has(id)) elements.set(id, {
       handlers: {}, value: "10.00", className: "", innerHTML: "", hidden: true, disabled: false,
+      dataset: { fx: "F1" },
       addEventListener(name, handler) { this.handlers[name] = handler; },
       contains() { return false; },
       querySelector() { return element("submit"); },

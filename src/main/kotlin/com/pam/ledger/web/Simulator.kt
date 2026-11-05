@@ -51,15 +51,12 @@ class Simulator(
         private set
     @Volatile var opsPerMinute = 60
         private set
-    @Volatile var autoFixtures = true
-        private set
     @Volatile var startedAtMillis = 0L
         private set
 
     private class Run {
         val bets = AtomicLong(); val deposits = AtomicLong(); val withdrawals = AtomicLong(); val cashOuts = AtomicLong()
         val rejectedForFunds = AtomicLong(); val rejectedOther = AtomicLong(); val shed = AtomicLong()
-        val fixtureRounds = AtomicLong()
     }
     @Volatile private var run = Run()
     val bets get() = run.bets
@@ -69,7 +66,6 @@ class Simulator(
     val rejectedForFunds get() = run.rejectedForFunds
     val rejectedOther get() = run.rejectedOther
     val shed get() = run.shed
-    val fixtureRounds get() = run.fixtureRounds
     val succeeded get() = run.let { it.bets.get() + it.deposits.get() + it.withdrawals.get() + it.cashOuts.get() }
 
     /**
@@ -101,12 +97,10 @@ class Simulator(
     val lastEventId get() = eventIds.get()
 
     private val funded = ConcurrentHashMap.newKeySet<String>()
-    private val settlingFixtures = ConcurrentHashMap.newKeySet<String>()
     private val inFlight = Semaphore(MAX_IN_FLIGHT)
     private val workers = Executors.newVirtualThreadPerTaskExecutor()
     private val ticker = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "simulator").apply { isDaemon = true } }
     private var carry = 0.0
-    private var lastRoundNanos = nanoTime()
     internal var runStartedNanos = 0L
         private set
 
@@ -115,12 +109,11 @@ class Simulator(
     }
 
     /** Change the run's shape. Allowed at any time; a running simulation adapts on its next tick. */
-    fun configure(customers: Int, opsPerMinute: Int, autoFixtures: Boolean) {
+    fun configure(customers: Int, opsPerMinute: Int) {
         require(customers in 1..MAX_CUSTOMERS) { "customers must be between 1 and $MAX_CUSTOMERS" }
         require(opsPerMinute in 1..600) { "operations per customer per minute must be between 1 and 600" }
         this.customers = customers
         this.opsPerMinute = opsPerMinute
-        this.autoFixtures = autoFixtures
     }
 
     @Synchronized fun start() = start(nanoTime())
@@ -132,7 +125,6 @@ class Simulator(
         carry = 0.0
         startedAtMillis = System.currentTimeMillis()
         runStartedNanos = originalStartNanos
-        lastRoundNanos = nanoTime()
         state = State.RUNNING
         expire()
     }
@@ -162,47 +154,6 @@ class Simulator(
             if (!inFlight.tryAcquire()) { counters.shed.incrementAndGet(); return@repeat }
             workers.submit { try { operation(Random, counters) } finally { inFlight.release() } }
         }
-        // Keep the book moving: settle the oldest open fixture and open a new one every 15 s.
-        if (autoFixtures && nanoTime() - lastRoundNanos > 15_000_000_000L) {
-            lastRoundNanos = nanoTime()
-            scheduleFixtureRound(counters)
-        }
-    }
-
-    internal fun scheduleFixtureRound() = scheduleFixtureRound(run)
-
-    private fun scheduleFixtureRound(counters: Run) {
-        val fixtures = book.fixtures()
-        val fixture = fixtures.firstOrNull {
-            it.result != null && it.result != "LEGACY_UNRESOLVED" && !it.settlementComplete
-        } ?: fixtures.firstOrNull { it.isOpen }
-        if (fixture != null && settlingFixtures.add(fixture.id)) {
-            try {
-                workers.submit {
-                    try {
-                        runCatching {
-                            val result = fixture.result ?: weightedResult(fixture)
-                            book.settle(fixture.id, result)
-                            counters.fixtureRounds.incrementAndGet()
-                        }
-                    } finally {
-                        settlingFixtures.remove(fixture.id)
-                    }
-                }
-            } catch (failure: Throwable) {
-                settlingFixtures.remove(fixture.id)
-                throw failure
-            }
-        }
-        book.addFixture()
-    }
-
-    /** A result drawn with the probabilities the odds imply, so revenue behaves realistically. */
-    private fun weightedResult(f: Book.Fixture): String {
-        val weights = f.odds.mapValues { 1.0 / it.value }
-        var r = Random.nextDouble(weights.values.sum())
-        for ((k, w) in weights) { r -= w; if (r <= 0) return k }
-        return "HOME"
     }
 
     private fun operation(rnd: Random, counters: Run) {
@@ -226,7 +177,7 @@ class Simulator(
                 in 0..64 -> {
                     op = "BET"
                     val f = book.openFixtures().randomOrNull(rnd) ?: return
-                    val selection = listOf("HOME", "DRAW", "AWAY").random(rnd)
+                    val selection = f.selections.random(rnd).code
                     val stake = rnd.nextLong(1_00, 40_00)
                     val odds = f.odds.getValue(selection)
                     text = "bet ${eur(stake)} on ${f.id} $selection @ ${"%.2f".format(Locale.ROOT, odds / 100.0)}"

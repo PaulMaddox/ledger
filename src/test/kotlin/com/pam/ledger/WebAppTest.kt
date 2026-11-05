@@ -91,6 +91,30 @@ class WebAppTest {
     }
 
     @Test
+    fun `managed pool has 20 timed multi sport fixtures at startup restart and reset`() {
+        val directory = tempDir()
+        fun assertPool(app: LedgerWebApp) {
+            val response = call(app, "GET", "fixtures")
+            assertEquals(200, response.first)
+            assertEquals(20, Regex("\"result\":null").findAll(response.second).count(), response.second)
+            assertEquals(20, Regex("\"managed\":true").findAll(response.second).count(), response.second)
+            for ((sport, count) in com.pam.ledger.web.Roster.pool) {
+                assertEquals(count, Regex("\"sport\":\"$sport\"").findAll(response.second).count())
+            }
+            assertTrue(response.second.contains("\"remainingMs\":"))
+            assertTrue(call(app, "GET", "simulator").second.contains("\"state\":\"STOPPED\""))
+            assertEquals(400, call(app, "POST", "simulator", mapOf("autoFixtures" to true)).first)
+            assertEquals(404, call(app, "POST", "fixtures").first)
+        }
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)).use(::assertPool)
+        LedgerWebApp.start(WebOptions(port = 0, dataDir = directory)).use { app ->
+            assertPool(app)
+            assertEquals(200, call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE")).first)
+            assertPool(app)
+        }
+    }
+
+    @Test
     fun `supervisory admission never queues full history requests or blocks wallet traffic`() = withApp { app ->
         val field = LedgerWebApp::class.java.getDeclaredField("reporting").apply { isAccessible = true }
         val gate = field.get(app) as java.util.concurrent.Semaphore
@@ -266,11 +290,11 @@ class WebAppTest {
                 val book = Book(wallet, model)
                 val now = AtomicLong(42)
                 Simulator(book, wallet, now::get).use { simulator ->
-                    simulator.configure(1, 1, false)
+                    simulator.configure(1, 1)
                     simulator.start()
                     now.addAndGet(Simulator.MAX_RUN_NANOS - 1)
                     simulator.start() // Repeated Start and configuration do not renew a running session.
-                    simulator.configure(2, 1, false)
+                    simulator.configure(2, 1)
                     simulator.tick()
                     assertEquals(Simulator.State.RUNNING, simulator.state)
                     simulator.pause()
@@ -555,7 +579,7 @@ class WebAppTest {
     @Test
     fun `reset drains a running simulator while requests race its lifecycle`() = withApp { app ->
         assertEquals(200, call(app, "POST", "simulator", mapOf(
-            "action" to "start", "customers" to 16, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+            "action" to "start", "customers" to 16, "opsPerMinute" to 60)).first)
         val outcomes = race(8) { i ->
             if (i == 0) call(app, "POST", "administrator/clear", mapOf("confirmation" to "CLEAR DEMO STORAGE"))
             else call(app, "GET", "operator")
@@ -672,7 +696,7 @@ class WebAppTest {
     @Test
     fun `live chaos transaction races leave the running simulator active`() = withApp { app ->
         assertEquals(200, call(app, "POST", "simulator", mapOf(
-            "action" to "start", "customers" to 10, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+            "action" to "start", "customers" to 10, "opsPerMinute" to 60)).first)
         for (scenario in listOf("retries", "double-spend", "settlement")) {
             val result = chaos(app, scenario)
             assertEquals(200, result.first, result.second)
@@ -688,7 +712,7 @@ class WebAppTest {
     @Test
     fun `recoverable main-store chaos resumes a running simulator`() = withApp { app ->
         assertEquals(200, call(app, "POST", "simulator", mapOf(
-            "action" to "start", "customers" to 10, "opsPerMinute" to 60, "autoFixtures" to false)).first)
+            "action" to "start", "customers" to 10, "opsPerMinute" to 60)).first)
         val result = chaos(app, "torn-write")
         assertEquals(200, result.first, result.second)
         assertTrue(result.second.contains("\"available\":true"), result.second)
@@ -811,12 +835,12 @@ class WebAppTest {
     @Test
     fun `every tamper mode is caught while the simulator appends`() = withApp { app ->
         repeat(10) { call(app, "POST", "players/bob/deposit", mapOf("amount" to 100, "ref" to "signed-$it")) }
-        assertEquals(200, call(app, "POST", "simulator", mapOf("customers" to 20, "opsPerMinute" to 600, "autoFixtures" to "false", "action" to "start")).first)
+        assertEquals(200, call(app, "POST", "simulator", mapOf("customers" to 20, "opsPerMinute" to 600, "action" to "start")).first)
         try {
             repeat(10) {
                 for (mode in listOf("edit", "rewrite", "truncate")) {
                     assertEquals(200, call(app, "POST", "simulator", mapOf("customers" to 20, "opsPerMinute" to 600,
-                        "autoFixtures" to "false", "action" to "start")).first)
+                        "action" to "start")).first)
                     val outcomes = race(2) { i ->
                         if (i == 0) call(app, "POST", "regulator/tamper",
                             mapOf("mode" to mode, "confirmation" to "CHAOS ON MAIN STORE"))
@@ -837,10 +861,12 @@ class WebAppTest {
     }
 
     @Test
-    fun `busy simulator and automatic fixture rounds keep HTTP responsive`() = withApp { app ->
+    fun `busy simulator and automatic fixture scheduling keep HTTP responsive`() = withApp { app ->
         assertEquals(200, call(app, "POST", "simulator", mapOf(
-            "customers" to 500, "opsPerMinute" to 600, "autoFixtures" to true, "action" to "start")).first)
-        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(35)
+            "customers" to 500, "opsPerMinute" to 600, "action" to "start")).first)
+        val firstExpiry = Regex("\"remainingMs\":(\\d+)").findAll(call(app, "GET", "fixtures").second)
+            .minOf { it.groupValues[1].toLong() }
+        val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(firstExpiry) + TimeUnit.SECONDS.toNanos(10)
         do {
             val page = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/"))
                 .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.discarding())
@@ -854,8 +880,8 @@ class WebAppTest {
         val stopped = call(app, "POST", "simulator", mapOf("action" to "stop"), timeout = Duration.ofSeconds(5))
         assertEquals(200, stopped.first, stopped.second)
         assertTrue(Regex("\"succeeded\":(\\d+)").find(stopped.second)!!.groupValues[1].toLong() > 500, stopped.second)
-        assertTrue(Regex("\"fixtureRounds\":(\\d+)").find(stopped.second)!!.groupValues[1].toLong() > 0,
-            "the load test must include real persisted fixture settlement: ${stopped.second}")
+        assertTrue(call(app, "GET", "fixtures").second.contains("\"settlementComplete\":true"),
+            "the load test must include real persisted fixture settlement")
         val audit = call(app, "POST", "regulator/audit")
         assertEquals(200, audit.first, audit.second)
         assertTrue(audit.second.contains("\"ok\":true"), audit.second)
@@ -863,7 +889,7 @@ class WebAppTest {
 
     @Test
     fun `simulator starts, pauses, resumes and stops, and its customers appear in the ledger`() = withApp { app ->
-        val start = call(app, "POST", "simulator", mapOf("customers" to 50, "opsPerMinute" to 600, "autoFixtures" to "true", "action" to "start"))
+        val start = call(app, "POST", "simulator", mapOf("customers" to 50, "opsPerMinute" to 600, "action" to "start"))
         assertTrue(start.second.contains("\"state\":\"RUNNING\""), start.second)
         Thread.sleep(1500)
         assertTrue(call(app, "POST", "simulator", mapOf("action" to "pause")).second.contains("\"state\":\"PAUSED\""))
@@ -987,7 +1013,7 @@ class WebAppTest {
             assertEquals(400, call(app, "GET", "simulator/events", mapOf("after" to after)).first)
         }
         assertEquals(200, call(app, "POST", "simulator", mapOf(
-            "customers" to "1", "opsPerMinute" to "1", "autoFixtures" to "false",
+            "customers" to "1", "opsPerMinute" to "1",
         )).first)
     }
 
@@ -1033,7 +1059,7 @@ class WebAppTest {
                 "padding=" + "%61".repeat(limit / 3),
             ).map { it.toByteArray(Charsets.UTF_8) }
             for (body in bodies) {
-                val before = call(app, "GET", "fixtures").second
+                val before = Regex("\"remainingMs\":\\d+").replace(call(app, "GET", "fixtures").second, "")
                 if (body.size > limit) {
                     val host = "127.0.0.1:${app.port}"
                     val response = rawRequest(app, host, "POST", "http://$host",
@@ -1041,12 +1067,12 @@ class WebAppTest {
                     assertTrue(response.startsWith("HTTP/1.1 413"), response)
                     assertTrue(response.contains("\"error\":\"payload_too_large\""), response)
                     assertTrue(response.lineSequence().any { it.equals("Connection: close", true) }, response)
-                    assertEquals(before, call(app, "GET", "fixtures").second)
+                    assertEquals(before, Regex("\"remainingMs\":\\d+").replace(call(app, "GET", "fixtures").second, ""))
                     continue
                 }
                 val publisher = if (chunked) HttpRequest.BodyPublishers.ofInputStream { body.inputStream() }
                     else HttpRequest.BodyPublishers.ofByteArray(body)
-                val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/api/fixtures"))
+                val request = HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/api/regulator/checkpoint"))
                     .header("Origin", "http://127.0.0.1:${app.port}")
                     .header("Content-Type", "application/x-www-form-urlencoded")
                     .POST(publisher).timeout(Duration.ofSeconds(5)).build()
@@ -1391,9 +1417,9 @@ class WebAppTest {
         try {
             val fixtures = call(restarted, "GET", "fixtures").second
             assertTrue(fixtures.contains("\"id\":\"F1\",\"home\":\"${teams[0]}\",\"away\":\"${teams[1]}\""), fixtures)
-            val newFixture = call(restarted, "POST", "fixtures").second
-            assertTrue(newFixture.contains("\"id\":\"F7\""), newFixture)
-            assertEquals(200, call(restarted, "POST", "fixtures/F7/settle", mapOf("result" to "AWAY")).first)
+            assertEquals(404, call(restarted, "POST", "fixtures").first)
+            assertEquals(200, call(restarted, "POST", "fixtures/F20/settle", mapOf("result" to "P1")).first)
+            assertTrue(call(restarted, "GET", "fixtures").second.contains("\"id\":\"F21\""))
             assertTrue(call(restarted, "GET", "players/alice").second.contains("\"betId\":\"restart-slip\"") &&
                 call(restarted, "GET", "players/alice").second.contains("\"open\":true"))
             assertEquals(200, call(restarted, "POST", "fixtures/F1/settle", mapOf("result" to "AWAY")).first)
@@ -1409,15 +1435,19 @@ class WebAppTest {
     }
 
     @Test
-    fun `old unfinished fixtures remain visible after many fixtures are added`() = withApp { app ->
+    fun `old unfinished fixtures remain visible after many fixture replacements`() = withApp { app ->
         assertEquals(200, call(app, "POST", "players/alice/bets", mapOf(
             "fixture" to "F1", "selection" to "HOME", "stake" to 100, "betId" to "old-fixture-open-bet",
         )).first)
-        repeat(31) { assertEquals(200, call(app, "POST", "fixtures").first) }
+        var id = 2
+        repeat(31) {
+            assertEquals(200, call(app, "POST", "fixtures/F$id/settle", mapOf("result" to "VOID")).first)
+            id = 21 + it
+        }
 
         val fixtures = call(app, "GET", "fixtures").second
         assertTrue(fixtures.contains("\"id\":\"F1\"") && fixtures.contains("\"settlementComplete\":false"), fixtures)
-        assertTrue(fixtures.contains("\"id\":\"F37\""), fixtures)
+        assertTrue(fixtures.contains("\"id\":\"F51\""), fixtures)
     }
 
     @Test
@@ -1511,7 +1541,7 @@ class WebAppTest {
             val fixtures = call(restarted, "GET", "fixtures").second
             assertTrue(fixtures.contains("LEGACY_UNRESOLVED"), fixtures)
             assertEquals(400, call(restarted, "POST", "fixtures/F1/settle", mapOf("result" to "HOME")).first)
-            assertTrue(call(restarted, "POST", "fixtures").second.contains("\"id\":\"F2\""))
+            assertTrue(fixtures.contains("\"id\":\"F2\""))
             assertTrue(call(restarted, "GET", "players/alice").second.contains("\"open\":true"))
         } finally {
             restarted.close()
@@ -1899,6 +1929,7 @@ class WebAppTest {
                 Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
                 setProperty("fixture.0.result", result)
                 setProperty("fixture.0.complete", "false")
+                setProperty("fixture.0.managed", "false")
             }
             Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { state.store(it, "pending result") }
             val restarted = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
@@ -2053,11 +2084,19 @@ class WebAppTest {
         assertEquals(200, call(first, "POST", "fixtures/F1/settle", mapOf("result" to "HOME")).first)
         first.close()
 
+        val archived = Files.readAllLines(directory.resolve(com.pam.ledger.web.Book.ARCHIVE_FILE)).first()
+        val definition = java.util.Properties().apply {
+            java.util.Base64.getDecoder().decode(archived.substringAfter(' ')).inputStream().use(::load)
+        }
         val state = java.util.Properties().apply {
             Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
-            setProperty("fixture.0.result", "")
-            setProperty("fixture.0.complete", "false")
+            val index = getProperty("count").toInt()
+            definition.forEach { key, value -> setProperty("fixture.$index.$key", value.toString()) }
+            setProperty("fixture.$index.result", "")
+            setProperty("fixture.$index.complete", "false")
+            setProperty("count", (index + 1).toString())
         }
+        Files.delete(directory.resolve(com.pam.ledger.web.Book.ARCHIVE_FILE))
         Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { state.store(it, "simulated stale fixture state") }
 
         val restarted = LedgerWebApp.start(WebOptions(port = 0, dataDir = directory))
@@ -2065,14 +2104,14 @@ class WebAppTest {
             val fixtures = call(restarted, "GET", "fixtures").second
             assertTrue(fixtures.contains("\"id\":\"F1\"") && fixtures.contains("\"result\":\"LEGACY_UNRESOLVED\""), fixtures)
             assertEquals(400, call(restarted, "POST", "fixtures/F1/settle", mapOf("result" to "HOME")).first)
-            assertTrue(call(restarted, "POST", "fixtures").second.contains("\"id\":\"F7\""))
+            assertTrue(fixtures.contains("\"id\":\"F21\""), fixtures)
         } finally {
             restarted.close()
         }
     }
 
     @Test
-    fun `simulator resumes persisted settlement results without duplicate fixture work`() {
+    fun `scheduler resumes persisted settlement results without duplicate fixture work`() {
         val directory = tempDir()
         val delayed = AtomicBoolean(false)
         val completions = ConcurrentLinkedQueue<Runnable>()
@@ -2089,6 +2128,7 @@ class WebAppTest {
                     Files.newInputStream(directory.resolve("demo-fixtures.properties")).use(::load)
                     setProperty("fixture.0.result", "HOME")
                     setProperty("fixture.0.complete", "false")
+                    setProperty("fixture.0.managed", "true")
                     Files.newOutputStream(directory.resolve("demo-fixtures.properties")).use { store(it, "pending settlement") }
                 }
             }
@@ -2101,19 +2141,18 @@ class WebAppTest {
                 assertEquals("HOME", fixture.result)
                 assertFalse(fixture.settlementComplete)
                 delayed.set(true)
-                Simulator(book, wallet).use { simulator ->
-                    simulator.scheduleFixtureRound()
+                com.pam.ledger.web.FixtureScheduler(book, { ledger.isFailed }, automatic = false).use { scheduler ->
                     val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                     while (completions.isEmpty() && System.nanoTime() < deadline) Thread.sleep(5)
                     assertTrue(completions.isNotEmpty(), "first settlement should be waiting for its completion callback")
-                    simulator.scheduleFixtureRound()
+                    scheduler.tick()
                     assertEquals(1, completions.size, "the same fixture must not have a second settlement task")
                     delayed.set(false)
                     while (true) (completions.poll() ?: break).run()
                     val settledBy = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
                     while (!fixture.settlementComplete && System.nanoTime() < settledBy) Thread.sleep(5)
                     assertTrue(fixture.settlementComplete)
-                    assertEquals(1L, simulator.fixtureRounds.get())
+                    assertEquals(1, (0 until ledger.head().size).count { ledger.entry(it).entry.idempotencyKey == "bet:sim-round-slip:settle" })
                     model.catchUp()
                     assertTrue(model.openBetsOn(fixture.id).isEmpty())
                 }
@@ -2211,7 +2250,7 @@ class WebAppTest {
             val wallet = SportsbookWallet(ledger)
             ReadModel(ledger).use { model ->
                 Simulator(Book(wallet, model), wallet).use { simulator ->
-                    simulator.configure(1, 600, false)
+                    simulator.configure(1, 600)
                     try {
                         race(2) { t ->
                             if (t == 0) simulator.start()
@@ -2248,7 +2287,7 @@ class WebAppTest {
             val wallet = SportsbookWallet(ledger)
             ReadModel(ledger).use { model ->
                 Simulator(Book(wallet, model), wallet).use { simulator ->
-                    simulator.configure(1, 600, false)
+                    simulator.configure(1, 600)
                     simulator.start()
                     Thread.sleep(1000)
                     simulator.stop()
@@ -2276,13 +2315,13 @@ class WebAppTest {
                 val book = Book(wallet, model)
                 book.addFixture(Random(0))
                 Simulator(book, wallet).use { simulator ->
-                    simulator.configure(1, 600, false)
+                    simulator.configure(1, 600)
                     race(2) { t ->
                         if (t == 0) simulator.start()
                         else {
                             check(waiting.await(5, TimeUnit.SECONDS))
                             simulator.stop()
-                            simulator.configure(1, 1, false)
+                            simulator.configure(1, 1)
                             simulator.start()
                             hold.set(false)
                             while (true) java.util.concurrent.ForkJoinPool.commonPool().execute(queued.poll() ?: break)
@@ -2474,7 +2513,7 @@ class WebAppTest {
     fun `operator response uses exact open bet aggregates`() {
         LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir())).use { app ->
             val fixtures = call(app, "GET", "fixtures").second
-            val odds = Regex("\"HOME\":(\\d+)").find(fixtures)!!.groupValues[1].toLong()
+            val odds = Regex("\"id\":\"F6\".*?\"odds\":\\{\"HOME\":(\\d+)").find(fixtures)!!.groupValues[1].toLong()
             val placed = call(app, "POST", "players/alice/bets", mapOf(
                 "fixture" to "F6", "selection" to "HOME", "stake" to 101, "betId" to "operator-aggregate",
             ))
