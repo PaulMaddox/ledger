@@ -15,6 +15,7 @@ import kotlin.random.Random
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFalse
+import kotlin.test.assertFailsWith
 import kotlin.test.assertTrue
 
 /**
@@ -32,6 +33,56 @@ class IntegrityTest {
     }
 
     private fun entriesPath(dir: Path) = dir.resolve(Ledger.ENTRIES_FILE)
+
+    @Test
+    fun `compact audit replay retains hashes and exact state but no full entries`() {
+        val dir = tempDir()
+        Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ledger.checkpoint()
+            repeat(129) { i ->
+                wallet.deposit("p${i % 3}", 100, "EUR", "compact-$i")
+                if (i in listOf(2, 15, 16, 63)) ledger.checkpoint()
+            }
+            wallet.placeBet("p0", "compact-bet", 100, "EUR", selection = "F1|HOME|200")
+            wallet.settleWin("compact-bet", 200)
+        }
+        val full = Replayer(LEDGER_ID, AccountPolicy.PLAYER_ACCOUNTS_NON_NEGATIVE)
+        val compact = Replayer(LEDGER_ID, AccountPolicy.PLAYER_ACCOUNTS_NON_NEGATIVE, retainEntries = false)
+        Journal.scanReadOnly(entriesPath(dir)) { record ->
+            full.apply(record)
+            compact.apply(record)
+            val seq = full.size - 1
+            assertEquals(full.leafHash(seq), compact.leafHash(seq))
+            assertEquals(full.chainHash(seq), compact.chainHash(seq))
+            assertEquals(full.head(), compact.head())
+            assertEquals(0, compact.entries.size, "the audit must not retain decoded entries or canonical byte arrays")
+        }
+        assertEquals(full.accounts, compact.accounts)
+        assertEquals(full.idempotency, compact.idempotency, "duplicate-key detection must not expire")
+        val fullProver = MerkleProver(full::leafHash)
+        val compactProver = MerkleProver(compact::leafHash)
+        for (size in 0..full.size) assertEquals(fullProver.root(size), compactProver.root(size))
+        var previous: SignedTreeHead? = null
+        Journal.scanReadOnly(dir.resolve(Ledger.CHECKPOINTS_FILE)) { record ->
+            val sth = SignedTreeHead.decode(record)
+            val keys = listOf(signer.publicKey).associateBy(::keyIdOf)
+            CheckpointCheck.verify(sth, LEDGER_ID, keys, full, fullProver, previous)
+            CheckpointCheck.verify(sth, LEDGER_ID, keys, compact, compactProver, previous)
+            previous = sth
+        }
+        val duplicate = full.entries[0].entry.copy(
+            seq = full.size, prevChainHash = full.chain, timestampMicros = full.lastTimestamp,
+        )
+        val error = assertFailsWith<TamperDetectedException> {
+            compact.apply(SealedEntry.seal(duplicate).journalRecord())
+        }
+        assertTrue(error.message!!.contains("duplicate idempotency key"))
+        assertEquals(full.head(), compact.head(), "rejection must not mutate verified state")
+        val report = LedgerVerifier.verify(dir, LEDGER_ID, listOf(signer.publicKey))
+        assertTrue(report.ok, report.toString())
+        assertEquals(full.head(), report.head)
+    }
 
     private fun assertTamperDetected(dir: Path, expectInMessage: String) {
         val e = runCatching { Ledger.open(config(dir, signer)).close() }.exceptionOrNull()

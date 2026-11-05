@@ -867,11 +867,11 @@ class LedgerWebApp private constructor(
 
     private fun playerDetail(id: String): Any {
         readModel.catchUp()
-        val seqs = readModel.seqsForPlayer(id)
+        val history = readModel.historyForPlayer(id, 40)
         return playerSummary(id) + mapOf(
             "bets" to readModel.betsForPlayer(id, 40).asReversed().map(::betView),
-            "history" to seqs.takeLast(40).asReversed().map { entryView(ledger.entry(it)) },
-            "entries" to seqs.size,
+            "history" to history.seqs.asReversed().map { entryView(ledger.entry(it)) },
+            "entries" to history.entries,
         )
     }
 

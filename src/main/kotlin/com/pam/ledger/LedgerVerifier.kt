@@ -50,7 +50,7 @@ object LedgerVerifier {
         policy: AccountPolicy = AccountPolicy.PLAYER_ACCOUNTS_NON_NEGATIVE,
     ): Report {
         val problems = ArrayList<String>()
-        val replayer = Replayer(ledgerId, policy)
+        val replayer = Replayer(ledgerId, policy, retainEntries = false)
         var torn = 0L
         var checkpoints = 0
         var latest: SignedTreeHead? = null
@@ -58,7 +58,7 @@ object LedgerVerifier {
         try {
             torn += Journal.scanReadOnly(directory.resolve(Ledger.ENTRIES_FILE)) { replayer.apply(it) }.tornTailBytes
 
-            val prover = MerkleProver { replayer.entries[it.toInt()].leafHash }
+            val prover = MerkleProver(replayer::leafHash)
             val trusted = trustedKeys.associateBy(::keyIdOf)
             val cpScan = Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE)) { bytes ->
                 val sth = SignedTreeHead.decode(bytes)

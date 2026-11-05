@@ -12,6 +12,7 @@ or pass an existing Chrome with --chrome /path/to/chrome.
 Use --regulator-only to refresh the reporting screenshots without exercising Chaos Monkey.
 Use --about-only to check the default About view and its embedded interactive guide.
 Use --operator-only to refresh the operator view without exercising Chaos Monkey.
+Use --customer-only to check narrow Customer layouts and refresh their screenshots.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
 build up, then photographs each persona's view into docs/screenshots/. WARNING: the
@@ -26,7 +27,7 @@ from playwright.async_api import async_playwright
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False, operator_only: bool = False) -> None:
+async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False, operator_only: bool = False, customer_only: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         launch = {"args": ["--no-sandbox"]}
@@ -52,7 +53,7 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             await page.locator(selector).screenshot(path=str(out / f"{name}.png"))
             report(name)
 
-        if not regulator_only and not operator_only:
+        if not regulator_only and not operator_only and not customer_only:
             await page.goto(url)
             await page.locator("#view-about").wait_for(state="visible")
             assert await page.locator("[data-view='about']").get_attribute("aria-selected") == "true"
@@ -79,11 +80,11 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
         await page.fill("#simRate", "60")
         await page.click("#simStart")
         await page.wait_for_timeout(warmup * 1000)
-        if not regulator_only and not operator_only:
+        if not regulator_only and not operator_only and not customer_only:
             await shot("simulator")
 
         # Operator: KPIs, charts, fixtures and feed, with three minutes' worth of chart history building.
-        if not regulator_only:
+        if not regulator_only and not customer_only:
             await page.goto(url + "#operator")
             await page.wait_for_timeout(4000)
             await shot("operator")
@@ -119,8 +120,40 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             await page.wait_for_timeout(1500)
             await page.click("#historyTable [data-verify]")
             await page.wait_for_selector("#custProof .verdict", timeout=10000)
-            await close_up("customer-verify", "#custProof")
+            if not customer_only:
+                await close_up("customer-verify", "#custProof")
             await shot("customer")
+            if customer_only:
+                for width in [320, 390, 420, 430, 600, 601]:
+                    await page.set_viewport_size({"width": width, "height": 844})
+                    await page.wait_for_timeout(300)
+                    assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth"), f"Customer page overflows at {width}px"
+                    assert await page.locator(".account").evaluate("""account => {
+                        const r = account.getBoundingClientRect();
+                        return r.left >= 0 && r.right <= innerWidth &&
+                            [...account.querySelectorAll("h1, span, b")].every(el =>
+                                el.scrollWidth <= el.clientWidth);
+                    }"""), f"Customer summary text overflows at {width}px"
+                    if width == 420:
+                        await shot("customer-mobile")
+                    assert await page.evaluate("""() => {
+                        const ids = ["accName", "accCash", "accEscrow", "accEntries"];
+                        const elements = ids.map(id => document.getElementById(id));
+                        const original = elements.map(el => el.textContent);
+                        const samples = ["customer-" + "x".repeat(226), "€92,233,720,368,547,758.07",
+                            "€92,233,720,368,547,758.07", "2147483647"];
+                        try {
+                            elements.forEach((el, i) => el.textContent = samples[i]);
+                            return elements.every(el => el.scrollWidth <= el.clientWidth) &&
+                                document.documentElement.scrollWidth <= innerWidth;
+                        } finally {
+                            elements.forEach((el, i) => el.textContent = original[i]);
+                        }
+                    }"""), f"Long Customer IDs or exact totals overflow at {width}px"
+                await browser.close()
+                if errors:
+                    raise SystemExit("page errors while capturing:\n  " + "\n  ".join(errors))
+                return
 
         # Regulator: a full audit.
         await page.goto(url + "#regulator")
@@ -176,5 +209,6 @@ if __name__ == "__main__":
     scope.add_argument("--regulator-only", action="store_true", help="capture reporting views only; skip destructive Chaos Monkey scenarios")
     scope.add_argument("--about-only", action="store_true", help="check and capture About and its embedded guide only")
     scope.add_argument("--operator-only", action="store_true", help="capture the operator view only; skip destructive Chaos Monkey scenarios")
+    scope.add_argument("--customer-only", action="store_true", help="check Customer mobile layouts and capture its views only; skip destructive Chaos Monkey scenarios")
     a = ap.parse_args()
-    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only, a.operator_only))
+    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only, a.operator_only, a.customer_only))

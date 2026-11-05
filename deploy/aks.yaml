@@ -61,6 +61,9 @@ spec:
         - name: ledger
           image: ${IMAGE}
           args: ["--host", "127.0.0.1", "--port", "8080", "--data", "/data/ledger", "--public-origin", "https://${PUBLIC_HOST}"]
+          env:
+            - name: JAVA_TOOL_OPTIONS
+              value: "-Xmx4g"
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true
@@ -69,10 +72,10 @@ spec:
           resources:
             requests:
               cpu: 500m
-              memory: 1Gi
+              memory: 4Gi
             limits:
               cpu: "2"
-              memory: 2Gi
+              memory: 6Gi
           startupProbe:
             exec:
               command: ["curl", "--fail", "--silent", "--show-error", "--max-time", "3", "--output", "/dev/null", "http://127.0.0.1:8080/health/live"]

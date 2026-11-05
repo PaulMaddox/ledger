@@ -49,11 +49,14 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         val staked: BigInteger, val returned: BigInteger, val kindCounts: Map<String, Long>,
         val openBets: Int, val openStakes: BigInteger, val exposure: BigInteger,
     )
+    data class HistoryPage(val entries: Int, val seqs: List<Long>)
 
     private val lock = Any()
     private var next = 0L
-    private val byPlayer = HashMap<String, MutableList<Long>>()
-    private val bets = LinkedHashMap<String, BetView>()
+    private class BetHistory(val placedSeq: Long, var settledSeq: Long = -1)
+    private val byPlayer = HashMap<String, LongHistory>()
+    private val bets = LinkedHashMap<String, BetHistory>()
+    private val openViews = HashMap<String, BetView>()
     private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
     private val openBetsByFixture = HashMap<String, MutableSet<String>>()
     private val kindCounts = HashMap<String, Long>()
@@ -88,7 +91,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         kindCounts.merge(e.kind, 1, Long::plus)
         recent.addLast(e.seq)
         if (recent.size > 60) recent.removeFirst()
-        e.metadata["playerId"]?.let { byPlayer.getOrPut(it) { ArrayList() }.add(e.seq) }
+        e.metadata["playerId"]?.let { byPlayer.getOrPut(it) { LongHistory() }.add(e.seq) }
 
         fun cashDelta(player: String) = e.postings.firstOrNull { it.account == Accounts.cash(player, it.currency) }?.amount ?: 0L
 
@@ -108,7 +111,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                         selection = parts[1], oddsHundredths = parts[2].toInt(), stake = stake,
                         placedSeq = e.seq, placedAtMicros = e.timestampMicros,
                     )
-                    bets[betId] = bet
+                    bets[betId] = BetHistory(e.seq)
+                    openViews[betId] = bet
                     openBetsByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
                     openBetsByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
                     openBetCount++
@@ -121,18 +125,18 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 val betId = e.metadata.getValue("betId")
                 val payout = cashDelta(e.metadata.getValue("playerId"))
                 returned = returned.add(BigInteger.valueOf(payout))
-                bets[betId]?.let {
-                    if (it.isOpen) {
+                bets[betId]?.let { history ->
+                    openViews.remove(betId)?.let {
                         openBetCount--
                         val amount = BigInteger.valueOf(it.stake)
                         openStakes = openStakes.subtract(amount)
                         exposure = exposure.subtract(openExposure(it))
+                        openBetsByPlayer[it.playerId]?.remove(betId)
+                        openBetsByFixture[it.fixtureId]?.remove(betId)
+                        if (openBetsByPlayer[it.playerId]?.isEmpty() == true) openBetsByPlayer.remove(it.playerId)
+                        if (openBetsByFixture[it.fixtureId]?.isEmpty() == true) openBetsByFixture.remove(it.fixtureId)
                     }
-                    bets[betId] = it.copy(settledSeq = e.seq, outcome = e.kind.removePrefix("BET_"), payout = payout)
-                    openBetsByPlayer[it.playerId]?.remove(betId)
-                    openBetsByFixture[it.fixtureId]?.remove(betId)
-                    if (openBetsByPlayer[it.playerId]?.isEmpty() == true) openBetsByPlayer.remove(it.playerId)
-                    if (openBetsByFixture[it.fixtureId]?.isEmpty() == true) openBetsByFixture.remove(it.fixtureId)
+                    history.settledSeq = e.seq
                 }
             }
         }
@@ -145,27 +149,53 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
             .divide(BigInteger.valueOf(100)).subtract(stake)
     }
 
+    private fun view(history: BetHistory): BetView {
+        val placement = ledger.entry(history.placedSeq).entry
+        val id = placement.metadata.getValue("betId")
+        if (history.settledSeq < 0) return openViews.getValue(id)
+        val parts = placement.metadata.getValue("selection").split("|")
+        val settlement = ledger.entry(history.settledSeq).entry
+        val player = placement.metadata.getValue("playerId")
+        val payout = settlement.postings.firstOrNull {
+            it.account == Accounts.cash(settlement.metadata.getValue("playerId"), it.currency)
+        }?.amount ?: 0L
+        return BetView(id, player, parts[0], parts[1], parts[2].toInt(),
+            placement.postings.first { it.amount > 0 }.amount, placement.seq, placement.timestampMicros,
+            settlement.seq, settlement.kind.removePrefix("BET_"), payout)
+    }
+
     // ---- Queries (all return copies, safe to use after the lock is released) ----
 
-    fun seqsForPlayer(player: String): List<Long> = synchronized(lock) { byPlayer[player]?.toList() ?: emptyList() }
+    fun seqsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<Long> = synchronized(lock) {
+        require(limit >= 0) { "history limit must be non-negative" }
+        byPlayer[player]?.tail(limit) ?: emptyList()
+    }
+    fun historyForPlayer(player: String, limit: Int): HistoryPage = synchronized(lock) {
+        require(limit >= 0) { "history limit must be non-negative" }
+        val history = byPlayer[player]
+        HistoryPage(history?.size ?: 0, history?.tail(limit) ?: emptyList())
+    }
     fun betsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<BetView> = synchronized(lock) {
         require(limit >= 0) { "bet limit must be non-negative" }
-        byPlayer[player].orEmpty().asReversed().asSequence().mapNotNull { seq ->
-            val entry = ledger.entry(seq).entry
-            if (entry.kind == "BET_PLACED") entry.metadata["betId"]?.let(bets::get) else null
-        }.take(limit).toList().asReversed()
+        val history = byPlayer[player] ?: return@synchronized emptyList()
+        val result = ArrayList<BetView>()
+        var index = history.size - 1
+        while (index >= 0 && result.size < limit) {
+            val entry = ledger.entry(history[index--]).entry
+            if (entry.kind == "BET_PLACED") entry.metadata["betId"]?.let(bets::get)?.let { result.add(view(it)) }
+        }
+        result.asReversed()
     }
-    fun allBets(): List<BetView> = synchronized(lock) { bets.values.toList() }
+    fun allBets(): List<BetView> = synchronized(lock) { bets.values.map(::view) }
     fun openBetsForPlayer(player: String): List<BetView> = synchronized(lock) {
-        openBetsByPlayer[player].orEmpty().mapNotNull(bets::get)
+        openBetsByPlayer[player].orEmpty().mapNotNull(openViews::get)
     }
-    fun bet(betId: String): BetView? = synchronized(lock) { bets[betId] }
+    fun bet(betId: String): BetView? = synchronized(lock) { bets[betId]?.let(::view) }
     fun openBets(): List<BetView> = synchronized(lock) {
-        openBetsByFixture.values.asSequence().flatMap { it.asSequence() }
-            .map(bets::getValue).sortedWith { a, b -> a.placedSeq.compareTo(b.placedSeq) }.toList()
+        openViews.values.sortedWith { a, b -> a.placedSeq.compareTo(b.placedSeq) }
     }
     fun openBetsOn(fixtureId: String): List<BetView> = synchronized(lock) {
-        openBetsByFixture[fixtureId].orEmpty().mapNotNull(bets::get)
+        openBetsByFixture[fixtureId].orEmpty().mapNotNull(openViews::get)
     }
     fun recentSeqs(): List<Long> = synchronized(lock) { recent.toList().asReversed() }
     fun players(): Set<String> = synchronized(lock) { byPlayer.keys.toSet() }
