@@ -36,7 +36,7 @@ class FixtureSchedulerTest {
 
     private fun assertPool(book: Book) {
         val live = book.openFixtures().filter { it.managed }
-        assertEquals(20, live.size)
+        assertEquals(4, live.size)
         assertEquals(Roster.pool, live.groupingBy { it.sport }.eachCount())
         val participants = live.flatMap { it.selections.filterNot { s -> s.code == "DRAW" }.map { s -> s.label } }
         assertEquals(participants.size, participants.distinct().size)
@@ -104,6 +104,44 @@ class FixtureSchedulerTest {
                     awaitSettled(deadlines.filterValues { it <= now.get() }.keys.map(book::fixture))
                     assertTrue(book.fixture("F1").isOpen)
                     assertFalse(book.fixture("F1").managed)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `a previously larger managed pool drains at its saved deadlines without cancelling bets`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val now = AtomicLong(1_000_000)
+        var deadlines = emptyMap<String, Long>()
+        Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 10_000, "EUR", "larger-pool-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model, dir, now::get)
+                for (sport in Roster.Sport.entries) repeat(5) {
+                    val f = book.addFixture(Random(sport.ordinal * 5 + it), sport, managed = true, clock = now::get)
+                    book.placeBet("p", f.id, f.selections.first().code, 100, "old-${f.id}")
+                }
+                deadlines = book.openFixtures().associate { it.id to it.endsAt }
+                assertEquals(20, deadlines.size)
+            }
+        }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                val book = Book(SportsbookWallet(ledger), model, dir, now::get)
+                FixtureScheduler(book, { ledger.isFailed }, now::get, Random(69), false).use { scheduler ->
+                    assertEquals(deadlines, book.openFixtures().associate { it.id to it.endsAt })
+                    assertEquals(20, book.openFixtures().size)
+                    now.set(deadlines.values.max())
+                    scheduler.tick()
+                    awaitSettled(deadlines.keys.map(book::fixture))
+                    assertPool(book)
+                    assertTrue(deadlines.keys.all { book.fixture(it).settlementComplete })
+                    Audit(ledger, dir, TestSupport.LEDGER_ID, listOf(signer.publicKey)).use { audit ->
+                        assertTrue(audit.fullAudit().report.ok)
+                    }
                 }
             }
         }
@@ -361,7 +399,7 @@ class FixtureSchedulerTest {
 
     @Test
     @Tag("soak")
-    fun `accelerated 24 hour pool archives about 23000 fixtures with bounded active state and restores`() {
+    fun `accelerated 24 hour pool archives about 4600 fixtures with bounded active state and restores`() {
         val dir = tempDir()
         val signer = Ed25519TreeHeadSigner.generate()
         val now = AtomicLong(1_000_000)
@@ -383,7 +421,7 @@ class FixtureSchedulerTest {
                         }
                     }
                     fixtureCount = book.fixtures().size
-                    assertTrue(fixtureCount in 22_000..24_000, "a 75-second mean should produce about 23,000 fixtures: $fixtureCount")
+                    assertTrue(fixtureCount in 4_400..4_800, "four markets with a 75-second mean should produce about 4,600 fixtures: $fixtureCount")
                 }
             }
         }
@@ -393,7 +431,7 @@ class FixtureSchedulerTest {
                 assertEquals(fixtureCount, book.fixtures().size)
                 assertPool(book)
                 val archived = Files.readAllLines(dir.resolve(Book.ARCHIVE_FILE)).size
-                assertEquals(fixtureCount - 20, archived)
+                assertEquals(fixtureCount - 4, archived)
             }
         }
     }

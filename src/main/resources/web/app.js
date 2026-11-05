@@ -21,6 +21,19 @@ const eur = minor => {
 };
 const odds = h => (h / 100).toFixed(2);
 const int = new Intl.NumberFormat("en-IE");
+/** Display-only rounding stays in integer minor units, including above Number's exact range. */
+const compactTotal = (value, money = false) => {
+  const amount = BigInt(value ?? 0), absolute = amount < 0n ? -amount : amount;
+  const base = money ? 100n : 1n;
+  for (const [size, suffix] of [[1000000000000000n, "Q"], [1000000000000n, "T"], [1000000000n, "B"], [1000000n, "M"], [1000n, "K"]]) {
+    const scale = size * base;
+    if (absolute < scale) continue;
+    const tenths = (absolute * 10n + scale / 2n) / scale;
+    return `${amount < 0n ? "-" : ""}${money ? "€" : ""}${tenths / 10n}${tenths % 10n ? "." + tenths % 10n : ""}${suffix}`;
+  }
+  const rounded = (absolute + base / 2n) / base;
+  return `${amount < 0n && rounded ? "-" : ""}${money ? wholeMoney.format(rounded) : int.format(rounded)}`;
+};
 const short = h => h ? h.slice(0, 10) + "…" : "–";
 const toMinor = v => {
   const match = /^([+-]?)(\d+)(?:\.(\d{0,2}))?$/.exec(String(v).trim());
@@ -418,14 +431,14 @@ function poll(fn, ms) {
 // Header: the ledger's live tip, always on.
 poll(async () => {
   const o = await api("overview");
-  $("ledgerId").textContent = o.ledgerId;
   $("tipEntries").textContent = o.entries == null ? "–" : int.format(o.entries);
   $("tipChain").textContent = short(o.chainHead);
   $("tipSigned").textContent = o.latestCheckpoint == null ? "–" : int.format(o.latestCheckpoint);
   $("simDot").className = "simdot " + o.simulator;
+  $("storeStatus").hidden = o.available !== false;
   $("storeStatus").textContent = o.available === false ?
     "Main ledger stopped. Open Administrator to clear storage and start again; damaged files remain for inspection." :
-    "Demonstration only: no authentication. The tabs switch views, they do not control access.";
+    "";
 }, 1000);
 
 // ============================== customer ==============================
@@ -711,17 +724,20 @@ async function refreshOperator() {
     ? `Scheduler ${o.scheduler.state.toLowerCase()} · last tick ${new Date(o.scheduler.lastTick).toLocaleTimeString()} · ${o.scheduler.settling} settling${o.scheduler.reason ? " · " + o.scheduler.reason : ""}`
     : "Scheduler status unavailable";
   const last = o.series.length ? o.series[o.series.length - 1] : { tps: 0 };
-  const kpi = (label, value, sub = "") => `<div class="kpi"><span>${label}</span><b>${value}</b><small>${sub}</small></div>`;
-  $("kpis").innerHTML = [
-    kpi("Gross gaming revenue", eur(o.ggr), "stakes kept minus winnings paid"),
-    kpi("Exposure", eur(o.exposure), "if every open bet won"),
-    kpi("Open bets", int.format(o.openBets), eur(o.openStakes) + " staked"),
-    kpi("Deposits", eur(o.deposits), ""),
-    kpi("Withdrawals", eur(o.withdrawals), ""),
-    kpi("Ledger entries", int.format(o.entries), ""),
-    kpi("Throughput", int.format(last.tps) + "/s", "entries in the last second"),
-    kpi("Customers", int.format(o.players), ""),
-  ].join("");
+  const metrics = [
+    ["Gross gaming revenue", compactTotal(o.ggr, true), eur(o.ggr), "stakes kept minus winnings paid"],
+    ["Exposure", compactTotal(o.exposure, true), eur(o.exposure), "if every open bet won"],
+    ["Open bets", compactTotal(o.openBets), int.format(o.openBets), compactTotal(o.openStakes, true) + " staked"],
+    ["Deposits", compactTotal(o.deposits, true), eur(o.deposits), "all time"],
+    ["Withdrawals", compactTotal(o.withdrawals, true), eur(o.withdrawals), "all time"],
+    ["Ledger entries", compactTotal(o.entries), int.format(o.entries), "durably committed"],
+    ["Throughput", compactTotal(last.tps) + "/s", int.format(last.tps) + "/s", "entries in the last second"],
+    ["Customers", compactTotal(o.players), int.format(o.players), "with ledger activity"],
+  ];
+  $("kpis").innerHTML = metrics.map(([label, value, exact, sub]) =>
+    `<div class="kpi"><span>${esc(label)}</span><b title="${esc(exact)}" aria-label="${esc(exact)}">${esc(value)}</b><small>${esc(sub)}</small></div>`).join("");
+  $("kpiExact").innerHTML = metrics.map(([label, , exact]) => `<div><dt>${esc(label)}</dt><dd>${esc(exact)}</dd></div>`).join("") +
+    `<div><dt>Open stakes</dt><dd>${esc(eur(o.openStakes))}</dd></div>`;
   lineChart($("chTps"), o.series.map(p => p.tps), v => int.format(Math.round(v)));
   lineChart($("chGgr"), o.series.map(p => p.ggr), v => eur(v));
   lineChart($("chExp"), o.series.map(p => p.exposure), v => eur(v));
@@ -737,18 +753,28 @@ async function refreshOperator() {
 async function refreshFixtures() {
   const fx = await api("fixtures");
   anchorFixtures(fx);
-  renderControls($("fixtureTable"), `<tr><th>Sport</th><th>Event</th><th>Fixture</th><th>Ends in</th><th>Selections / Prices</th><th class="num">Open bets</th><th class="num">Staked</th><th>Liability by selection</th><th>Result</th></tr>` +
-    fx.map(f => `<tr>
-      <td>${esc(f.sport || "SOCCER")}</td><td>${esc(f.event || "Demo match")}</td><td><b>${esc(f.id)}</b> ${esc(fixtureLabel(f))}</td>
-      <td class="countdown" ${!f.result ? `data-countdown="${esc(f.id)}"` : ""}>${f.result ? "Finished" : countdownText(f.id)}</td>
-      <td>${marketSelections(f).map(s => `${esc(s.label)} ${odds(s.odds)}`).join("<br>")}</td>
-      <td class="num">${int.format(f.openBets)}</td><td class="num">${eur(f.staked)}</td>
-      <td class="liab">${marketSelections(f).map(s => `${esc(s.label)} ${eur(f.liability[s.code])}`).join("<br>")}</td>
-      <td>${!f.result
-        ? `<span class="settle">${[...marketSelections(f), { code: "VOID", label: "Void" }].map(s => `<button type="button" data-settle="${esc(f.id)}" data-result="${s.code}">${esc(s.label)}</button>`).join("")}</span>`
-        : f.result !== "LEGACY_UNRESOLVED" && !f.settlementComplete
-          ? `<span class="settle"><span class="pill mut">${esc(f.result)} · settlement pending</span><button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume</button></span>`
-          : `<span class="pill mut">${esc(f.result)}</span>`}</td></tr>`).join(""), ["settle", "result"]);
+  const active = fx.filter(f => !f.settlementComplete);
+  const completed = fx.filter(f => f.settlementComplete);
+  $("fixtureSummary").textContent = `${active.filter(f => !f.result).length} open · ${active.filter(f => f.result).length} pending`;
+  renderControls($("fixtureTable"), `<div class="operator-fixtures">${active.map(f => {
+    const selections = marketSelections(f);
+    return `<article class="operator-fixture" aria-label="${esc(f.id + " " + fixtureLabel(f))}">
+      <div class="fixture-card-head"><span class="eyebrow">${esc(f.sport || "SOCCER")} <span class="fixture-id">${esc(f.id)}</span></span>
+        <span class="countdown pill ${f.result ? "warn" : "mut"}" ${!f.result ? `data-countdown="${esc(f.id)}"` : ""}>${f.result ? "Needs attention" : countdownText(f.id)}</span></div>
+      <h3>${esc(fixtureLabel(f))}</h3><p class="hint fixture-event">${esc(f.event || "Demo match")}</p>
+      <dl class="fixture-totals"><div><dt>Open bets</dt><dd>${int.format(f.openBets)}</dd></div><div><dt>Total staked</dt><dd>${eur(f.staked)}</dd></div></dl>
+      ${!f.result ? `<div class="settle fixture-outcomes">
+        <div class="outcome-heading"><span>Set winning selection</span><span>Winning payout</span></div>
+        ${selections.map(s => `<div class="fixture-outcome"><button type="button" data-settle="${esc(f.id)}" data-result="${esc(s.code)}" aria-label="${esc("Set " + s.label + " as winner for " + f.id)}"><span>${esc(s.label)}</span><b>${odds(s.odds)}</b></button><span class="outcome-payout">${eur(f.liability[s.code])}</span></div>`).join("")}
+        <div class="fixture-void"><span class="hint">Void refunds open stakes</span><button type="button" data-settle="${esc(f.id)}" data-result="VOID" aria-label="${esc("Void " + f.id + " and refund open stakes")}">Void fixture</button></div>
+      </div>` : `<div class="settle fixture-pending"><span class="hint">${esc(selections.find(s => s.code === f.result)?.label || f.result)}${f.result === "LEGACY_UNRESOLVED" ? " · result unknown; manual review required" : " · settlement pending"}</span>
+        ${f.result !== "LEGACY_UNRESOLVED" ? `<button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume settlement</button>` : ""}</div>`}
+    </article>`;
+  }).join("") || `<p class="hint">No live fixtures. Check scheduler status above.</p>`}</div>`, ["settle", "result"]);
+  $("fixtureHistory").hidden = completed.length === 0;
+  $("fixtureHistoryCount").textContent = `${completed.length} completed`;
+  $("fixtureResults").innerHTML = completed.map(f =>
+    `<div><span><b>${esc(f.id)}</b> ${esc(fixtureLabel(f))}</span><span class="pill mut">${esc(marketSelections(f).find(s => s.code === f.result)?.label || f.result)}</span></div>`).join("");
   tickCountdowns();
 }
 $("fixtureTable").addEventListener("click", async e => {

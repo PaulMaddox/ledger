@@ -91,13 +91,13 @@ class WebAppTest {
     }
 
     @Test
-    fun `managed pool has 20 timed multi sport fixtures at startup restart and reset`() {
+    fun `managed pool has four timed multi sport fixtures at startup restart and reset`() {
         val directory = tempDir()
         fun assertPool(app: LedgerWebApp) {
             val response = call(app, "GET", "fixtures")
             assertEquals(200, response.first)
-            assertEquals(20, Regex("\"result\":null").findAll(response.second).count(), response.second)
-            assertEquals(20, Regex("\"managed\":true").findAll(response.second).count(), response.second)
+            assertEquals(4, Regex("\"result\":null").findAll(response.second).count(), response.second)
+            assertEquals(4, Regex("\"managed\":true").findAll(response.second).count(), response.second)
             for ((sport, count) in com.pam.ledger.web.Roster.pool) {
                 assertEquals(count, Regex("\"sport\":\"$sport\"").findAll(response.second).count())
             }
@@ -867,6 +867,7 @@ class WebAppTest {
         val firstExpiry = Regex("\"remainingMs\":(\\d+)").findAll(call(app, "GET", "fixtures").second)
             .minOf { it.groupValues[1].toLong() }
         val deadline = System.nanoTime() + TimeUnit.MILLISECONDS.toNanos(firstExpiry) + TimeUnit.SECONDS.toNanos(10)
+        var settled = false
         do {
             val page = http.send(HttpRequest.newBuilder(URI("http://127.0.0.1:${app.port}/"))
                 .timeout(Duration.ofSeconds(5)).GET().build(), HttpResponse.BodyHandlers.discarding())
@@ -875,14 +876,25 @@ class WebAppTest {
             assertEquals(200, overview.first, overview.second)
             assertTrue(overview.second.contains("\"available\":true"), overview.second)
             assertEquals(200, call(app, "GET", "simulator/events", timeout = Duration.ofSeconds(5)).first)
+            val fixtures = call(app, "GET", "fixtures", timeout = Duration.ofSeconds(5))
+            assertEquals(200, fixtures.first, fixtures.second)
+            settled = settled || fixtures.second.contains("\"settlementComplete\":true")
             Thread.sleep(200)
         } while (System.nanoTime() < deadline)
         val stopped = call(app, "POST", "simulator", mapOf("action" to "stop"), timeout = Duration.ofSeconds(5))
         assertEquals(200, stopped.first, stopped.second)
         assertTrue(Regex("\"succeeded\":(\\d+)").find(stopped.second)!!.groupValues[1].toLong() > 500, stopped.second)
+        // Four markets concentrate the same traffic into larger settlements; drain without generating more load.
+        val settlementDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(60)
+        while (!settled && System.nanoTime() < settlementDeadline) {
+            val fixtures = call(app, "GET", "fixtures", timeout = Duration.ofSeconds(5))
+            assertEquals(200, fixtures.first, fixtures.second)
+            settled = fixtures.second.contains("\"settlementComplete\":true")
+            Thread.sleep(200)
+        }
         assertTrue(call(app, "GET", "fixtures").second.contains("\"settlementComplete\":true"),
             "the load test must include real persisted fixture settlement")
-        val audit = call(app, "POST", "regulator/audit")
+        val audit = call(app, "POST", "regulator/audit", timeout = Duration.ofMinutes(2))
         assertEquals(200, audit.first, audit.second)
         assertTrue(audit.second.contains("\"ok\":true"), audit.second)
     }
@@ -1418,8 +1430,8 @@ class WebAppTest {
             val fixtures = call(restarted, "GET", "fixtures").second
             assertTrue(fixtures.contains("\"id\":\"F1\",\"home\":\"${teams[0]}\",\"away\":\"${teams[1]}\""), fixtures)
             assertEquals(404, call(restarted, "POST", "fixtures").first)
-            assertEquals(200, call(restarted, "POST", "fixtures/F20/settle", mapOf("result" to "P1")).first)
-            assertTrue(call(restarted, "GET", "fixtures").second.contains("\"id\":\"F21\""))
+            assertEquals(200, call(restarted, "POST", "fixtures/F4/settle", mapOf("result" to "P1")).first)
+            assertTrue(call(restarted, "GET", "fixtures").second.contains("\"id\":\"F5\""))
             assertTrue(call(restarted, "GET", "players/alice").second.contains("\"betId\":\"restart-slip\"") &&
                 call(restarted, "GET", "players/alice").second.contains("\"open\":true"))
             assertEquals(200, call(restarted, "POST", "fixtures/F1/settle", mapOf("result" to "AWAY")).first)
@@ -1442,12 +1454,12 @@ class WebAppTest {
         var id = 2
         repeat(31) {
             assertEquals(200, call(app, "POST", "fixtures/F$id/settle", mapOf("result" to "VOID")).first)
-            id = 21 + it
+            id = 5 + it
         }
 
         val fixtures = call(app, "GET", "fixtures").second
         assertTrue(fixtures.contains("\"id\":\"F1\"") && fixtures.contains("\"settlementComplete\":false"), fixtures)
-        assertTrue(fixtures.contains("\"id\":\"F51\""), fixtures)
+        assertTrue(fixtures.contains("\"id\":\"F35\""), fixtures)
     }
 
     @Test
@@ -2104,7 +2116,7 @@ class WebAppTest {
             val fixtures = call(restarted, "GET", "fixtures").second
             assertTrue(fixtures.contains("\"id\":\"F1\"") && fixtures.contains("\"result\":\"LEGACY_UNRESOLVED\""), fixtures)
             assertEquals(400, call(restarted, "POST", "fixtures/F1/settle", mapOf("result" to "HOME")).first)
-            assertTrue(fixtures.contains("\"id\":\"F21\""), fixtures)
+            assertTrue(fixtures.contains("\"id\":\"F5\""), fixtures)
         } finally {
             restarted.close()
         }
@@ -2513,9 +2525,9 @@ class WebAppTest {
     fun `operator response uses exact open bet aggregates`() {
         LedgerWebApp.start(WebOptions(port = 0, dataDir = tempDir())).use { app ->
             val fixtures = call(app, "GET", "fixtures").second
-            val odds = Regex("\"id\":\"F6\".*?\"odds\":\\{\"HOME\":(\\d+)").find(fixtures)!!.groupValues[1].toLong()
+            val odds = Regex("\"id\":\"F1\".*?\"odds\":\\{\"HOME\":(\\d+)").find(fixtures)!!.groupValues[1].toLong()
             val placed = call(app, "POST", "players/alice/bets", mapOf(
-                "fixture" to "F6", "selection" to "HOME", "stake" to 101, "betId" to "operator-aggregate",
+                "fixture" to "F1", "selection" to "HOME", "stake" to 101, "betId" to "operator-aggregate",
             ))
             assertEquals(200, placed.first, placed.second)
             // The fixtures route lists newest first; the player query catches the model up.

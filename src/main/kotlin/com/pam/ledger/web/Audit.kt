@@ -7,8 +7,11 @@ import com.pam.ledger.LedgerVerifier
 import com.pam.ledger.SealedEntry
 import com.pam.ledger.SignedTreeHead
 import com.pam.ledger.EntryCodec
+import java.io.EOFException
 import java.nio.file.Files
 import java.nio.file.Path
+import java.nio.file.StandardOpenOption.CREATE_NEW
+import java.nio.file.StandardOpenOption.WRITE
 import java.security.PublicKey
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
@@ -71,19 +74,20 @@ class Audit(
     // ---- Snapshot and independent audit ----
 
     /** Copy one signed prefix so no concurrent append can escape its checkpoint. */
-    private fun snapshot(anchor: SignedTreeHead): Path {
+    internal fun snapshot(anchor: SignedTreeHead): Path {
         val copy = Files.createTempDirectory("pam-ledger-snapshot")
         try {
-            val checkpoints = ArrayList<ByteArray>()
             val anchorBytes = anchor.encode()
-            var prefixEnd = -1
-            Journal.scanReadOnly(directory.resolve(Ledger.CHECKPOINTS_FILE)) { record ->
-                checkpoints += record
-                if (record.contentEquals(anchorBytes)) prefixEnd = checkpoints.size
+            val source = directory.resolve(Ledger.CHECKPOINTS_FILE)
+            var scannedBytes = 0L
+            var prefixEnd = -1L
+            Journal.scanReadOnly(source) { record ->
+                scannedBytes = Math.addExact(scannedBytes, Journal.HEADER.toLong() + record.size)
+                if (record.contentEquals(anchorBytes)) prefixEnd = scannedBytes
             }
             check(prefixEnd >= 0) { "ledger snapshot is missing its signed checkpoint" }
             // Bound by the anchor's position, never by an unverified record's claimed size.
-            writeRecords(copy.resolve(Ledger.CHECKPOINTS_FILE), checkpoints.take(prefixEnd))
+            copyPrefix(source, copy.resolve(Ledger.CHECKPOINTS_FILE), prefixEnd)
             copyEntryPrefix(copy.resolve(Ledger.ENTRIES_FILE), anchor.head.treeSize)
             return copy
         } catch (t: Throwable) {
@@ -93,30 +97,34 @@ class Audit(
     }
 
     private fun copyEntryPrefix(destination: Path, treeSize: Long) {
-        val (journal, _) = Journal.openForAppend(destination) {}
-        val batch = ArrayList<ByteArray>(1_000)
+        val source = directory.resolve(Ledger.ENTRIES_FILE)
         var copied = 0L
-        try {
-            Journal.scanReadOnly(directory.resolve(Ledger.ENTRIES_FILE)) { record ->
-                if (copied < treeSize) {
-                    batch += record
-                    copied++
-                    if (batch.size == 1_000) {
-                        journal.appendBatch(batch)
-                        batch.clear()
-                    }
-                }
+        var prefixBytes = 0L
+        Journal.scanReadOnly(source) { record ->
+            if (copied < treeSize) {
+                prefixBytes = Math.addExact(prefixBytes, Journal.HEADER.toLong() + record.size)
+                copied++
             }
-            check(copied == treeSize) { "ledger snapshot ended before its signed head" }
-            if (batch.isNotEmpty()) journal.appendBatch(batch)
-        } finally {
-            journal.close()
         }
+        check(copied == treeSize) { "ledger snapshot ended before its signed head" }
+        copyPrefix(source, destination, prefixBytes)
     }
 
-    private fun writeRecords(path: Path, records: List<ByteArray>) {
-        val (journal, _) = Journal.openForAppend(path) {}
-        journal.use { out -> records.chunked(1_000).forEach(out::appendBatch) }
+    private fun copyPrefix(source: Path, destination: Path, bytes: Long) {
+        // A disposable audit copy issues no receipts: flush on close, without journal rewrites or fsyncs.
+        Files.newInputStream(source).use { input ->
+            Files.newOutputStream(destination, CREATE_NEW, WRITE).use { output ->
+                val buffer = ByteArray(64 * 1024)
+                var remaining = bytes
+                while (remaining > 0) {
+                    val length = minOf(remaining, buffer.size.toLong()).toInt()
+                    val read = input.readNBytes(buffer, 0, length)
+                    if (read != length) throw EOFException("ledger snapshot ended before its signed prefix")
+                    output.write(buffer, 0, read)
+                    remaining -= read
+                }
+            }
+        }
     }
 
     data class AuditResult(val report: LedgerVerifier.Report, val millis: Long, val note: String)

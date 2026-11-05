@@ -12,6 +12,15 @@ test("console navigation places Simulator immediately after Customer", () => {
   assert.deepEqual([...navigation.matchAll(/data-view="([^"]+)"/g)].map(([, view]) => view),
     ["about", "customer", "simulator", "operator", "regulator", "administrator", "chaos"]);
 });
+test("console brand is a home link to the embedded guide", () => {
+  const html = readFileSync(new URL("../src/main/resources/web/index.html", import.meta.url), "utf8");
+  assert.match(html, /<a class="brand" href="#about" aria-label="Ledger Console home \(Guide\)">/);
+  assert.match(html, /<section class="view about-view" id="view-about" hidden>/);
+  assert.doesNotMatch(html, /view-menu-toggle/);
+  assert.match(html, /<b>Ledger Console<\/b><span>example-ledger<\/span>/);
+  assert.match(source, /const WEB_LEDGER_ID = "sportsbook-web"/);
+  assert.doesNotMatch(source, /\$\("ledgerId"\)\.textContent/);
+});
 
 const cryptoSource = source.split("// ============================== router")[0];
 const str = s => { const b = Buffer.from(s); const n = Buffer.alloc(4); n.writeInt32BE(b.length); return Buffer.concat([n, b]); };
@@ -100,6 +109,28 @@ function pollingContext() {
   vm.runInContext(source.slice(source.indexOf("async function refreshFixtures()"), source.indexOf('$("fixtureTable").addEventListener')), c);
   return { c, document, element, responses, customer, fixtures };
 }
+
+test("header hides the routine banner but still shows and clears stopped-ledger warnings", async () => {
+  const html = readFileSync(new URL("../src/main/resources/web/index.html", import.meta.url), "utf8");
+  assert.match(html, /id="storeStatus" role="status" hidden><\/div>/);
+  assert.doesNotMatch(html, /The tabs switch views, they do not control access/);
+  const s = pollingContext();
+  let refresh;
+  s.c.poll = fn => { refresh = fn; };
+  vm.runInContext(source.slice(source.indexOf("poll(async () => {", source.indexOf("// Header:")), source.indexOf("// ============================== customer")), s.c);
+  s.responses["/api/overview"] = { available: true };
+  await refresh();
+  assert.equal(s.element("storeStatus").hidden, true);
+  assert.equal(s.element("storeStatus").textContent, "");
+  s.responses["/api/overview"].available = false;
+  await refresh();
+  assert.equal(s.element("storeStatus").hidden, false);
+  assert.match(s.element("storeStatus").textContent, /Main ledger stopped/);
+  s.responses["/api/overview"].available = true;
+  await refresh();
+  assert.equal(s.element("storeStatus").hidden, true);
+  assert.equal(s.element("storeStatus").textContent, "");
+});
 
 function reportFixture(selection = "HOME") {
   const hash = (...parts) => createHash("sha256").update(Buffer.concat(parts)).digest();
@@ -207,22 +238,69 @@ test("browser reconciles golf and two-way liabilities and rejects a tampered pay
   }
 });
 
-test("all 20 multi-sport markets render selection labels and generic operator settlement controls", async () => {
+test("four multi-sport markets render selection labels and generic operator settlement controls", async () => {
   const s = pollingContext();
-  s.responses["/api/fixtures"] = Array.from({ length: 20 }, (_, i) => {
-    const codes = i < 6 ? ["HOME", "DRAW", "AWAY"] : i < 16 ? ["HOME", "AWAY"] : ["P1", "P2", "P3"];
-    return { ...s.fixtures[0], id: `F${i + 1}`, sport: i < 6 ? "SOCCER" : i < 11 ? "NFL" : i < 16 ? "TENNIS" : "GOLF",
+  s.responses["/api/fixtures"] = Array.from({ length: 4 }, (_, i) => {
+    const codes = i === 0 ? ["HOME", "DRAW", "AWAY"] : i < 3 ? ["HOME", "AWAY"] : ["P1", "P2", "P3"];
+    return { ...s.fixtures[0], id: `F${i + 1}`, sport: ["SOCCER", "NFL", "TENNIS", "GOLF"][i],
       event: "Demo test", odds: Object.fromEntries(codes.map(code => [code, 200])),
       selections: codes.map(code => ({ code, label: `Participant ${code}`, odds: 200 })),
       endsAt: 12345, remainingMs: 60000, liability: Object.fromEntries(codes.map(code => [code, "400"])) };
   });
   await s.c.loadCustFixtures();
-  assert.equal(s.element("custFixtures").controls.length, 6 * 3 + 10 * 2 + 4 * 3);
+  assert.equal(s.element("custFixtures").controls.length, 3 + 2 + 2 + 3);
   assert.match(s.element("custFixtures").innerHTML, /Participant P3/);
   assert.match(s.element("custFixtures").innerHTML, /GOLF/);
   await s.c.refreshFixtures();
-  const golf = s.element("fixtureTable").controls.filter(b => b.dataset.settle === "F20");
+  const golf = s.element("fixtureTable").controls.filter(b => b.dataset.settle === "F4");
   assert.deepEqual(golf.map(b => b.dataset.result), ["P1", "P2", "P3", "VOID"]);
+});
+
+test("operator cards separate live markets, pending settlements and completed history", async () => {
+  const s = pollingContext();
+  s.responses["/api/fixtures"] = [
+    { ...s.fixtures[0], id: "F1", result: null, settlementComplete: false },
+    { ...s.fixtures[0], id: "F2", result: "HOME", settlementComplete: false },
+    { ...s.fixtures[0], id: "F3", result: "LEGACY_UNRESOLVED", settlementComplete: false },
+    { ...s.fixtures[0], id: "F4", result: "AWAY", settlementComplete: true },
+  ];
+  await s.c.refreshFixtures();
+  const html = s.element("fixtureTable").innerHTML;
+  assert.equal((html.match(/<article /g) || []).length, 3);
+  assert.match(html, /Set winning selection/);
+  assert.match(html, /Winning payout/);
+  assert.match(html, /Void refunds open stakes/);
+  assert.match(html, /manual review required/);
+  assert.equal(s.element("fixtureHistory").hidden, false);
+  assert.equal(s.element("fixtureHistoryCount").textContent, "1 completed");
+  assert.match(s.element("fixtureResults").innerHTML, /F4/);
+  assert.deepEqual(s.element("fixtureTable").controls.filter(b => b.dataset.settle === "F2").map(b => b.dataset.result), ["HOME"]);
+  assert.equal(s.element("fixtureTable").controls.filter(b => ["F3", "F4"].includes(b.dataset.settle)).length, 0);
+  assert.equal(s.element("fixtureSummary").textContent, "1 open · 2 pending");
+});
+
+test("operator compact totals round exact integer amounts without losing their full-value disclosure", async () => {
+  const s = pollingContext();
+  for (const [value, expected] of [
+    ["0", "€0"], ["12345", "€123"], ["12350", "€124"], ["123456789", "€1.2M"],
+    ["-123456789", "-€1.2M"], ["9223372036854775807", "€92.2Q"],
+  ]) {
+    assert.equal(vm.runInContext(`compactTotal("${value}", true)`, s.c), expected);
+  }
+  assert.equal(vm.runInContext('compactTotal("12345678")', s.c), "12.3M");
+  s.responses["/api/operator"] = {
+    series: [], kinds: {}, feed: [], ggr: "-123456789", exposure: "9223372036854775807",
+    openBets: 1234567, openStakes: "123456789", deposits: "123456789", withdrawals: "12350",
+    entries: 12345678, players: 123456,
+  };
+  s.c.lineChart = () => {};
+  vm.runInContext(source.slice(source.indexOf("async function refreshOperator()"), source.indexOf("async function refreshFixtures()")), s.c);
+  await s.c.refreshOperator();
+  assert.match(s.element("kpis").innerHTML, /-€1.2M/);
+  assert.match(s.element("kpis").innerHTML, /aria-label="-€1,234,567.89"/);
+  assert.match(s.element("kpiExact").innerHTML, /-€1,234,567.89/);
+  assert.match(s.element("kpiExact").innerHTML, /€92,233,720,368,547,758.07/);
+  assert.match(s.element("kpiExact").innerHTML, /<dt>Open stakes<\/dt><dd>€1,234,567.89/);
 });
 
 test("countdowns use monotonic remaining time, preserve focus and disable prices at zero", async () => {

@@ -13,10 +13,10 @@
   All behaviour lives in app.js; all data comes from /api/* on the same server.
 -->
 <header class="topbar">
-  <div class="brand">
+  <a class="brand" href="#about" aria-label="Ledger Console home (Guide)">
     <span class="mark" aria-hidden="true"></span>
-    <div><b>Ledger Console</b><span id="ledgerId">sportsbook-web</span></div>
-  </div>
+    <div><b>Ledger Console</b><span>example-ledger</span></div>
+  </a>
   <nav class="personas" role="tablist" aria-label="Console view">
     <a href="#about" role="tab" data-view="about">About</a>
     <a href="#customer" role="tab" data-view="customer">Customer</a>
@@ -32,7 +32,7 @@
     <div><span>signed up to</span><b id="tipSigned">–</b></div>
   </div>
 </header>
-<div class="demo-note" id="storeStatus" role="status">Demonstration only: no authentication. The tabs switch views, they do not control access.</div>
+<div class="demo-note" id="storeStatus" role="status" hidden></div>
 
 <main>
 <!-- ============================== ABOUT ============================== -->
@@ -85,7 +85,7 @@
 
       <div class="panel">
         <div class="panel-head"><h2>Place a bet</h2><span class="hint">Select a price, then a stake.</span></div>
-        <p class="hint">Fictional events with real names, not real matches. Twenty markets run on their own schedule. Countdowns are approximate; acceptance is decided by the server.</p>
+        <p class="hint">Fictional events with real names, not real matches. Four markets run on their own schedule. Countdowns are approximate; acceptance is decided by the server.</p>
         <div class="fixtures-cust" id="custFixtures"></div>
         <form class="row slip" id="slip" hidden>
           <span id="slipText"></span>
@@ -115,6 +115,7 @@
 <!-- ============================== OPERATOR ============================== -->
 <section class="view" id="view-operator" hidden>
   <div class="kpis" id="kpis"></div>
+  <details class="operator-totals"><summary>Exact totals <span class="hint">Headline values are rounded</span></summary><dl id="kpiExact"></dl></details>
   <div class="grid3">
     <div class="panel chart"><div class="panel-head"><h2>Throughput</h2><span class="hint">entries per second</span></div><svg id="chTps" viewBox="0 0 400 160" preserveAspectRatio="none" role="img" aria-label="Entries per second"></svg></div>
     <div class="panel chart"><div class="panel-head"><h2>Gross gaming revenue</h2><span class="hint">house:revenue:EUR</span></div><svg id="chGgr" viewBox="0 0 400 160" preserveAspectRatio="none" role="img" aria-label="Gross gaming revenue"></svg></div>
@@ -122,9 +123,10 @@
   </div>
   <div class="grid-op">
     <div class="panel">
-      <div class="panel-head"><h2>Fixtures</h2><span class="hint">Fictional events · 20 scheduled markets</span></div>
+      <div class="panel-head"><h2>Live fixtures</h2><span class="hint" id="fixtureSummary">Fictional events</span></div>
       <p class="hint" id="schedulerStatus"></p>
-      <div class="tablewrap"><table class="tbl" id="fixtureTable"></table></div>
+      <div id="fixtureTable"></div>
+      <details class="fixture-history" id="fixtureHistory" hidden><summary>Recent results <span class="hint" id="fixtureHistoryCount"></span></summary><div class="fixture-results" id="fixtureResults"></div></details>
       <div class="result" id="settleResult" aria-live="polite"></div>
     </div>
     <div class="side">
@@ -290,7 +292,7 @@
     <div class="panel"><h2>Runtime and storage</h2><dl class="kv" id="adminDetails"></dl><p class="hint" id="adminScope"></p></div>
     <div class="panel danger-zone" id="adminReset">
       <h2>Clear demo storage</h2>
-      <p>Permanently deletes the journal, checkpoints, torn-tail quarantine files, fixture state and fixture archive, drains the scheduler and simulator, and starts again with 12 seed deposits and 20 fixtures. The signing key and unrelated files are retained.</p>
+      <p>Permanently deletes the journal, checkpoints, torn-tail quarantine files, fixture state and fixture archive, drains the scheduler and simulator, and starts again with 12 seed deposits and four fixtures. The signing key and unrelated files are retained.</p>
       <p class="hint">Use this to start again after Chaos Monkey breaks the main store. Export any evidence you need first; this cannot be undone.</p>
       <button type="button" class="danger" id="clearReveal">Clear storage…</button>
       <form id="clearForm" class="field" hidden>
