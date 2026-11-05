@@ -34,18 +34,21 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         var lastDepositSeq: Long? = null
     }
 
-    private class Bet(
-        val id: String, val player: String, val fixture: String, val selection: String,
-        val odds: Int?, val stake: BigInteger, val placedSeq: Long, val placedTime: Long,
-    ) {
-        var settledSeq: Long? = null
-        var settledTime: Long? = null
-        var outcome: String? = null
-        var payout = BigInteger.ZERO
+    // Keep attribution even for legacy/nonstandard keys without duplicating the decoded bet graph.
+    private class Bet(val placedSeq: Long, var settledSeq: Long = -1)
+
+    private class FixtureTotals {
+        var placed = 0
+        val bettors = HashSet<String>()
+        var stakes = BigInteger.ZERO
+        var settlements = 0
+        val outcomes = linkedMapOf<String, Int>()
+        var payouts = BigInteger.ZERO
         var revenue = BigInteger.ZERO
-        fun openAt(end: Long) = placedTime < end && (settledTime == null || settledTime!! >= end)
-        fun potential() = odds?.takeIf { selection.matches(Regex("[A-Z0-9]{1,8}")) }
-            ?.let { stake.multiply(BigInteger.valueOf(it.toLong())).divide(HUNDRED) }
+        var open = 0
+        var openStakes = BigInteger.ZERO
+        val liability = linkedMapOf<String, BigInteger?>()
+        val seqs = LongHistory()
     }
 
     private fun micros(value: String): Long {
@@ -109,9 +112,12 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         var winPayouts = BigInteger.ZERO
         for (seq in 0 until size) {
             val e = ledger.entry(seq).entry
-            val postings = e.postings.filter { it.currency == currency }
-            conservation += postings.fold(BigInteger.ZERO) { total, p -> total + p.amount.toBigInteger() }
-            if (postings.isEmpty()) continue
+            var hasCurrency = false
+            for (p in e.postings) if (p.currency == currency) {
+                hasCurrency = true
+                conservation += p.amount.toBigInteger()
+            }
+            if (!hasCurrency) continue
             val player = e.metadata["playerId"]
             if (player == null) {
                 if (inPeriod(e.timestampMicros)) unclassified++
@@ -120,12 +126,17 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
             if (!selected(player) || e.timestampMicros >= to) continue
             val c = customers.getOrPut(player) { Customer(player, seq, e.timestampMicros) }
             c.lastTime = e.timestampMicros
-            val cash = postings.filter { it.account == Accounts.cash(player, currency) }
-                .fold(BigInteger.ZERO) { total, p -> total + p.amount.toBigInteger() }
-            val escrow = postings.filter { it.account == Accounts.openBets(player, currency) }
-                .fold(BigInteger.ZERO) { total, p -> total + p.amount.toBigInteger() }
-            val revenue = postings.filter { it.account == Accounts.revenue(currency) }
-                .fold(BigInteger.ZERO) { total, p -> total + p.amount.toBigInteger() }
+            val cashAccount = Accounts.cash(player, currency)
+            val escrowAccount = Accounts.openBets(player, currency)
+            val revenueAccount = Accounts.revenue(currency)
+            var cash = BigInteger.ZERO
+            var escrow = BigInteger.ZERO
+            var revenue = BigInteger.ZERO
+            for (p in e.postings) if (p.currency == currency) {
+                if (p.account == cashAccount) cash += p.amount.toBigInteger()
+                if (p.account == escrowAccount) escrow += p.amount.toBigInteger()
+                if (p.account == revenueAccount) revenue += p.amount.toBigInteger()
+            }
             c.cash += cash
             c.escrow += escrow
             if (e.timestampMicros < from) {
@@ -167,11 +178,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                 }
                 "BET_PLACED" -> {
                     val id = e.metadata.getValue("betId")
-                    val parts = e.metadata["selection"]?.split("|").orEmpty()
-                    val attributed = parts.size == 3 && parts[2].toIntOrNull()?.let { it >= 0 } == true
-                    bets[id] = Bet(id, player, if (attributed) parts[0] else "UNATTRIBUTED",
-                        if (attributed) parts[1] else "Unknown", if (attributed) parts[2].toInt() else null,
-                        escrow, seq, e.timestampMicros)
+                    bets[id] = Bet(seq)
                     if (included) {
                         c.stakes += escrow
                         c.bets++
@@ -182,14 +189,10 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                     val b = bets[e.metadata["betId"]]
                         ?: throw TamperDetectedException("report cannot attribute settlement #$seq to its placement")
                     b.settledSeq = seq
-                    b.settledTime = e.timestampMicros
-                    b.outcome = e.kind.removePrefix("BET_")
-                    b.payout = cash
-                    b.revenue = revenue
                     if (included) {
                         c.payouts += cash
                         returnedStakes -= escrow
-                        outcomes.merge(b.outcome!!, 1, Int::plus)
+                        outcomes.merge(e.kind.removePrefix("BET_"), 1, Int::plus)
                         when (e.kind) {
                             "BET_WON" -> winPayouts += cash
                             "BET_VOIDED" -> voidRefunds += cash
@@ -210,8 +213,55 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         val opening = sum { it.openingCash + it.openingEscrow }
         val closing = sum { it.cash + it.escrow }
         val otherMovement = closing - opening - deposits + withdrawals + revenue
-        val open = bets.values.filter { it.openAt(to) }
-        val openStakes = open.fold(BigInteger.ZERO) { total, b -> total + b.stake }
+        val fixtureTotals = linkedMapOf<String, FixtureTotals>()
+        var openBets = 0
+        var openStakes = BigInteger.ZERO
+        for (bet in bets.values) {
+            val placement = ledger.entry(bet.placedSeq).entry
+            val player = placement.metadata.getValue("playerId")
+            val parts = placement.metadata["selection"]?.split("|").orEmpty()
+            val price = if (parts.size == 3) parts[2].toIntOrNull()?.takeIf { it >= 0 } else null
+            val fixture = if (price != null) parts[0] else "UNATTRIBUTED"
+            val selection = if (price != null) parts[1] else "Unknown"
+            val escrowAccount = Accounts.openBets(player, currency)
+            var stake = BigInteger.ZERO
+            for (p in placement.postings) if (p.currency == currency && p.account == escrowAccount) {
+                stake += p.amount.toBigInteger()
+            }
+            val totals = fixtureTotals.getOrPut(fixture) { FixtureTotals() }
+            if (inPeriod(placement.timestampMicros)) {
+                totals.placed++
+                totals.bettors.add(player)
+                totals.stakes += stake
+                totals.seqs.add(placement.seq)
+            }
+            val settlement = if (bet.settledSeq >= 0) ledger.entry(bet.settledSeq).entry else null
+            if (settlement != null && inPeriod(settlement.timestampMicros)) {
+                val settlingPlayer = settlement.metadata.getValue("playerId")
+                totals.settlements++
+                totals.outcomes.merge(settlement.kind.removePrefix("BET_"), 1, Int::plus)
+                val cashAccount = Accounts.cash(settlingPlayer, currency)
+                val revenueAccount = Accounts.revenue(currency)
+                for (p in settlement.postings) {
+                    if (p.currency != currency) continue
+                    if (p.account == cashAccount) totals.payouts += p.amount.toBigInteger()
+                    if (p.account == revenueAccount) totals.revenue += p.amount.toBigInteger()
+                }
+                totals.seqs.add(settlement.seq)
+            }
+            if (settlement == null || settlement.timestampMicros >= to) {
+                openBets++
+                openStakes += stake
+                totals.open++
+                totals.openStakes += stake
+                val potential = price?.takeIf { selection.matches(SELECTION) }
+                    ?.let { stake.multiply(BigInteger.valueOf(it.toLong())).divide(HUNDRED) }
+                val previous = totals.liability[selection]
+                totals.liability[selection] = if (potential == null ||
+                    (totals.liability.containsKey(selection) && previous == null)) null
+                    else (previous ?: BigInteger.ZERO) + potential
+            }
+        }
         val active = customers.values.filter { it.entries > 0 }
         active.filter { it.bets >= 20 }.forEach { c ->
             signals += signal("activity-review", c.id, c.firstSeq, null, "20 or more bets in the reporting period",
@@ -223,36 +273,29 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                 "selections" to f.selections.map { mapOf("code" to it.code, "label" to it.label) }, "declaredResult" to f.result,
                 "declaredComplete" to f.settlementComplete)
         }
-        val betsByFixture = bets.values.groupBy { it.fixture }
-        val fixtureRows = (betsByFixture.keys + if (population == "all") fixtureDefinitions.keys else emptySet())
+        val fixtureRows = (fixtureTotals.keys + if (population == "all") fixtureDefinitions.keys else emptySet())
             .distinct().sorted().map { id ->
-                val all = betsByFixture[id].orEmpty()
-                val placed = all.filter { inPeriod(it.placedTime) }
-                val settled = all.filter { it.settledTime?.let(::inPeriod) == true }
-                val outstanding = all.filter { it.openAt(to) }
-                val liability = outstanding.groupBy { it.selection }.mapValues { (_, group) ->
-                    if (group.any { it.potential() == null }) null
-                    else group.fold(BigInteger.ZERO) { total, b -> total + b.potential()!! }.toString()
-                }
+                val totals = fixtureTotals[id] ?: FixtureTotals()
+                val liability = totals.liability.mapValues { it.value?.toString() }
                 val definition = fixtureDefinitions[id]
                 val exceptions = arrayListOf<String>()
                 if (definition == null) exceptions += "Fixture definition unavailable"
-                if (definition?.get("declaredResult") != null && outstanding.isNotEmpty()) {
+                if (definition?.get("declaredResult") != null && totals.open > 0) {
                     exceptions += "Declared result with outstanding bets (may be settling or outside the report cutoff)"
                 }
                 val worst = if (liability.values.any { it == null }) null
                     else liability.values.filterNotNull().maxOfOrNull { it.toBigInteger() } ?: BigInteger.ZERO
-                mapOf("id" to id, "definition" to definition, "placedBets" to placed.size,
-                    "bettors" to placed.map { it.player }.distinct().size,
-                    "stakes" to placed.fold(BigInteger.ZERO) { total, b -> total + b.stake }.toString(),
-                    "settlements" to settled.size, "outcomes" to settled.groupingBy { it.outcome }.eachCount(),
-                    "payouts" to settled.fold(BigInteger.ZERO) { total, b -> total + b.payout }.toString(),
-                    "revenue" to settled.fold(BigInteger.ZERO) { total, b -> total + b.revenue }.toString(),
-                    "openBets" to outstanding.size,
-                    "openStakes" to outstanding.fold(BigInteger.ZERO) { total, b -> total + b.stake }.toString(),
+                mapOf("id" to id, "definition" to definition, "placedBets" to totals.placed,
+                    "bettors" to totals.bettors.size,
+                    "stakes" to totals.stakes.toString(),
+                    "settlements" to totals.settlements, "outcomes" to totals.outcomes,
+                    "payouts" to totals.payouts.toString(),
+                    "revenue" to totals.revenue.toString(),
+                    "openBets" to totals.open,
+                    "openStakes" to totals.openStakes.toString(),
                     "liabilityBySelection" to liability, "worstWinningPayout" to worst?.toString(),
                     "exceptions" to exceptions,
-                    "entrySeqs" to (placed.map { it.placedSeq } + settled.mapNotNull { it.settledSeq }).sorted())
+                    "entrySeqs" to totals.seqs.sorted())
             }
         val customerRows = customers.values.sortedBy { it.id }.map { c ->
             mapOf("id" to c.id, "automated" to Simulator.isAutomated(c.id),
@@ -293,7 +336,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                 "payouts" to payouts.toString(), "revenue" to revenue.toString(),
                 "winPayouts" to winPayouts.toString(), "voidRefunds" to voidRefunds.toString(), "cashOuts" to cashOuts.toString(),
                 "settledStakes" to returnedStakes.toString(), "otherMovement" to otherMovement.toString(),
-                "conservation" to conservation.toString(), "openBets" to open.size, "openStakes" to openStakes.toString(),
+                "conservation" to conservation.toString(), "openBets" to openBets, "openStakes" to openStakes.toString(),
                 "escrowReconciles" to (openStakes == sum { it.escrow }), "unclassifiedEntries" to unclassified,
                 "otherEntries" to otherEntries, "periodEntries" to periodEntries, "outcomes" to outcomes,
                 "bankReconciliation" to null, "tax" to null),
@@ -408,6 +451,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
             "title" to title, "explanation" to explanation, "status" to "Unreviewed indicator")
 
     companion object {
+        private val SELECTION = Regex("[A-Z0-9]{1,8}")
         private val HUNDRED = BigInteger.valueOf(100)
         private val TEN_THOUSAND = BigInteger.valueOf(10_000)
         private fun instant(micros: Long) = Instant.ofEpochSecond(Math.floorDiv(micros, 1_000_000L), Math.floorMod(micros, 1_000_000L) * 1_000L)

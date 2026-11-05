@@ -73,6 +73,17 @@ class DeploymentTests(unittest.TestCase):
         self.assertIn("curl --version", runtime)
         self.assertLess(runtime.index("apt-get install"), runtime.index("USER 10001:10001"))
 
+    def test_demo_heap_has_native_headroom_and_a_matching_local_default(self):
+        deployment = next(r for r in MANIFESTS if r["kind"] == "Deployment")
+        ledger = next(c for c in deployment["spec"]["template"]["spec"]["containers"] if c["name"] == "ledger")
+        options = next(e["value"] for e in ledger["env"] if e["name"] == "JAVA_TOOL_OPTIONS")
+        self.assertEqual(options, "-Xmx4g")
+        self.assertEqual(ledger["resources"]["requests"]["memory"], "4Gi")
+        self.assertEqual(ledger["resources"]["limits"]["memory"], "6Gi")
+        build = (ROOT / "build.gradle.kts").read_text()
+        web_task = build.split('tasks.register<JavaExec>("web") {', 1)[1].split("\n}", 1)[0]
+        self.assertIn('maxHeapSize = "4g"', web_task)
+
     def test_bootstrap_does_not_modify_cluster_or_create_namespace(self):
         self.assertEqual(
             {r["type"] for r in TEMPLATE["resources"]},

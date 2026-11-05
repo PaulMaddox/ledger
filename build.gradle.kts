@@ -34,6 +34,8 @@ tasks.register<JavaExec>("web") {
     description = "Runs the ledger web console on http://localhost:8080"
     classpath = sourceSets["main"].runtimeClasspath
     mainClass.set("com.pam.ledger.web.WebAppKt")
+    // History stays resident; leave additional host memory for Gradle and native JVM allocations.
+    maxHeapSize = "4g"
 }
 
 tasks.test {

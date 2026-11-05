@@ -8,10 +8,33 @@ import java.nio.file.Files
 import kotlin.test.Test
 import kotlin.test.assertContentEquals
 import kotlin.test.assertEquals
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 class AuditSnapshotTest {
+    @Test
+    fun `concurrent independent audits and tamper copies preserve the live ledger`() {
+        val directory = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(directory, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            repeat(37) { wallet.deposit("p", 100, "EUR", "audit-$it") }
+            val before = ledger.head()
+            val entries = Files.readAllBytes(directory.resolve(Ledger.ENTRIES_FILE))
+            Audit(ledger, directory, TestSupport.LEDGER_ID, listOf(signer.publicKey)).use { audit ->
+                race(6) { worker ->
+                    if (worker % 2 == 0) assertTrue(audit.fullAudit().report.ok)
+                    else assertFalse(audit.tamper(listOf("edit", "rewrite", "truncate")[worker / 2]).report.ok)
+                }.forEach { it.getOrThrow() }
+                assertEquals(before, ledger.head())
+                assertContentEquals(entries, Files.readAllBytes(directory.resolve(Ledger.ENTRIES_FILE)))
+                assertEquals(3_700L, wallet.cashBalance("p", "EUR"))
+                assertTrue(audit.fullAudit().report.ok)
+            }
+        }
+    }
+
     @Test
     fun `snapshot copies exact signed byte prefixes while later entries and checkpoints append`() {
         val directory = tempDir()

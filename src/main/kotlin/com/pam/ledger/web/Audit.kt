@@ -15,6 +15,8 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.security.PublicKey
 import java.util.concurrent.Executors
 import java.util.concurrent.TimeUnit
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 /*
  * ============================================================================
@@ -35,6 +37,8 @@ class Audit(
     // ---- Checkpoint history: every signed tree head, oldest first ----
 
     private val history = ArrayList<SignedTreeHead>()
+    // Concurrent audit/tamper requests must not multiply full-history working sets.
+    private val verificationLock = ReentrantLock()
     private var checkpointOffset = 0L // guarded by `history`
     private val poller = Executors.newSingleThreadScheduledExecutor { r -> Thread(r, "sth-history").apply { isDaemon = true } }
 
@@ -130,14 +134,14 @@ class Audit(
     data class AuditResult(val report: LedgerVerifier.Report, val millis: Long, val note: String)
 
     /** Run the offline verifier, exactly as a regulator would, over a fresh snapshot. */
-    fun fullAudit(): AuditResult {
+    fun fullAudit(): AuditResult = verificationLock.withLock {
         val started = System.nanoTime()
         // Anchor everything committed so far: unsigned history would (rightly) fail the audit.
         val checkpoint = checkpointNow()
         val dir = snapshot(checkpoint)
         try {
             val report = LedgerVerifier.verify(dir, ledgerId, trustedKeys)
-            return AuditResult(report, (System.nanoTime() - started) / 1_000_000, "Independent audit of a snapshot of the live ledger.")
+            AuditResult(report, (System.nanoTime() - started) / 1_000_000, "Independent audit of a snapshot of the live ledger.")
         } finally {
             dir.toFile().deleteRecursively()
         }
@@ -152,7 +156,7 @@ class Audit(
      *  - "rewrite":  inflate it and recompute every later hash (a careful forger);
      *  - "truncate": delete the newest five entries (a rollback to hide a recent payout).
      */
-    fun tamper(mode: String): AuditResult {
+    fun tamper(mode: String): AuditResult = verificationLock.withLock {
         require(mode in setOf("edit", "rewrite", "truncate")) { "mode must be edit, rewrite or truncate" }
         val checkpoint = checkpointNow() // the tamper must alter history covered by this signed head
         val dir = snapshot(checkpoint)
@@ -160,7 +164,7 @@ class Audit(
             val started = System.nanoTime()
             val note = tamperStorage(dir, ledgerId, mode)
             val report = LedgerVerifier.verify(dir, ledgerId, trustedKeys)
-            return AuditResult(report, (System.nanoTime() - started) / 1_000_000, "$note (snapshot copy)")
+            AuditResult(report, (System.nanoTime() - started) / 1_000_000, "$note (snapshot copy)")
         } finally {
             dir.toFile().deleteRecursively()
         }

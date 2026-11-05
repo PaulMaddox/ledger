@@ -160,6 +160,9 @@ change it describes:
   python3 scripts/capture-screenshots.py  # terminal 2 (needs Playwright: see the script)
   ```
 
+  Use `--customer-only` for Customer screenshots and mobile overflow checks at
+  320, 390, 420, 430, 600 and 601 pixels, including long IDs and exact totals.
+
   Then look at every image before committing: screenshots have caught real bugs here,
   such as every view showing at once. Commit the updated files in `docs/screenshots/`.
 - A PR that changes behaviour without updating these is incomplete. Say in the PR

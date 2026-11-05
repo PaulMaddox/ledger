@@ -57,8 +57,16 @@ internal object Accounting {
  * keys, double-entry balance, and account rules (currency, non-negativity).
  * The first failure throws [TamperDetectedException] naming the entry.
  */
-internal class Replayer(ledgerId: String, private val policy: AccountPolicy) {
+internal class Replayer(
+    ledgerId: String,
+    private val policy: AccountPolicy,
+    private val retainEntries: Boolean = true,
+) {
     val entries = AppendOnlyList<SealedEntry>()
+    val entryStrings = EntryStrings()
+    // Offline audits need historical hashes, not a second copy of every decoded entry and its bytes.
+    private val leafHashes = AppendOnlyList<Digest>()
+    private val chainHashes = AppendOnlyList<Digest>()
     val frontier = MerkleFrontier()
     val idempotency = HashMap<String, Long>()
     val accounts = HashMap<AccountId, AccountState>()
@@ -79,14 +87,15 @@ internal class Replayer(ledgerId: String, private val policy: AccountPolicy) {
         val body = record.copyOfRange(0, record.size - Digest.SIZE)
         val storedChain = Digest(record.copyOfRange(record.size - Digest.SIZE, record.size))
 
-        val entry = try {
+        val decoded = try {
             EntryCodec.decode(body)
         } catch (e: IllegalArgumentException) {
             tamper("undecodable or invalid: ${e.message}")
         }
         // Decode-then-re-encode must give back the identical bytes. Otherwise two
         // byte strings would map to one entry, and the hash would not pin it down.
-        if (!EntryCodec.encode(entry).contentEquals(body)) tamper("non-canonical encoding")
+        if (!EntryCodec.encode(decoded).contentEquals(body)) tamper("non-canonical encoding")
+        val entry = if (retainEntries) entryStrings.share(decoded) else decoded
         if (entry.seq != seq) tamper("sequence gap: found seq ${entry.seq}")
         if (entry.prevChainHash != chain) tamper("broken hash chain (prev hash does not match entry #${seq - 1})")
         if (entry.timestampMicros < lastTimestamp) tamper("timestamp went backwards")
@@ -103,8 +112,15 @@ internal class Replayer(ledgerId: String, private val policy: AccountPolicy) {
 
         accounts.putAll(updates)
         idempotency[entry.idempotencyKey] = seq
-        entries.add(sealed)
-        entries.publish()
+        if (retainEntries) {
+            entries.add(sealed)
+            entries.publish()
+        } else {
+            leafHashes.add(sealed.leafHash)
+            chainHashes.add(sealed.chainHash)
+            leafHashes.publish()
+            chainHashes.publish()
+        }
         frontier.append(sealed.leafHash)
         chain = sealed.chainHash
         lastTimestamp = entry.timestampMicros
@@ -112,6 +128,12 @@ internal class Replayer(ledgerId: String, private val policy: AccountPolicy) {
     }
 
     fun head() = LedgerHead(size, chain, frontier.root(), lastTimestamp)
+
+    fun leafHash(seq: Long): Digest = if (retainEntries) entries[Math.toIntExact(seq)].leafHash
+        else leafHashes[Math.toIntExact(seq)]
+
+    fun chainHash(seq: Long): Digest = if (retainEntries) entries[Math.toIntExact(seq)].chainHash
+        else chainHashes[Math.toIntExact(seq)]
 }
 
 /** Checks a signed checkpoint against the replayed journal. */
@@ -135,7 +157,7 @@ internal object CheckpointCheck {
             // The signer vouched for entries that are no longer on disk: a rollback.
             tamper("journal has only ${replayer.size} entries; committed history was truncated or rolled back")
         }
-        val expectedChain = if (size == 0L) replayer.genesis else replayer.entries[(size - 1).toInt()].chainHash
+        val expectedChain = if (size == 0L) replayer.genesis else replayer.chainHash(size - 1)
         if (sth.head.chainHead != expectedChain) tamper("chain head does not match journal (history rewritten)")
         if (sth.head.rootHash != prover.root(size)) tamper("Merkle root does not match journal (history rewritten)")
     }

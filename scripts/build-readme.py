@@ -16,7 +16,7 @@ root = pathlib.Path(__file__).resolve().parent.parent
 src_dir = root / "src/main/kotlin/com/pam/ledger"
 order = ["SportsbookWallet.kt", "Ledger.kt", "Replay.kt", "Journal.kt", "Model.kt",
          "Validation.kt", "Merkle.kt", "Hashes.kt", "Signing.kt", "EntryCodec.kt",
-         "AppendOnlyList.kt", "LedgerVerifier.kt", "Errors.kt"]
+         "AppendOnlyList.kt", "EntryStrings.kt", "LedgerVerifier.kt", "Errors.kt"]
 
 sources = {name: (src_dir / name).read_text() for name in order}
 

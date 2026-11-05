@@ -21,6 +21,15 @@ test("console brand is a home link to the embedded guide", () => {
   assert.match(source, /const WEB_LEDGER_ID = "sportsbook-web"/);
   assert.doesNotMatch(source, /\$\("ledgerId"\)\.textContent/);
 });
+test("guide console showcase contains only the persona summary and captioned screenshots", () => {
+  const guide = readFileSync(new URL("../docs/readme.src.html", import.meta.url), "utf8");
+  const section = guide.match(/<section id="web-console">([\s\S]*?)<\/section>/)[1];
+  assert.equal([...section.matchAll(/<p\b/g)].length, 1);
+  assert.equal([...section.matchAll(/<li>/g)].length, 6);
+  assert.match(section, /all working against the same live ledger:/);
+  assert.equal([...section.matchAll(/<figure\b/g)].length, 8);
+  assert.equal([...section.matchAll(/<figcaption>/g)].length, 8);
+});
 
 const cryptoSource = source.split("// ============================== router")[0];
 const str = s => { const b = Buffer.from(s); const n = Buffer.alloc(4); n.writeInt32BE(b.length); return Buffer.concat([n, b]); };
@@ -279,7 +288,7 @@ test("operator cards separate live markets, pending settlements and completed hi
   assert.equal(s.element("fixtureSummary").textContent, "1 open · 2 pending");
 });
 
-test("operator compact totals round exact integer amounts without losing their full-value disclosure", async () => {
+test("operator compact totals retain exact accessible values without an Exact totals section", async () => {
   const s = pollingContext();
   for (const [value, expected] of [
     ["0", "€0"], ["12345", "€123"], ["12350", "€124"], ["123456789", "€1.2M"],
@@ -298,9 +307,10 @@ test("operator compact totals round exact integer amounts without losing their f
   await s.c.refreshOperator();
   assert.match(s.element("kpis").innerHTML, /-€1.2M/);
   assert.match(s.element("kpis").innerHTML, /aria-label="-€1,234,567.89"/);
-  assert.match(s.element("kpiExact").innerHTML, /-€1,234,567.89/);
-  assert.match(s.element("kpiExact").innerHTML, /€92,233,720,368,547,758.07/);
-  assert.match(s.element("kpiExact").innerHTML, /<dt>Open stakes<\/dt><dd>€1,234,567.89/);
+  assert.match(s.element("kpis").innerHTML, /aria-label="€92,233,720,368,547,758.07"/);
+  assert.doesNotMatch(source, /kpiExact/);
+  const html = readFileSync(new URL("../src/main/resources/web/index.html", import.meta.url), "utf8");
+  assert.doesNotMatch(html, /kpiExact|operator-totals|Exact totals/);
 });
 
 test("countdowns use monotonic remaining time, preserve focus and disable prices at zero", async () => {

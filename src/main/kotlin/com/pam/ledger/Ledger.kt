@@ -110,6 +110,7 @@ class Ledger private constructor(
 
     // ---- State owned EXCLUSIVELY by the writer thread. No other thread touches these. ----
     private val frontier = recovered.frontier
+    private val entryStrings = recovered.entryStrings
 
     // ---- Lifecycle ----
     @Volatile private var failure: Throwable? = null
@@ -338,7 +339,7 @@ class Ledger private constructor(
                     }
                     // (4) Accepted: give it a place in history and seal it into the chain.
                     timestamp = maxOf(timestamp, nowMicros()) // never decreases, even if the clock steps back
-                    val entry = LedgerEntry(
+                    val entry = entryStrings.share(LedgerEntry(
                         seq = seq,
                         timestampMicros = timestamp,
                         txId = UUID.randomUUID(),
@@ -347,7 +348,7 @@ class Ledger private constructor(
                         kind = req.kind,
                         postings = req.postings,
                         metadata = req.metadata,
-                    )
+                    ))
                     val sealed = SealedEntry.seal(entry)
                     overlay.putAll(updates)
                     val s = Staged(sealed, cmd.fingerprint, cmd.future)

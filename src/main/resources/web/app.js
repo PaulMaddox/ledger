@@ -736,8 +736,6 @@ async function refreshOperator() {
   ];
   $("kpis").innerHTML = metrics.map(([label, value, exact, sub]) =>
     `<div class="kpi"><span>${esc(label)}</span><b title="${esc(exact)}" aria-label="${esc(exact)}">${esc(value)}</b><small>${esc(sub)}</small></div>`).join("");
-  $("kpiExact").innerHTML = metrics.map(([label, , exact]) => `<div><dt>${esc(label)}</dt><dd>${esc(exact)}</dd></div>`).join("") +
-    `<div><dt>Open stakes</dt><dd>${esc(eur(o.openStakes))}</dd></div>`;
   lineChart($("chTps"), o.series.map(p => p.tps), v => int.format(Math.round(v)));
   lineChart($("chGgr"), o.series.map(p => p.ggr), v => eur(v));
   lineChart($("chExp"), o.series.map(p => p.exposure), v => eur(v));
