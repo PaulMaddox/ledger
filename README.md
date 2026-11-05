@@ -27,6 +27,8 @@ it, protects the money under competing requests, and lets you inspect the eviden
 ### Operator
 
 Follow revenue and exposure, settle fixtures, and watch transactions arrive.
+Twenty fictional events run on their own schedule across soccer, NFL, tennis
+and golf, with live countdowns and automatic replacement.
 
 [![Operator dashboard with revenue, exposure, fixtures and live transactions](docs/screenshots/operator.png)](https://paulmaddox-ledger-demo.swedencentral.cloudapp.azure.com/)
 
@@ -48,7 +50,8 @@ belong to an unaltered history.
 ### Simulator
 
 Put hundreds of automated customers to work making bets, deposits, withdrawals
-and cash-outs. Follow each wallet's latest actions as they happen.
+and cash-outs. Follow each wallet's latest actions as they happen. Pausing or
+stopping the simulator leaves the fixtures running.
 
 ![Simulator controls and automated customers streaming their latest actions](docs/screenshots/simulator.png)
 

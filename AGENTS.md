@@ -43,7 +43,8 @@ docs/screenshots/        web console screenshots, used by README.md and the guid
 ## Commands
 
 ```
-./gradlew test                       # full test suite (JUnit 5); gradlew.bat on Windows
+./gradlew test                       # regular CI suite (JUnit 5); gradlew.bat on Windows
+./gradlew test -PincludeSoak          # also run the opt-in accelerated 24-hour fixture soak
 ./gradlew run                        # demo: concurrent betting, audit, proofs
 ./gradlew web                        # web console at http://localhost:8080
 ./gradlew installDist                # package the standalone CLI demo
@@ -51,6 +52,10 @@ python3 scripts/build-readme.py      # rebuild docs/index.html after ANY source 
 node scripts/check-guide.mjs         # must print four PASS lines
 node scripts/check-web.mjs           # dependency-free console regressions
 ```
+
+Long-running tests use the JUnit `soak` tag and are excluded unless `-PincludeSoak`
+is supplied. Normal CI does not opt in. The fixture soak can take over five minutes;
+the 30-minute before/after load comparison is a manual validation, not a CI test.
 
 The setup scripts install JDK 27 if needed and download the build tools; the first
 build requires internet access. On Windows, the README's `-ExecutionPolicy Bypass`
@@ -104,7 +109,7 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
    (for example `bet:{id}:resettle:{n}`).
    The owner-approved demo-only exception is the Administrator storage reset: after
    confirmation and draining every demo service, it deletes the demo journals, torn-tail quarantine files and
-   fixture file and reseeds a fresh demo. Never expose this operation in production
+   fixture state, archive and archive torn-tail files and reseeds a fresh demo. Never expose this operation in production
    or extend it to unrelated files or signing keys. The owner also permits Chaos
    Monkey and its tamper lab to attack the main demo store after explicit confirmation,
    with all services drained and the directory lock held for file mutations. Preserve

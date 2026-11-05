@@ -119,6 +119,14 @@ later application deployments use the same resources.
   Origin and Referer headers; do not rewrite them to bypass request checks.
 - Demo history resets daily at **03:00 UAE time**. Simulator runs expire after
   **15 minutes**; services stop at a **12 GB** storage high-water mark until reset.
+- The fixture scheduler runs independently of the simulator, keeping 20 fictional
+  multi-sport markets live. Operator health shows its last tick and any pause reason.
+  Active definitions are in `demo-fixtures.properties`; completed definitions append
+  to the checksum-framed `demo-fixtures.archive`. Preserve both for restart and reports.
+  An incomplete archive suffix is retained as `demo-fixtures.archive.torn`; a corrupt
+  complete record stops recovery rather than silently discarding metadata. Only
+  unsigned active-catalogue replacement retries transient Windows access denials;
+  ledger journal writes never retry.
 
 ## Troubleshooting
 
