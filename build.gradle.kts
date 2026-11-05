@@ -37,7 +37,9 @@ tasks.register<JavaExec>("web") {
 }
 
 tasks.test {
-    useJUnitPlatform()
+    useJUnitPlatform {
+        if (!providers.gradleProperty("includeSoak").isPresent) excludeTags("soak")
+    }
     // Keep concurrent HTTP requests honest on hosts with only two virtual-thread carriers.
     systemProperty("jdk.virtualThreadScheduler.parallelism", "2")
     // The regulatory storm retains every observed balance as independent evidence.

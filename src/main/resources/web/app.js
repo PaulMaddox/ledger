@@ -341,7 +341,7 @@ async function verifyReportEvidence(report, evidence) {
     check(JSON.stringify(seqs) === JSON.stringify(row.entrySeqs), `Fixture ${row.id}: entry references do not reconcile.`);
     const liability = Object.create(null);
     for (const b of outstanding) {
-      if (b.odds == null || !["HOME", "DRAW", "AWAY"].includes(b.selection) || liability[b.selection] === null) liability[b.selection] = null;
+      if (b.odds == null || !/^[A-Z0-9]{1,8}$/.test(b.selection) || liability[b.selection] === null) liability[b.selection] = null;
       else liability[b.selection] = (liability[b.selection] || 0n) + b.stake * b.odds / 100n;
     }
     check(Object.keys(liability).length === Object.keys(row.liabilityBySelection).length, "Fixture selection liability coverage differs.");
@@ -435,13 +435,46 @@ let slipSubmitting = false;
 let walletRequest = null;
 let walletSubmitting = false;
 let fixturesCache = [];
+const fixtureDeadlines = new Map();
+const marketSelections = f => f.selections || Object.entries(f.odds).map(([code, price]) => ({ code, label: code, odds: price }));
+const fixtureLabel = f => marketSelections(f).filter(s => s.code !== "DRAW").map(s => s.label).join(" v ");
+function anchorFixtures(fixtures) {
+  const now = performance.now();
+  const retained = new Set(fixtures.map(f => f.id));
+  if (selection) retained.add(selection.fixture);
+  for (const id of fixtureDeadlines.keys()) {
+    if (!retained.has(id)) fixtureDeadlines.delete(id);
+  }
+  for (const f of fixtures) {
+    if (f.endsAt) fixtureDeadlines.set(f.id, now + Math.max(0, f.remainingMs));
+  }
+}
+function fixtureExpired(id) {
+  return fixtureDeadlines.has(id) && fixtureDeadlines.get(id) <= performance.now();
+}
+function countdownText(id) {
+  if (!fixtureDeadlines.has(id)) return "Unscheduled";
+  const seconds = Math.max(0, Math.ceil((fixtureDeadlines.get(id) - performance.now()) / 1000));
+  return seconds ? `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")} left` : "Finished, settling…";
+}
+function tickCountdowns() {
+  document.querySelectorAll("[data-countdown]").forEach(el => {
+    el.textContent = countdownText(el.dataset.countdown);
+    el.classList.toggle("ending", fixtureDeadlines.has(el.dataset.countdown) &&
+      fixtureDeadlines.get(el.dataset.countdown) - performance.now() <= 10000);
+  });
+  updateSlipControls();
+}
 
 function updateSlipControls() {
   const unresolved = !!selection?.params;
-  $("slip").querySelector('button[type="submit"]').disabled = slipSubmitting;
+  const expired = !!selection && (fixtureExpired(selection.fixture) ||
+    fixturesCache.some(f => f.id === selection.fixture && f.result));
+  $("slip").querySelector('button[type="submit"]').disabled = slipSubmitting || (!unresolved && expired);
+  if (expired && !unresolved) $("slipText").textContent = "This event has finished";
   $("slipStake").disabled = unresolved;
   $("slipCancel").disabled = unresolved;
-  $("custFixtures").querySelectorAll("[data-fx]").forEach(b => { b.disabled = unresolved; });
+  $("custFixtures").querySelectorAll("[data-fx]").forEach(b => { b.disabled = unresolved || fixtureExpired(b.dataset.fx); });
 }
 
 async function loadPlayers() {
@@ -547,17 +580,25 @@ async function walletAction(kind) {
 
 async function loadCustFixtures() {
   fixturesCache = await api("fixtures");
-  renderControls($("custFixtures"), fixturesCache.filter(f => !f.result).slice(0, 9).map(f => `
-    <div class="fx"><div class="teams">${esc(f.home)} v ${esc(f.away)} <span>${esc(f.id)}</span></div>
-      <div class="prices">${["HOME", "DRAW", "AWAY"].map(s => `<button type="button" data-fx="${esc(f.id)}" data-sel="${s}" aria-pressed="${selection && selection.fixture === f.id && selection.sel === s}"><span>${s.toLowerCase()}</span><b>${odds(f.odds[s])}</b></button>`).join("")}</div>
-    </div>`).join("") || `<p class="hint">No open fixtures. The operator can add one.</p>`, ["fx", "sel"]);
+  anchorFixtures(fixturesCache);
+  const live = fixturesCache.filter(f => !f.result && f.managed !== false);
+  const sports = [...new Set(live.map(f => f.sport || "SOCCER"))];
+  renderControls($("custFixtures"), sports.map(sport => `<section class="sport-group"><h3>${esc(sport)}</h3><div class="sport-fixtures">` +
+    live.filter(f => (f.sport || "SOCCER") === sport).map(f => `
+    <div class="fx" aria-label="${esc(fixtureLabel(f))}, ends in about ${Math.ceil((f.remainingMs || 0) / 1000)} seconds">
+      <div class="fixture-meta"><span>${esc(f.event || "Demo match")}</span><span class="countdown" data-countdown="${esc(f.id)}">${countdownText(f.id)}</span></div>
+      <div class="teams">${esc(fixtureLabel(f))} <span>${esc(f.id)}</span></div>
+      <div class="prices" style="--selection-count:${marketSelections(f).length}">${marketSelections(f).map(s => `<button type="button" data-fx="${esc(f.id)}" data-sel="${s.code}" aria-pressed="${selection && selection.fixture === f.id && selection.sel === s.code}"><span>${esc(s.label)}</span><b>${odds(s.odds)}</b></button>`).join("")}</div>
+    </div>`).join("") + "</div></section>").join("") || `<p class="hint">Fixture scheduling is paused. Check operator status.</p>`, ["fx", "sel"]);
+  tickCountdowns();
   updateSlipControls();
 }
 $("custFixtures").addEventListener("click", e => {
   const b = e.target.closest("[data-fx]");
-  if (!b || selection?.params) return;
+  if (!b || selection?.params || fixtureExpired(b.dataset.fx)) return;
   const f = fixturesCache.find(x => x.id === b.dataset.fx);
-  selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: `${f.home} v ${f.away}`, betId: uuid(), params: null };
+  if (!f || f.result) return;
+  selection = { fixture: f.id, sel: b.dataset.sel, odds: f.odds[b.dataset.sel], label: fixtureLabel(f), betId: uuid(), params: null };
   $("slipText").innerHTML = `<b>${esc(selection.sel)}</b> in ${esc(selection.label)} @ <b>${odds(selection.odds)}</b>`;
   $("slip").hidden = false;
   updateSlipControls();
@@ -570,6 +611,10 @@ $("slipCancel").addEventListener("click", () => {
 $("slip").addEventListener("submit", async e => {
   e.preventDefault();
   if (!selection || slipSubmitting) return;
+  if (!selection.params && (fixtureExpired(selection.fixture) ||
+      fixturesCache.some(f => f.id === selection.fixture && f.result))) {
+    return say($("betResult"), false, "This event has finished");
+  }
   const submittedSelection = selection;
   // A lost response must retry the same player, stake and key, not silently create another bet.
   if (!submittedSelection.params) {
@@ -618,7 +663,7 @@ $("raceBtn").addEventListener("click", async () => {
   if (BigInt(p.cash) <= 0n) return ($("raceResult").innerHTML = `<p class="hint">${esc(requestedPlayer)} has no cash. Deposit first.</p>`);
   $("raceResult").innerHTML = "";
   const attempts = await Promise.allSettled([1, 2, 3, 4, 5].map(() =>
-    api(`players/${encodeURIComponent(requestedPlayer)}/bets`, { method: "POST", params: { fixture: f.id, selection: "HOME", stake: p.cash, betId: uuid() } })));
+    api(`players/${encodeURIComponent(requestedPlayer)}/bets`, { method: "POST", params: { fixture: f.id, selection: marketSelections(f)[0].code, stake: p.cash, betId: uuid() } })));
   if (player !== requestedPlayer) return;
   $("raceResult").innerHTML = attempts.map((a, i) => a.status === "fulfilled"
     ? `<div class="dev ok"><b>Device ${i + 1}</b>accepted<span class="hint">entry #${a.value.seq}</span></div>`
@@ -631,7 +676,8 @@ views.customer = {
   enter() {
     loadPlayers().catch(e => { $("playerCount").textContent = e.message || String(e); });
     loadCustFixtures().catch(e => say($("betResult"), false, errText(e)));
-    stopCustomer = [poll(refreshPlayer, 1500), poll(loadCustFixtures, 4000), poll(loadPlayers, 5000)];
+    const timer = setInterval(tickCountdowns, 250);
+    stopCustomer = [poll(refreshPlayer, 1500), poll(loadCustFixtures, 4000), poll(loadPlayers, 5000), () => clearInterval(timer)];
   },
   leave() { stopCustomer.forEach(f => f()); },
 };
@@ -661,6 +707,9 @@ function lineChart(svg, values, fmt, age = "3 min ago") {
 
 async function refreshOperator() {
   const o = await api("operator");
+  $("schedulerStatus").textContent = o.scheduler
+    ? `Scheduler ${o.scheduler.state.toLowerCase()} · last tick ${new Date(o.scheduler.lastTick).toLocaleTimeString()} · ${o.scheduler.settling} settling${o.scheduler.reason ? " · " + o.scheduler.reason : ""}`
+    : "Scheduler status unavailable";
   const last = o.series.length ? o.series[o.series.length - 1] : { tps: 0 };
   const kpi = (label, value, sub = "") => `<div class="kpi"><span>${label}</span><b>${value}</b><small>${sub}</small></div>`;
   $("kpis").innerHTML = [
@@ -687,17 +736,20 @@ async function refreshOperator() {
 
 async function refreshFixtures() {
   const fx = await api("fixtures");
-  renderControls($("fixtureTable"), `<tr><th>Fixture</th><th class="num">Home / Draw / Away</th><th class="num">Open bets</th><th class="num">Staked</th><th class="num">Liability H / D / A</th><th>Result</th></tr>` +
+  anchorFixtures(fx);
+  renderControls($("fixtureTable"), `<tr><th>Sport</th><th>Event</th><th>Fixture</th><th>Ends in</th><th>Selections / Prices</th><th class="num">Open bets</th><th class="num">Staked</th><th>Liability by selection</th><th>Result</th></tr>` +
     fx.map(f => `<tr>
-      <td><b>${esc(f.id)}</b> ${esc(f.home)} v ${esc(f.away)}</td>
-      <td class="num">${odds(f.odds.HOME)} / ${odds(f.odds.DRAW)} / ${odds(f.odds.AWAY)}</td>
+      <td>${esc(f.sport || "SOCCER")}</td><td>${esc(f.event || "Demo match")}</td><td><b>${esc(f.id)}</b> ${esc(fixtureLabel(f))}</td>
+      <td class="countdown" ${!f.result ? `data-countdown="${esc(f.id)}"` : ""}>${f.result ? "Finished" : countdownText(f.id)}</td>
+      <td>${marketSelections(f).map(s => `${esc(s.label)} ${odds(s.odds)}`).join("<br>")}</td>
       <td class="num">${int.format(f.openBets)}</td><td class="num">${eur(f.staked)}</td>
-      <td class="num liab">${eur(f.liability.HOME)} / ${eur(f.liability.DRAW)} / ${eur(f.liability.AWAY)}</td>
+      <td class="liab">${marketSelections(f).map(s => `${esc(s.label)} ${eur(f.liability[s.code])}`).join("<br>")}</td>
       <td>${!f.result
-        ? `<span class="settle">${["HOME", "DRAW", "AWAY", "VOID"].map(r => `<button type="button" data-settle="${esc(f.id)}" data-result="${r}">${r[0] + r.slice(1).toLowerCase()}</button>`).join("")}</span>`
+        ? `<span class="settle">${[...marketSelections(f), { code: "VOID", label: "Void" }].map(s => `<button type="button" data-settle="${esc(f.id)}" data-result="${s.code}">${esc(s.label)}</button>`).join("")}</span>`
         : f.result !== "LEGACY_UNRESOLVED" && !f.settlementComplete
           ? `<span class="settle"><span class="pill mut">${esc(f.result)} · settlement pending</span><button type="button" data-settle="${esc(f.id)}" data-result="${esc(f.result)}">Resume</button></span>`
           : `<span class="pill mut">${esc(f.result)}</span>`}</td></tr>`).join(""), ["settle", "result"]);
+  tickCountdowns();
 }
 $("fixtureTable").addEventListener("click", async e => {
   const b = e.target.closest("[data-settle]");
@@ -709,11 +761,13 @@ $("fixtureTable").addEventListener("click", async e => {
   } catch (err) { say($("settleResult"), false, errText(err)); }
   refreshFixtures();
 });
-$("addFixture").addEventListener("click", async () => { await api("fixtures", { method: "POST" }); refreshFixtures(); });
 
 let stopOperator = [];
 views.operator = {
-  enter() { stopOperator = [poll(refreshOperator, 1000), poll(refreshFixtures, 2000)]; },
+  enter() {
+    const timer = setInterval(tickCountdowns, 250);
+    stopOperator = [poll(refreshOperator, 1000), poll(refreshFixtures, 2000), () => clearInterval(timer)];
+  },
   leave() { stopOperator.forEach(f => f()); },
 };
 
@@ -833,8 +887,8 @@ function regTableSpec() {
   switch (regSection) {
     case "financial": return { title: "Daily financial activity", source: "Ledger-derived", description: "Placement and settlement flows are separate. Payouts include returned stakes, void refunds and cash-outs. All amounts are in the selected currency.",
       rows: r.daily, columns: [regCell("day", "Day"), ...["deposits", "withdrawals", "stakes", "payouts", "revenue"].map(k => regCell(k, k === "revenue" ? "Realised revenue" : k, true, regMoney))] };
-    case "fixtures": return { title: "Fixture reporting", source: "Ledger money + unsigned catalogue", description: "All recorded fixtures, not the operator's recent-history subset. Period stakes and settlements are distinct from outstanding bets at cutoff. Sport, start time and result-change history are not collected.",
-      rows: r.fixtures.map(f => ({ ...f, name: f.definition ? `${f.definition.home} / ${f.definition.away}` : "Definition unavailable",
+    case "fixtures": return { title: "Fixture reporting", source: "Ledger money + unsigned catalogue", description: "All recorded fixtures, not the operator's recent-history subset. Period stakes and settlements are distinct from outstanding bets at cutoff. Sport, event, selections and times are unsigned demo metadata; result-change history is not collected.",
+      rows: r.fixtures.map(f => ({ ...f, name: f.definition ? `${f.definition.event || "Demo match"} · ${(f.definition.selections || [{ label: f.definition.home }, { label: f.definition.away }]).map(s => s.label).join(" / ")}` : "Definition unavailable",
         result: f.definition?.declaredResult || "No declared result", exceptionSummary: f.exceptions.join("; ") || "None identified in snapshot" })),
       columns: [regCell("id", "Fixture"), regCell("name", "Teams (unsigned)"), regCell("result", "Declared result"), regCell("placedBets", "Period bets", true),
         regCell("stakes", "Period stakes", true, regMoney), regCell("payouts", "Period payouts", true, regMoney), regCell("revenue", "Realised revenue", true, regMoney),
@@ -1156,7 +1210,6 @@ async function refreshSim() {
   if (!$("simForm").dataset.dirty) {
     $("simCustomers").value = s.customers;
     $("simRate").value = s.opsPerMinute;
-    $("simAuto").checked = s.autoFixtures;
   }
   buildWall(s.customers);
   wallReady = true;
@@ -1177,12 +1230,11 @@ async function refreshSim() {
     simStat("Refused: funds", int.format(s.rejectedForFunds)),
     simStat("Refused: other", int.format(s.rejectedOther)),
     simStat("Shed (overload)", int.format(s.shed)),
-    simStat("Fixture rounds", int.format(s.fixtureRounds)),
   ].join("");
 }
 
 function simSettings() {
-  return { customers: $("simCustomers").value, opsPerMinute: $("simRate").value, autoFixtures: String($("simAuto").checked) };
+  return { customers: $("simCustomers").value, opsPerMinute: $("simRate").value };
 }
 async function simAction(action, withSettings) {
   try {

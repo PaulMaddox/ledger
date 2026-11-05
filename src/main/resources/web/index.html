@@ -85,6 +85,7 @@
 
       <div class="panel">
         <div class="panel-head"><h2>Place a bet</h2><span class="hint">Select a price, then a stake.</span></div>
+        <p class="hint">Fictional events with real names, not real matches. Twenty markets run on their own schedule. Countdowns are approximate; acceptance is decided by the server.</p>
         <div class="fixtures-cust" id="custFixtures"></div>
         <form class="row slip" id="slip" hidden>
           <span id="slipText"></span>
@@ -121,7 +122,8 @@
   </div>
   <div class="grid-op">
     <div class="panel">
-      <div class="panel-head"><h2>Fixtures</h2><button type="button" id="addFixture">Add fixture</button></div>
+      <div class="panel-head"><h2>Fixtures</h2><span class="hint">Fictional events · 20 scheduled markets</span></div>
+      <p class="hint" id="schedulerStatus"></p>
       <div class="tablewrap"><table class="tbl" id="fixtureTable"></table></div>
       <div class="result" id="settleResult" aria-live="polite"></div>
     </div>
@@ -242,7 +244,6 @@
     <form class="simform" id="simForm">
       <div class="field"><label for="simCustomers">Automated customers</label><input id="simCustomers" type="number" min="1" max="20000" value="500"></div>
       <div class="field"><label for="simRate">Operations per customer per minute</label><input id="simRate" type="number" min="1" max="600" value="60"></div>
-      <div class="field check"><input id="simAuto" type="checkbox" checked><label for="simAuto">Settle and open fixtures automatically</label></div>
       <div class="buttons">
         <button type="button" class="primary" id="simStart">Start</button>
         <button type="button" id="simPause">Pause</button>
@@ -250,6 +251,7 @@
         <button type="submit" id="simApply">Apply settings</button>
       </div>
     </form>
+    <p class="hint">Fixtures run on their own schedule, even while the simulator is stopped or paused.</p>
     <div class="result" id="simResult" aria-live="polite"></div>
     <div class="simstats" id="simStats"></div>
   </div>
@@ -288,7 +290,7 @@
     <div class="panel"><h2>Runtime and storage</h2><dl class="kv" id="adminDetails"></dl><p class="hint" id="adminScope"></p></div>
     <div class="panel danger-zone" id="adminReset">
       <h2>Clear demo storage</h2>
-      <p>Permanently deletes the journal, checkpoints, torn-tail quarantine files and fixtures, stops the simulator, and starts again with 12 seed deposits and 6 fixtures. The signing key and unrelated files are retained.</p>
+      <p>Permanently deletes the journal, checkpoints, torn-tail quarantine files, fixture state and fixture archive, drains the scheduler and simulator, and starts again with 12 seed deposits and 20 fixtures. The signing key and unrelated files are retained.</p>
       <p class="hint">Use this to start again after Chaos Monkey breaks the main store. Export any evidence you need first; this cannot be undone.</p>
       <button type="button" class="danger" id="clearReveal">Clear storage…</button>
       <form id="clearForm" class="field" hidden>

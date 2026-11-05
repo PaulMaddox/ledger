@@ -187,10 +187,10 @@ class ChaosLab {
                     "${receipts.size} replies, ${receipts.count { it.replayed }} replays; $player credited once, cash 10100 minor units."
             }
             "double-spend" -> {
-                val fixture = book.addFixture()
+                val fixture = book.addFixture(managed = false)
                 val accepted = race(16) { i ->
                     try {
-                        book.placeBet(player, fixture.id, "HOME", 10_000, "$player-device-$i")
+                        book.placeBet(player, fixture.id, fixture.selections.first().code, 10_000, "$player-device-$i")
                         true
                     } catch (e: InsufficientFundsException) { false }
                 }.count { it }
@@ -199,9 +199,9 @@ class ChaosLab {
                     "$accepted accepted, ${16 - accepted} refused for $player; cash 0, escrow 10000 minor units."
             }
             else -> {
-                val fixture = book.addFixture()
+                val fixture = book.addFixture(managed = false)
                 val bet = "$player-bet"
-                book.placeBet(player, fixture.id, "HOME", 100, bet)
+                book.placeBet(player, fixture.id, fixture.selections.first().code, 100, bet)
                 val accepted = race(2) { i ->
                     try {
                         if (i == 0) wallet.settleWin(bet, 200) else wallet.settleLoss(bet)
@@ -243,11 +243,11 @@ class ChaosLab {
                 }
                 else -> ReadModel(ledger).use { readModel ->
                     val book = Book(wallet, readModel, config.directory)
-                    val fixture = book.addFixture()
+                    val fixture = book.addFixture(managed = false)
                     if (scenario == "double-spend") {
                         val accepted = race(16) { i ->
                             try {
-                                book.placeBet(player, fixture.id, "HOME", 10_000, "$player-device-$i")
+                                book.placeBet(player, fixture.id, fixture.selections.first().code, 10_000, "$player-device-$i")
                                 true
                             } catch (e: InsufficientFundsException) { false }
                         }.count { it }
@@ -256,7 +256,7 @@ class ChaosLab {
                             "$accepted accepted, ${16 - accepted} refused on the main store; $player cash 0, escrow 10000 minor units."
                     } else {
                         val bet = "$player-bet"
-                        book.placeBet(player, fixture.id, "HOME", 100, bet)
+                        book.placeBet(player, fixture.id, fixture.selections.first().code, 100, bet)
                         val accepted = race(2) { i ->
                             try {
                                 if (i == 0) wallet.settleWin(bet, 200) else wallet.settleLoss(bet)

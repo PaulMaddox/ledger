@@ -109,7 +109,13 @@ button:disabled { opacity: .45; cursor: default; }
 .fx { border: 1px solid var(--rule); border-radius: 8px; padding: 10px; display: grid; gap: 8px; }
 .fx .teams { display: flex; justify-content: space-between; font-weight: 600; }
 .fx .teams span { color: var(--muted); font-weight: 400; font-family: var(--f-mono); font-size: .8rem; }
-.prices { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; }
+.prices { display: grid; grid-template-columns: repeat(var(--selection-count, 3), 1fr); gap: 6px; }
+.fixtures-cust { display: block; }
+.sport-group + .sport-group { margin-top: 20px; }
+.sport-fixtures { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px; }
+.fixture-meta { display: flex; justify-content: space-between; gap: 8px; font-size: .75rem; color: var(--muted); }
+.countdown { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.countdown.ending { color: var(--warn); }
 .prices button { display: grid; gap: 0; padding: 6px; font-weight: 500; }
 .prices button b { font-family: var(--f-mono); font-size: 1rem; }
 .prices button span { font-size: .7rem; color: var(--muted); text-transform: uppercase; letter-spacing: .06em; }

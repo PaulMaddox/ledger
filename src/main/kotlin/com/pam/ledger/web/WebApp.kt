@@ -54,6 +54,7 @@ import java.util.concurrent.Semaphore
 import java.util.concurrent.locks.ReentrantLock
 import java.util.concurrent.locks.ReentrantReadWriteLock
 import kotlin.concurrent.read
+import kotlin.concurrent.withLock
 import kotlin.concurrent.write
 import kotlin.system.exitProcess
 
@@ -212,7 +213,7 @@ class LedgerWebApp private constructor(
 ) : AutoCloseable {
     private class Services(
         val ledger: Ledger, val wallet: SportsbookWallet, val readModel: ReadModel,
-        val book: Book, val simulator: Simulator, val stats: Stats, val audit: Audit,
+        val book: Book, val simulator: Simulator, val scheduler: FixtureScheduler, val stats: Stats, val audit: Audit,
         val performance: Performance, val resources: List<AutoCloseable>,
     ) : AutoCloseable {
         override fun close() = closeResources(resources)
@@ -312,8 +313,8 @@ class LedgerWebApp private constructor(
                 val performance = Performance(ledger, readModel, dir).also(resources::add)
                 // Fixed deposit keys make restarting demo data exactly-once.
                 CUSTOMERS.forEachIndexed { i, name -> wallet.deposit(name, (100 + 40L * i) * 100, "EUR", "seed-$name") }
-                if (book.fixtures().isEmpty()) repeat(6) { book.addFixture() }
-                return Services(ledger, wallet, readModel, book, simulator, stats, audit, performance, resources)
+                val scheduler = FixtureScheduler(book, { ledger.isFailed }).also(resources::add)
+                return Services(ledger, wallet, readModel, book, simulator, scheduler, stats, audit, performance, resources)
             } catch (failure: Throwable) {
                 closeResources(resources, failure)
                 throw failure
@@ -650,7 +651,6 @@ class LedgerWebApp private constructor(
 
             // ---- Operator ----
             get("fixtures") -> fixtures()
-            post("fixtures") -> fixtureView(book.addFixture())
             post("fixtures", "*", "settle") -> book.settle(p[1], r.str("result")).let {
                 mapOf("fixture" to it.fixtureId, "result" to it.result, "won" to it.won, "lost" to it.lost, "voided" to it.voided, "alreadySettled" to it.alreadySettled)
             }
@@ -667,17 +667,13 @@ class LedgerWebApp private constructor(
                 })
             }
             post("simulator") -> {
+                require(r.params.keys.all { it in setOf("action", "customers", "opsPerMinute") }) { "unknown simulator setting" }
                 val action = r.params["action"]
                 require(action in setOf(null, "", "start", "pause", "resume", "stop")) {
                     "action must be start, pause, resume or stop"
                 }
-                if (listOf("customers", "opsPerMinute", "autoFixtures").any { r.params.containsKey(it) }) {
-                    val autoFixtures = when (r.params["autoFixtures"]) {
-                        null, "true" -> true
-                        "false" -> false
-                        else -> throw IllegalArgumentException("'autoFixtures' must be true or false")
-                    }
-                    simulator.configure(r.int("customers"), r.int("opsPerMinute"), autoFixtures)
+                if (listOf("customers", "opsPerMinute").any { r.params.containsKey(it) }) {
+                    simulator.configure(r.int("customers"), r.int("opsPerMinute"))
                 }
                 when (action) {
                     "start" -> simulator.start()
@@ -721,7 +717,8 @@ class LedgerWebApp private constructor(
         val signer = Ed25519TreeHeadSigner(demoKeyPair(directory))
         FileChannel.open(directory.resolve(Ledger.LOCK_FILE), CREATE, WRITE).use { channel ->
             channel.tryLock()?.use {
-                listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE, Book.FIXTURES_FILE).forEach { name ->
+                listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE, Book.FIXTURES_FILE,
+                    Book.ARCHIVE_FILE, "${Book.ARCHIVE_FILE}.torn").forEach { name ->
                     Files.deleteIfExists(directory.resolve(name))
                 }
                 Files.list(directory).use { files ->
@@ -739,7 +736,7 @@ class LedgerWebApp private constructor(
         services = openServices(directory, signer)
         offlineReason = null
         chaos.clearHistory()
-        return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 6 fresh fixtures created. Signing key retained.")
+        return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 20 fresh fixtures created. Signing key retained.")
     }
 
     internal fun maintainDemo() = maintenance.checkNow()
@@ -750,7 +747,7 @@ class LedgerWebApp private constructor(
         val bytes = Files.list(directory).use { files ->
             files.filter { file ->
                 val name = file.fileName.toString()
-                name == Book.FIXTURES_FILE || listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE).any {
+                name == Book.FIXTURES_FILE || name == Book.ARCHIVE_FILE || name == "${Book.ARCHIVE_FILE}.torn" || listOf(Ledger.ENTRIES_FILE, Ledger.CHECKPOINTS_FILE).any {
                     name == it || name.startsWith("$it.torn-")
                 }
             }.mapToLong { Files.size(it) }.sum()
@@ -780,7 +777,6 @@ class LedgerWebApp private constructor(
         val simulatorState = simulator.state
         val simulatorCustomers = simulator.customers
         val simulatorOpsPerMinute = simulator.opsPerMinute
-        val simulatorAutoFixtures = simulator.autoFixtures
         val simulatorRunStartedNanos = simulator.runStartedNanos
         // Anchor the exact stopped prefix before any main-store file mutation.
         services = null
@@ -791,7 +787,7 @@ class LedgerWebApp private constructor(
         val result = chaos.run(scenario, directory, signer)
         if (result["available"] == true) {
             val recovered = openServices(directory, signer)
-            recovered.simulator.configure(simulatorCustomers, simulatorOpsPerMinute, simulatorAutoFixtures)
+            recovered.simulator.configure(simulatorCustomers, simulatorOpsPerMinute)
             when (simulatorState) {
                 Simulator.State.RUNNING -> recovered.simulator.start(simulatorRunStartedNanos)
                 Simulator.State.PAUSED -> {
@@ -886,20 +882,25 @@ class LedgerWebApp private constructor(
         }
         return mapOf(
             "id" to f.id, "home" to f.home, "away" to f.away, "odds" to f.odds, "result" to f.result,
+            "sport" to f.sport.name, "event" to f.event,
+            "selections" to f.selections.map { mapOf("code" to it.code, "label" to it.label, "odds" to it.odds) },
+            "startsAt" to f.startsAt, "endsAt" to f.endsAt, "managed" to f.managed,
+            "remainingMs" to if (f.result != null) 0L else (f.endsAt - System.currentTimeMillis()).coerceAtLeast(0L),
             "settlementComplete" to f.settlementComplete,
             "openBets" to open.size, "staked" to minorUnits(sumMinorUnits(open.map { it.stake })), "liability" to liability,
         )
     }
 
-    private fun fixtures(): List<Map<String, Any?>> {
+    private fun fixtures(): List<Map<String, Any?>> = book.fixtureLifecycle.withLock {
         val ordered = book.fixtures().asReversed()
         val recentCompleted = ordered.asSequence().filter { it.settlementComplete }.take(30).mapTo(HashSet<String>()) { it.id }
-        return ordered.filter { !it.settlementComplete || it.id in recentCompleted }.map(::fixtureView)
+        ordered.filter { !it.settlementComplete || it.id in recentCompleted }.map(::fixtureView)
     }
 
     private fun operator(): Map<String, Any?> {
         val totals = readModel.totals()
         return mapOf(
+            "scheduler" to active.scheduler.view(),
             "players" to readModel.players().size,
             "entries" to totals.entries,
             "deposits" to minorUnits(totals.deposits),
@@ -922,7 +923,6 @@ class LedgerWebApp private constructor(
         "state" to simulator.state.name,
         "customers" to simulator.customers,
         "opsPerMinute" to simulator.opsPerMinute,
-        "autoFixtures" to simulator.autoFixtures,
         "targetRate" to simulator.targetRate,
         "startedAt" to simulator.startedAtMillis,
         "succeeded" to simulator.succeeded,
@@ -933,7 +933,6 @@ class LedgerWebApp private constructor(
         "rejectedForFunds" to simulator.rejectedForFunds.get(),
         "rejectedOther" to simulator.rejectedOther.get(),
         "shed" to simulator.shed.get(),
-        "fixtureRounds" to simulator.fixtureRounds.get(),
         "maxCustomers" to Simulator.MAX_CUSTOMERS,
     )
 

@@ -57,6 +57,31 @@ class RegulatorReportsTest {
     }
 
     @Test
+    fun `multi sport definitions and golf liabilities reconcile before and after archive restore`() {
+        Context().use { c ->
+            c.wallet.deposit("alice", 10_000, "EUR", "golf-funds")
+            val golf = c.book.addFixture(sport = com.pam.ledger.web.Roster.Sport.GOLF)
+            val tennis = c.book.addFixture(sport = com.pam.ledger.web.Roster.Sport.TENNIS)
+            for (selection in golf.selections) c.book.placeBet("alice", golf.id, selection.code, 100, "golf-${selection.code}")
+            c.book.placeBet("alice", tennis.id, "AWAY", 100, "tennis-away")
+            val report = c.reports.create(emptyMap())
+            val rows = rows(report["fixtures"])
+            val row = rows.single { it["id"] == golf.id }
+            val definition = map(row["definition"])
+            assertEquals("GOLF", definition["sport"])
+            assertTrue(definition["event"].toString().startsWith("Demo"))
+            assertEquals(listOf("P1", "P2", "P3"), rows(definition["selections"]).map { it["code"] })
+            val liability = map(row["liabilityBySelection"])
+            for (selection in golf.selections) assertEquals(selection.odds.toString(), liability[selection.code])
+            c.book.settle(golf.id, "P2")
+            val restored = Book(c.wallet, c.readModel, c.directory)
+            assertEquals("P2", restored.fixture(golf.id).result)
+            val after = RegulatorReports(c.ledger, restored, c.audit).create(emptyMap())
+            assertTrue(rows(after["fixtures"]).single { it["id"] == golf.id }["exceptions"].toString() == "[]")
+        }
+    }
+
+    @Test
     fun `period revenue follows settlement not placement and liabilities replay one prefix`() {
         Context().use { c ->
             val fixture = c.book.addFixture()

@@ -44,7 +44,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         var payout = BigInteger.ZERO
         var revenue = BigInteger.ZERO
         fun openAt(end: Long) = placedTime < end && (settledTime == null || settledTime!! >= end)
-        fun potential() = odds?.takeIf { selection in setOf("HOME", "DRAW", "AWAY") }
+        fun potential() = odds?.takeIf { selection.matches(Regex("[A-Z0-9]{1,8}")) }
             ?.let { stake.multiply(BigInteger.valueOf(it.toLong())).divide(HUNDRED) }
     }
 
@@ -218,7 +218,9 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                 "Illustrative activity threshold, not a diagnosis or a prescribed regulatory limit.")
         }
         val fixtureDefinitions = book.fixtures().associate { f ->
-            f.id to mapOf("home" to f.home, "away" to f.away, "declaredResult" to f.result,
+            f.id to mapOf("home" to f.home, "away" to f.away, "sport" to f.sport.name, "event" to f.event,
+                "startsAt" to f.startsAt, "endsAt" to f.endsAt,
+                "selections" to f.selections.map { mapOf("code" to it.code, "label" to it.label) }, "declaredResult" to f.result,
                 "declaredComplete" to f.settlementComplete)
         }
         val betsByFixture = bets.values.groupBy { it.fixture }
@@ -270,7 +272,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
             "revenue" to "Settlement-period house revenue postings, not stakes minus unrelated period payouts; not a jurisdiction-specific tax return.",
             "customerLiability" to "Replayed cash plus escrow at the cutoff, not proof of bank funds or safeguarding.",
             "activeCustomers" to "Distinct customers with any recorded transaction in the period; not registrations.",
-            "worstWinningPayout" to "Largest HOME/DRAW/AWAY winning payout for outstanding single-selection bets; VOID refunds and unknown markets are separate.",
+            "worstWinningPayout" to "Largest selection winning payout for outstanding single-selection bets; VOID refunds and unknown markets are separate.",
         )
         return linkedMapOf(
             "manifest" to linkedMapOf(
@@ -306,7 +308,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
             "compliance" to scenarios(),
             "coverage" to listOf(
                 coverage("Money and betting activity", "Ledger-derived", "Exact amounts, period flows, liabilities and transaction drill-down."),
-                coverage("Fixture catalogue", "Unsigned snapshot", "Descriptions/results are not authenticated by the ledger signature; sport and start time are not collected."),
+                coverage("Fixture catalogue", "Unsigned snapshot", "Sport, event, selections, times and declared results are demo metadata, not authenticated by the ledger signature."),
                 coverage("Customer eligibility", "Not collected", "Registration, age, identity, location, sanctions and due-diligence decisions."),
                 coverage("Player protection", "Not collected", "Real limits, exclusions, blocked attempts, sessions, interventions and outcomes."),
                 coverage("Cases and governance", "Synthetic examples", "Example case timelines, control owners, training and audit findings; not live compliance evidence."),
