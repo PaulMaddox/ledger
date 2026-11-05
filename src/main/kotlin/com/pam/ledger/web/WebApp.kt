@@ -736,7 +736,7 @@ class LedgerWebApp private constructor(
         services = openServices(directory, signer)
         offlineReason = null
         chaos.clearHistory()
-        return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and 20 fresh fixtures created. Signing key retained.")
+        return mapOf("cleared" to true, "message" to "Demo history and torn-tail quarantine files deleted; 12 seed deposits and ${Roster.pool.values.sum()} fresh fixtures created. Signing key retained.")
     }
 
     internal fun maintainDemo() = maintenance.checkNow()

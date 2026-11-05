@@ -11,6 +11,7 @@ Requires Playwright for Python and a Chromium-based browser:
 or pass an existing Chrome with --chrome /path/to/chrome.
 Use --regulator-only to refresh the reporting screenshots without exercising Chaos Monkey.
 Use --about-only to check the default About view and its embedded interactive guide.
+Use --operator-only to refresh the operator view without exercising Chaos Monkey.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
 build up, then photographs each persona's view into docs/screenshots/. WARNING: the
@@ -25,7 +26,7 @@ from playwright.async_api import async_playwright
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False) -> None:
+async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False, operator_only: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         launch = {"args": ["--no-sandbox"]}
@@ -51,7 +52,7 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             await page.locator(selector).screenshot(path=str(out / f"{name}.png"))
             report(name)
 
-        if not regulator_only:
+        if not regulator_only and not operator_only:
             await page.goto(url)
             await page.locator("#view-about").wait_for(state="visible")
             assert await page.locator("[data-view='about']").get_attribute("aria-selected") == "true"
@@ -78,7 +79,7 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
         await page.fill("#simRate", "60")
         await page.click("#simStart")
         await page.wait_for_timeout(warmup * 1000)
-        if not regulator_only:
+        if not regulator_only and not operator_only:
             await shot("simulator")
 
         # Operator: KPIs, charts, fixtures and feed, with three minutes' worth of chart history building.
@@ -86,6 +87,28 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             await page.goto(url + "#operator")
             await page.wait_for_timeout(4000)
             await shot("operator")
+            if operator_only:
+                for width in [320, 390, 430]:
+                    await page.set_viewport_size({"width": width, "height": 844})
+                    await page.wait_for_timeout(300)
+                    assert await page.locator(".personas a").count() == 7
+                    assert await page.locator(".personas a").evaluate_all("""links => links.every(link => {
+                        const r = link.getBoundingClientRect();
+                        return r.left >= 0 && r.right <= innerWidth && r.height >= 44 &&
+                            link.scrollWidth <= link.clientWidth;
+                    })"""), f"navigation clipped at {width}px"
+                    assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth")
+                    assert await page.locator("#kpis .kpi b").evaluate_all(
+                        "values => values.every(value => value.scrollWidth <= value.clientWidth)")
+                    if width == 390:
+                        await shot("operator-mobile")
+                await page.locator(".brand").click()
+                await page.locator("#view-about").wait_for(state="visible")
+                await page.frame_locator(".about-frame").locator("h1").wait_for(state="visible")
+                await browser.close()
+                if errors:
+                    raise SystemExit("page errors while capturing:\n  " + "\n  ".join(errors))
+                return
 
         # Customer: an automated customer's account, with one entry verified in the browser.
         if not regulator_only:
@@ -152,5 +175,6 @@ if __name__ == "__main__":
     scope = ap.add_mutually_exclusive_group()
     scope.add_argument("--regulator-only", action="store_true", help="capture reporting views only; skip destructive Chaos Monkey scenarios")
     scope.add_argument("--about-only", action="store_true", help="check and capture About and its embedded guide only")
+    scope.add_argument("--operator-only", action="store_true", help="capture the operator view only; skip destructive Chaos Monkey scenarios")
     a = ap.parse_args()
-    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only))
+    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only, a.operator_only))

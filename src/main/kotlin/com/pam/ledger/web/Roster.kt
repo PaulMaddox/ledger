@@ -6,7 +6,7 @@ import kotlin.random.Random
 object Roster {
     enum class Sport { SOCCER, NFL, TENNIS, GOLF }
 
-    val pool = linkedMapOf(Sport.SOCCER to 6, Sport.NFL to 5, Sport.TENNIS to 5, Sport.GOLF to 4)
+    val pool = linkedMapOf(Sport.SOCCER to 1, Sport.NFL to 1, Sport.TENNIS to 1, Sport.GOLF to 1)
     private val names = mapOf(
         Sport.SOCCER to listOf(
             "Arsenal", "Real Madrid", "Barcelona", "Liverpool", "Manchester City",
