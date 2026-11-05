@@ -176,7 +176,7 @@ class Simulator(
             when (rnd.nextInt(100)) {
                 in 0..64 -> {
                     op = "BET"
-                    val f = book.openFixtures().randomOrNull(rnd) ?: return
+                    val f = book.openFixtures().filter { it.managed }.randomOrNull(rnd) ?: return
                     val selection = f.selections.random(rnd).code
                     val stake = rnd.nextLong(1_00, 40_00)
                     val odds = f.odds.getValue(selection)

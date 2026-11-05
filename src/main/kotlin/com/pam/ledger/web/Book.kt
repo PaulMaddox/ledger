@@ -6,6 +6,7 @@ import com.pam.ledger.OutcomeUnknownException
 import com.pam.ledger.Receipt
 import com.pam.ledger.SportsbookWallet
 import java.io.ByteArrayOutputStream
+import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.Channels
 import java.nio.channels.FileChannel
@@ -115,6 +116,7 @@ class Book(
     private val openById = ConcurrentHashMap<String, Fixture>()
     private val counter = AtomicInteger()
     private val persistenceLock = Any()
+    private var archiveFailure: IOException? = null
     // Admission still uses each fixture's read/write lock. This only publishes pool changes together.
     internal val fixtureLifecycle = ReentrantLock()
     private val activeIds = linkedSetOf<String>()
@@ -128,6 +130,7 @@ class Book(
     private val pendingCashOuts = HashMap<String, CompletableFuture<Receipt>>()
     internal var placementTimeout: Duration = Duration.ofSeconds(30)
     internal var cashOutTimeout: Duration = Duration.ofSeconds(30)
+    internal var archiveForce: (FileChannel) -> Unit = { it.force(true) }
 
     init {
         restoreFixtures()
@@ -183,9 +186,16 @@ class Book(
 
     /** Adopt legacy open/pending definitions without guessing any missing result. */
     internal fun adoptLegacy(clock: () -> Long, random: Random) = synchronized(persistenceLock) {
+        val live = fixtures.values.filter { it.managed && it.isOpen }.groupingBy { it.sport }.eachCount().toMutableMap()
         fixtures.values.filter {
             !it.settlementComplete && it.result != LEGACY_UNRESOLVED && it.endsAt == 0L && it.event == "Demo legacy match"
-        }.forEach {
+        }.sortedBy { it.id.removePrefix("F").toInt() }.forEach {
+            if (it.isOpen) {
+                val count = live[it.sport] ?: 0
+                // Surplus legacy markets retain their bets and remain available for manual settlement.
+                if (count >= Roster.pool.getValue(it.sport)) return@forEach
+                live[it.sport] = count + 1
+            }
             it.startsAt = clock()
             it.endsAt = it.startsAt + random.nextLong(30_000, 120_001)
             it.managed = true
@@ -433,6 +443,7 @@ class Book(
         afterPersist: () -> Unit = {},
     ) {
         synchronized(persistenceLock) {
+            archiveFailure?.let { throw IOException("Fixture catalogue append failed; reopen the book for recovery", it) }
             val dir = directory
             if (dir != null) {
                 val properties = Properties()
@@ -444,10 +455,17 @@ class Book(
                     val bytes = ByteArrayOutputStream().also { record.store(it, null) }.toByteArray()
                     val payload = Base64.getEncoder().encodeToString(bytes)
                     val checksum = CRC32C().apply { update(bytes) }.value.toString(16)
-                    FileChannel.open(dir.resolve(ARCHIVE_FILE), CREATE, WRITE, APPEND).use { channel ->
-                        val buffer = ByteBuffer.wrap("$checksum $payload\n".toByteArray(Charsets.US_ASCII))
-                        while (buffer.hasRemaining()) channel.write(buffer)
-                        channel.force(true)
+                    try {
+                        FileChannel.open(dir.resolve(ARCHIVE_FILE), CREATE, WRITE, APPEND).use { channel ->
+                            val buffer = ByteBuffer.wrap("$checksum $payload\n".toByteArray(Charsets.US_ASCII))
+                            while (buffer.hasRemaining()) channel.write(buffer)
+                            archiveForce(channel)
+                        }
+                    } catch (failure: IOException) {
+                        // A failed force/close may have left either a partial or a complete unacknowledged frame.
+                        // No caller may append again until recovery validates that prefix.
+                        archiveFailure = failure
+                        throw failure
                     }
                     archivedIds.add(fixture.id)
                 }
@@ -514,7 +532,8 @@ class Book(
     private fun decodeFixture(p: Properties, prefix: String): Fixture {
         fun get(key: String) = p.getProperty(prefix + key) ?: error("missing fixture $key")
         val codes = p.getProperty(prefix + "selections", "HOME,DRAW,AWAY").split(",")
-        check(codes.size in 2..3 && codes.distinct().size == codes.size &&
+        val unresolved = p.getProperty(prefix + "result") == LEGACY_UNRESOLVED
+        check((unresolved || codes.size in 2..3) && codes.distinct().size == codes.size &&
             codes.all { it.matches(Regex("[A-Z0-9]{1,8}")) }) { "invalid fixture selections" }
         val home = get("home"); val away = get("away")
         val selections = codes.map { code ->

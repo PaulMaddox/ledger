@@ -9,6 +9,7 @@ import com.pam.ledger.web.FixtureScheduler
 import com.pam.ledger.web.ReadModel
 import com.pam.ledger.web.Roster
 import com.pam.ledger.web.Simulator
+import java.io.IOException
 import java.nio.file.Files
 import java.nio.file.StandardOpenOption.APPEND
 import java.util.Properties
@@ -16,6 +17,7 @@ import java.util.concurrent.TimeUnit
 import java.util.concurrent.ConcurrentLinkedQueue
 import java.util.concurrent.CountDownLatch
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 import kotlin.random.Random
 import kotlin.test.Test
@@ -154,6 +156,116 @@ class FixtureSchedulerTest {
     }
 
     @Test
+    fun `legacy adoption preserves surplus bets without exceeding sport quotas on restart`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        val state = Properties().apply {
+            setProperty("count", "7")
+            repeat(7) { index ->
+                mapOf("id" to "F${index + 1}", "home" to "Old home $index", "away" to "Old away $index",
+                    "odds.HOME" to "200", "odds.DRAW" to "300", "odds.AWAY" to "250").forEach { (key, value) ->
+                    setProperty("fixture.$index.$key", value)
+                }
+            }
+        }
+        Files.newOutputStream(dir.resolve(Book.FIXTURES_FILE)).use { state.store(it, null) }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1000, "EUR", "surplus-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model, dir)
+                book.placeBet("p", "F7", "HOME", 100, "surplus-bet")
+                FixtureScheduler(book, { ledger.isFailed }, automatic = false).use {
+                    assertPool(book)
+                    assertTrue(book.fixture("F7").isOpen)
+                    assertFalse(book.fixture("F7").managed)
+                    assertEquals(0L, book.fixture("F7").endsAt)
+                    model.catchUp()
+                    assertTrue(model.bet("surplus-bet")!!.isOpen)
+                }
+            }
+        }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                val book = Book(SportsbookWallet(ledger), model, dir)
+                FixtureScheduler(book, { ledger.isFailed }, automatic = false).use {
+                    assertPool(book)
+                    assertFalse(book.fixture("F7").managed)
+                    book.settle("F7", "VOID")
+                    assertEquals("VOIDED", model.bet("surplus-bet")!!.outcome)
+                    assertPool(book)
+                }
+            }
+        }
+    }
+
+    @Test
+    fun `missing golf definitions remain frozen and round trip across two restarts`() {
+        val dir = tempDir()
+        val signer = Ed25519TreeHeadSigner.generate()
+        Ledger.open(config(dir, signer)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 1000, "EUR", "lost-golf-funds")
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model, dir)
+                val golf = book.addFixture(sport = Roster.Sport.GOLF)
+                golf.selections.forEach { book.placeBet("p", golf.id, it.code, 100, "lost-${it.code}") }
+            }
+        }
+        Files.delete(dir.resolve(Book.FIXTURES_FILE))
+        repeat(2) {
+            Ledger.open(config(dir, signer)).use { ledger ->
+                ReadModel(ledger).use { model ->
+                    val book = Book(SportsbookWallet(ledger), model, dir)
+                    val frozen = book.fixture("F1")
+                    assertEquals("LEGACY_UNRESOLVED", frozen.result)
+                    assertEquals(setOf("HOME", "DRAW", "AWAY", "P1", "P2", "P3"), frozen.odds.keys)
+                    assertFalse(frozen.isOpen)
+                    assertTrue(model.allBets().all { it.isOpen })
+                    assertFailsWith<IllegalArgumentException> { book.settle(frozen.id, "VOID") }
+                }
+            }
+        }
+        val state = Properties().apply {
+            Files.newInputStream(dir.resolve(Book.FIXTURES_FILE)).use(::load)
+            setProperty("fixture.0.result", "")
+        }
+        Files.newOutputStream(dir.resolve(Book.FIXTURES_FILE)).use { state.store(it, null) }
+        Ledger.open(config(dir, signer)).use { ledger ->
+            ReadModel(ledger).use { model ->
+                assertFailsWith<IllegalStateException> { Book(SportsbookWallet(ledger), model, dir) }
+            }
+        }
+    }
+
+    @Test
+    fun `simulator never bets on unmanaged fixtures and still bets on scheduled markets`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                val book = Book(wallet, model)
+                book.addFixture(managed = false)
+                var scheduledId = ""
+                Simulator(book, wallet).use { simulator ->
+                    simulator.configure(10, 600)
+                    simulator.start()
+                    val trafficDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                    while (simulator.succeeded < 20 && System.nanoTime() < trafficDeadline) Thread.sleep(10)
+                    assertTrue(simulator.succeeded >= 20, "customers must actually generate traffic")
+                    assertEquals(0L, simulator.bets.get(), "an unmanaged fixture must not receive simulated bets")
+                    scheduledId = book.addFixture(sport = Roster.Sport.NFL, managed = true).id
+                    val betDeadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(10)
+                    while (simulator.bets.get() == 0L && System.nanoTime() < betDeadline) Thread.sleep(10)
+                    assertTrue(simulator.bets.get() > 0, "scheduled markets must still receive simulated bets")
+                }
+                model.catchUp()
+                assertTrue(model.allBets().isNotEmpty())
+                assertTrue(model.allBets().all { it.fixtureId == scheduledId })
+            }
+        }
+    }
+
+    @Test
     fun `close waits for admitted settlement completion while replacements remain available`() {
         val now = AtomicLong(1_000_000)
         val delayed = AtomicBoolean(false)
@@ -186,6 +298,63 @@ class FixtureSchedulerTest {
                 assertEquals(0, finished.count)
                 assertTrue(fixture.settlementComplete)
                 assertEquals(1, (0 until ledger.head().size).count { ledger.entry(it).entry.idempotencyKey == "bet:close-bet:settle" })
+            }
+        }
+    }
+
+    @Test
+    fun `uncertain archive appends block concurrent catalogue writes until recovery`() {
+        for (partial in listOf(true, false)) {
+            val dir = tempDir()
+            val signer = Ed25519TreeHeadSigner.generate()
+            Ledger.open(config(dir, signer)).use { ledger ->
+                val wallet = SportsbookWallet(ledger)
+                wallet.deposit("p", 1000, "EUR", "append-funds")
+                ReadModel(ledger).use { model ->
+                    val book = Book(wallet, model, dir)
+                    val first = book.addFixture()
+                    val second = book.addFixture()
+                    book.placeBet("p", first.id, "HOME", 100, "append-first")
+                    book.placeBet("p", second.id, "HOME", 100, "append-second")
+                    book.publishResult(first.id, "VOID")
+                    book.publishResult(second.id, "VOID")
+                    val forces = AtomicInteger()
+                    book.archiveForce = { channel ->
+                        forces.incrementAndGet()
+                        if (partial) channel.truncate(channel.position() / 2)
+                        channel.force(true)
+                        throw IOException("uncertain archive append")
+                    }
+                    assertFailsWith<IOException> { book.settle(first.id, "VOID") }
+                    val prefix = Files.readAllBytes(dir.resolve(Book.ARCHIVE_FILE))
+                    race(4) { worker ->
+                        when (worker) {
+                            0 -> book.settle(first.id, "VOID")
+                            1 -> book.settle(second.id, "VOID")
+                            else -> book.addFixture()
+                        }
+                    }.forEach { assertTrue(it.exceptionOrNull() is IOException) }
+                    assertEquals(1, forces.get(), "an uncertain append must prevent any later archive attempt")
+                    assertTrue(prefix.contentEquals(Files.readAllBytes(dir.resolve(Book.ARCHIVE_FILE))))
+                }
+            }
+            Ledger.open(config(dir, signer)).use { ledger ->
+                ReadModel(ledger).use { model ->
+                    val book = Book(SportsbookWallet(ledger), model, dir)
+                    assertTrue(book.fixture("F1").settlementComplete)
+                    book.settle("F1", "VOID")
+                    book.settle("F2", "VOID")
+                    assertEquals(2, Files.readAllLines(dir.resolve(Book.ARCHIVE_FILE)).size)
+                    assertEquals("VOIDED", model.bet("append-first")!!.outcome)
+                    assertEquals("VOIDED", model.bet("append-second")!!.outcome)
+                }
+            }
+            Ledger.open(config(dir, signer)).use { ledger ->
+                ReadModel(ledger).use { model ->
+                    val book = Book(SportsbookWallet(ledger), model, dir)
+                    assertEquals(2, book.fixtures().size)
+                    assertTrue(book.fixtures().all { it.settlementComplete })
+                }
             }
         }
     }

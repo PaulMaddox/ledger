@@ -127,6 +127,9 @@ later application deployments use the same resources.
   complete record stops recovery rather than silently discarding metadata. Only
   unsigned active-catalogue replacement retries transient Windows access denials;
   ledger journal writes never retry.
+  An uncertain archive append blocks further catalogue writes until restart validates
+  the archive. Surplus legacy markets remain unmanaged and available for manual
+  operator settlement without losing their bets; the simulator only bets on managed markets.
 
 ## Troubleshooting
 
