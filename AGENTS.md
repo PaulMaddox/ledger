@@ -18,6 +18,7 @@ src/main/kotlin/com/pam/ledger/
   SportsbookWallet.kt    deposits, withdrawals, bets, exactly-once settlement
   Replay.kt              balance rules, replay verification, checkpoint checks
   Journal.kt             CRC-framed append-only file, fsync, torn-write recovery, lock
+  EntryStore.kt          entries read from the journal on demand and re-verified; hashed key index
   Merkle.kt              incremental root, inclusion and consistency proofs
   Signing.kt             signed tree heads, TreeHeadSigner interface
   EntryCodec.kt, Hashes.kt   canonical byte format and domain-separated hashing
@@ -29,6 +30,7 @@ src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1-R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
   ReadScalingTest.kt         read-model indexes; opt-in soak proves reads stay flat as the ledger grows
+  EntryStoreTest.kt          entries read back from the journal, on-disk tamper detection, hashed key index
   WebAppTest.kt              web console API, simulator, bets racing settlement
 docs/
   readme.src.html        SOURCE of the interactive guide (edit this)
@@ -133,6 +135,26 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 10. **Never weaken a test to make it pass.** A failing concurrency or integrity test is
     a bug report. Regulatory tests check against the ledger's replayed history; keep it
     that way.
+
+## Memory and history
+
+History lives in the journal, not on the heap (issue #73). Keep it that way:
+
+- The engine holds an offset and a verified leaf hash per entry, a hash per idempotency
+  key, balances, and a bounded cache of recent entries. Do not add a structure that keeps
+  an object, a decoded entry or a key string for every entry or every bet.
+- `Ledger.entry` re-hashes what it reads from disk and compares it with the leaf hash
+  verified at startup. A mismatch throws `TamperDetectedException` and fail-stops the
+  ledger. Never bypass that check or cache unverified bytes.
+- A hash match in the key index is only a candidate. The writer must read the entry and
+  compare the full idempotency key before treating a request as a retry.
+- Read long ranges with `Ledger.scan`, never with `Ledger.entry` in a loop over the whole
+  ledger: `scan` does not evict the recent entries that customer requests rely on.
+- Readers use their own file channel. Never hand the writer's channel to a reader thread:
+  Java closes a channel when a thread blocked in it is interrupted.
+- The ledger is fully verified before it opens. Never load balances, indexes or Merkle
+  state from a snapshot in place of replay, never serve while verification is running,
+  and never verify only the entries after the last checkpoint. This is an owner decision.
 
 ## Changing code
 

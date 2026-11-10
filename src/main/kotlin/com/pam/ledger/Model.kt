@@ -155,6 +155,9 @@ class SealedEntry internal constructor(
     /** What is written to disk: canonical entry bytes followed by the 32-byte chain hash. */
     internal fun journalRecord(): ByteArray = encoded + chainHash.rawBytes()
 
+    /** Length of [journalRecord] in bytes, without building it. */
+    internal val recordSize: Int get() = encoded.size + Digest.SIZE
+
     fun receipt(replayed: Boolean) = Receipt(
         seq = entry.seq,
         txId = entry.txId,

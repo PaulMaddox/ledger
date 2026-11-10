@@ -60,5 +60,13 @@ class OutcomeUnknownException(val key: String) :
 /** The stored data fails a cryptographic or accounting check. Do not trust it. */
 class TamperDetectedException(message: String) : LedgerException(message)
 
+/**
+ * A committed entry could not be read back from the journal because of an I/O
+ * error (as opposed to reading back different bytes, which is [TamperDetectedException]).
+ * The entry is still committed; the read can be retried.
+ */
+class EntryUnreadableException(val seq: Long, cause: Throwable) :
+    LedgerException("entry #$seq could not be read from the journal: ${cause.message}", cause)
+
 /** A referenced entity (e.g. a bet) does not exist in the ledger. */
 class NotFoundException(message: String) : LedgerException(message)

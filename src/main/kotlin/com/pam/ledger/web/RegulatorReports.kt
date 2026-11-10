@@ -35,7 +35,15 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
     }
 
     // Keep attribution even for legacy/nonstandard keys without duplicating the decoded bet graph.
-    private class Bet(val placedSeq: Long, var settledSeq: Long = -1)
+    // Everything the fixture section needs is captured while the ledger is scanned once, in order:
+    // going back to the journal for each bet's two entries would turn one scan into random reads.
+    private class Bet(val placedSeq: Long, val placedAt: Long, val player: String, val selection: String?, val stake: BigInteger) {
+        var settledSeq = -1L
+        var settledAt = 0L
+        var settledKind = ""
+        var payout = BigInteger.ZERO
+        var revenue = BigInteger.ZERO
+    }
 
     private class FixtureTotals {
         var placed = 0
@@ -110,20 +118,21 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         var voidRefunds = BigInteger.ZERO
         var cashOuts = BigInteger.ZERO
         var winPayouts = BigInteger.ZERO
-        for (seq in 0 until size) {
-            val e = ledger.entry(seq).entry
+        ledger.scan(0, size) { sealed ->
+            val e = sealed.entry
+            val seq = e.seq
             var hasCurrency = false
             for (p in e.postings) if (p.currency == currency) {
                 hasCurrency = true
                 conservation += p.amount.toBigInteger()
             }
-            if (!hasCurrency) continue
+            if (!hasCurrency) return@scan
             val player = e.metadata["playerId"]
             if (player == null) {
                 if (inPeriod(e.timestampMicros)) unclassified++
-                continue
+                return@scan
             }
-            if (!selected(player) || e.timestampMicros >= to) continue
+            if (!selected(player) || e.timestampMicros >= to) return@scan
             val c = customers.getOrPut(player) { Customer(player, seq, e.timestampMicros) }
             c.lastTime = e.timestampMicros
             val cashAccount = Accounts.cash(player, currency)
@@ -178,7 +187,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                 }
                 "BET_PLACED" -> {
                     val id = e.metadata.getValue("betId")
-                    bets[id] = Bet(seq)
+                    bets[id] = Bet(seq, e.timestampMicros, player, e.metadata["selection"], escrow)
                     if (included) {
                         c.stakes += escrow
                         c.bets++
@@ -189,6 +198,10 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                     val b = bets[e.metadata["betId"]]
                         ?: throw TamperDetectedException("report cannot attribute settlement #$seq to its placement")
                     b.settledSeq = seq
+                    b.settledAt = e.timestampMicros
+                    b.settledKind = e.kind
+                    b.payout = cash
+                    b.revenue = revenue
                     if (included) {
                         c.payouts += cash
                         returnedStakes -= escrow
@@ -217,39 +230,28 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         var openBets = 0
         var openStakes = BigInteger.ZERO
         for (bet in bets.values) {
-            val placement = ledger.entry(bet.placedSeq).entry
-            val player = placement.metadata.getValue("playerId")
-            val parts = placement.metadata["selection"]?.split("|").orEmpty()
+            val player = bet.player
+            val parts = bet.selection?.split("|").orEmpty()
             val price = if (parts.size == 3) parts[2].toIntOrNull()?.takeIf { it >= 0 } else null
             val fixture = if (price != null) parts[0] else "UNATTRIBUTED"
             val selection = if (price != null) parts[1] else "Unknown"
-            val escrowAccount = Accounts.openBets(player, currency)
-            var stake = BigInteger.ZERO
-            for (p in placement.postings) if (p.currency == currency && p.account == escrowAccount) {
-                stake += p.amount.toBigInteger()
-            }
+            val stake = bet.stake
             val totals = fixtureTotals.getOrPut(fixture) { FixtureTotals() }
-            if (inPeriod(placement.timestampMicros)) {
+            if (inPeriod(bet.placedAt)) {
                 totals.placed++
                 totals.bettors.add(player)
                 totals.stakes += stake
-                totals.seqs.add(placement.seq)
+                totals.seqs.add(bet.placedSeq)
             }
-            val settlement = if (bet.settledSeq >= 0) ledger.entry(bet.settledSeq).entry else null
-            if (settlement != null && inPeriod(settlement.timestampMicros)) {
-                val settlingPlayer = settlement.metadata.getValue("playerId")
+            val settled = bet.settledSeq >= 0
+            if (settled && inPeriod(bet.settledAt)) {
                 totals.settlements++
-                totals.outcomes.merge(settlement.kind.removePrefix("BET_"), 1, Int::plus)
-                val cashAccount = Accounts.cash(settlingPlayer, currency)
-                val revenueAccount = Accounts.revenue(currency)
-                for (p in settlement.postings) {
-                    if (p.currency != currency) continue
-                    if (p.account == cashAccount) totals.payouts += p.amount.toBigInteger()
-                    if (p.account == revenueAccount) totals.revenue += p.amount.toBigInteger()
-                }
-                totals.seqs.add(settlement.seq)
+                totals.outcomes.merge(bet.settledKind.removePrefix("BET_"), 1, Int::plus)
+                totals.payouts += bet.payout
+                totals.revenue += bet.revenue
+                totals.seqs.add(bet.settledSeq)
             }
-            if (settlement == null || settlement.timestampMicros >= to) {
+            if (!settled || bet.settledAt >= to) {
                 openBets++
                 openStakes += stake
                 totals.open++
