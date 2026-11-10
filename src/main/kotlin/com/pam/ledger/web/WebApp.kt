@@ -20,6 +20,7 @@ import com.pam.ledger.SealedEntry
 import com.pam.ledger.SignedTreeHead
 import com.pam.ledger.SportsbookWallet
 import com.pam.ledger.SportsbookWallet.Accounts
+import com.pam.ledger.EntryUnreadableException
 import com.pam.ledger.TamperDetectedException
 import com.pam.ledger.VersionConflictException
 import com.pam.ledger.Validation
@@ -227,6 +228,8 @@ class LedgerWebApp private constructor(
         val book: Book, val simulator: Simulator, val scheduler: FixtureScheduler, val stats: Stats, val audit: Audit,
         val performance: Performance, val resources: List<AutoCloseable>,
     ) : AutoCloseable {
+        // Frozen report sections for THIS ledger's signed checkpoints; a reset replaces these services, and the cache with them.
+        val reports = ReportCache()
         override fun close() = closeResources(resources)
     }
 
@@ -484,7 +487,7 @@ class LedgerWebApp private constructor(
                 is NotFoundException -> 404 to "not_found"
                 is OverloadedException -> 503 to "overloaded"
                 is OutcomeUnknownException -> 504 to "outcome_unknown"
-                is LedgerFailedException, is LedgerClosedException -> 503 to "ledger_unavailable"
+                is LedgerFailedException, is LedgerClosedException, is EntryUnreadableException -> 503 to "ledger_unavailable"
                 is TamperDetectedException -> 500 to "tamper_detected"
                 is IllegalArgumentException -> 400 to "bad_request"
                 else -> 500 to "internal_error"
@@ -703,9 +706,9 @@ class LedgerWebApp private constructor(
             }
 
             // ---- Regulator ----
-            post("regulator", "report") -> RegulatorReports(ledger, book, audit).create(r.params)
-            get("regulator", "report", "evidence") -> RegulatorReports(ledger, book, audit).evidence(r.params)
-            get("regulator", "report", "proof") -> RegulatorReports(ledger, book, audit).proof(r.params)
+            post("regulator", "report") -> RegulatorReports(ledger, book, audit, active.reports).create(r.params)
+            get("regulator", "report", "evidence") -> RegulatorReports(ledger, book, audit, active.reports).evidence(r.params)
+            get("regulator", "report", "proof") -> RegulatorReports(ledger, book, audit, active.reports).proof(r.params)
             get("regulator", "checkpoints") -> mapOf(
                 "publicKey" to ledger.publicKey.encoded,
                 "checkpoints" to audit.checkpoints().map(::sthView).asReversed(),
