@@ -16,6 +16,7 @@ import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
+import java.util.concurrent.atomic.AtomicReference
 
 /*
  * ============================================================================
@@ -63,6 +64,8 @@ import java.util.concurrent.atomic.AtomicBoolean
  * @property submitTimeout How long submit() waits for queue space before [OverloadedException].
  * @property checkpointEvery Sign a checkpoint automatically every N entries.
  * @property completionExecutor Runs callers' future callbacks, so slow user code never stalls the writer.
+ * @property entryCacheSize How many recently used entries stay decoded in memory. Every other
+ *   entry is read back from the journal, and checked against its verified hash, on demand.
  */
 data class LedgerConfig(
     val directory: Path,
@@ -76,10 +79,11 @@ data class LedgerConfig(
     val checkpointEvery: Long = 10_000,
     val clock: Clock = Clock.systemUTC(),
     val completionExecutor: Executor = ForkJoinPool.commonPool(),
+    val entryCacheSize: Int = 16_384,
 ) {
     init {
         require(ledgerId.isNotBlank()) { "ledgerId required" }
-        require(queueCapacity > 0 && maxBatchSize > 0 && checkpointEvery > 0)
+        require(queueCapacity > 0 && maxBatchSize > 0 && checkpointEvery > 0 && entryCacheSize > 0)
     }
 }
 
@@ -96,6 +100,12 @@ class Ledger private constructor(
     private val entryJournal: Journal,
     private val checkpointJournal: Journal,
     recovered: Replayer,
+    // History itself stays in the journal. The store keeps an offset and a verified leaf hash per
+    // entry, reads entries back on demand, and reports any that no longer match their hash.
+    private val entries: EntryStore,
+    // Hashes of committed idempotency keys. A match is only a candidate until the entry's own key agrees.
+    private val idempotency: KeyIndex,
+    tamperAlarm: AtomicReference<(TamperDetectedException) -> Unit>,
     // The prover recovery used to verify checkpoints. Its cache of completed subtrees is
     // already warm, so the first proof after a restart does not rehash the whole tree.
     private val prover: MerkleProver,
@@ -104,8 +114,6 @@ class Ledger private constructor(
 ) : AutoCloseable {
 
     // ---- State shared with readers. Written ONLY by the writer thread, after fsync. ----
-    private val entries = recovered.entries
-    private val idempotency = ConcurrentHashMap<String, Long>(recovered.idempotency)
     private val accounts = ConcurrentHashMap<AccountId, AccountState>(recovered.accounts)
     @Volatile private var headRef: LedgerHead = recovered.head()
     @Volatile private var latestCheckpoint: SignedTreeHead? = recoveredCheckpoint
@@ -119,16 +127,21 @@ class Ledger private constructor(
     private val closed = AtomicBoolean(false)
     @Volatile private var writerDone = false
     private val queue = ArrayBlockingQueue<Command>(config.queueCapacity)
+
+    init {
+        // A reader that finds the journal changed underneath us stops the ledger: it can no longer prove its history.
+        tamperAlarm.set { failStop(it) }
+    }
     private val writer = Thread(::runWriter, "pam-ledger-writer-${config.ledgerId}").apply { isDaemon = true }
 
     /** Messages to the writer thread. */
     private sealed interface Command
-    private class Submit(val request: TransactionRequest, val fingerprint: Digest, val future: CompletableFuture<Receipt>) : Command
+    private class Submit(val request: TransactionRequest, val fingerprint: Digest, val keyHash: Long, val future: CompletableFuture<Receipt>) : Command
     private class CheckpointRequest(val future: CompletableFuture<SignedTreeHead>) : Command
     private data object Shutdown : Command
 
     /** A transaction that passed validation and awaits the batch fsync. */
-    private class Staged(val sealed: SealedEntry, val fingerprint: Digest, val future: CompletableFuture<Receipt>) {
+    private class Staged(val sealed: SealedEntry, val fingerprint: Digest, val keyHash: Long, val future: CompletableFuture<Receipt>) {
         val duplicates = ArrayList<CompletableFuture<Receipt>>(0) // same key submitted twice in one batch
     }
 
@@ -149,8 +162,9 @@ class Ledger private constructor(
 
         // Hash the request on the CALLER's thread to keep work off the writer.
         val fingerprint = EntryCodec.requestFingerprint(request.kind, request.postings, request.metadata)
+        val keyHash = KeyIndex.hashOf(request.idempotencyKey)
         val internal = CompletableFuture<Receipt>()
-        val cmd = Submit(request, fingerprint, internal)
+        val cmd = Submit(request, fingerprint, keyHash, internal)
         if (!queue.offer(cmd, config.submitTimeout.toNanos(), TimeUnit.NANOSECONDS)) {
             return CompletableFuture.failedFuture(OverloadedException())
         }
@@ -202,9 +216,31 @@ class Ledger private constructor(
     val publicKey: PublicKey get() = config.signer.publicKey
     val isFailed: Boolean get() = failure != null
 
-    fun entry(seq: Long): SealedEntry = entries[Math.toIntExact(seq)]
+    /**
+     * Entry number [seq]. Recent entries come from memory; older ones are read from the
+     * journal and checked against the hash verified at startup. Throws
+     * [TamperDetectedException] (and stops the ledger) if the bytes on disk have changed,
+     * or [EntryUnreadableException] if they could not be read.
+     */
+    fun entry(seq: Long): SealedEntry = entries[seq]
 
-    fun findByIdempotencyKey(key: String): SealedEntry? = idempotency[key]?.let { entry(it) }
+    /**
+     * Visit entries [from] (inclusive) to [until] (exclusive) in order, verified like [entry].
+     * Use this for long ranges such as reports: it does not displace recently used entries.
+     */
+    fun scan(from: Long, until: Long, visit: (SealedEntry) -> Unit) = entries.scan(from, until, visit)
+
+    fun findByIdempotencyKey(key: String): SealedEntry? = committed(key, KeyIndex.hashOf(key))
+
+    /** The entry committed under [key], if any. The index offers candidates by hash; only an equal key is a match. */
+    private fun committed(key: String, keyHash: Long): SealedEntry? {
+        var found: SealedEntry? = null
+        idempotency.anyCandidate(keyHash) { seq ->
+            val candidate = entries[seq]
+            (candidate.entry.idempotencyKey == key).also { if (it) found = candidate }
+        }
+        return found
+    }
 
     /** Proof that entry [seq] is in the tree of [treeSize] entries (defaults to the current head). */
     fun inclusionProof(seq: Long, treeSize: Long = headRef.size): InclusionProof {
@@ -237,6 +273,7 @@ class Ledger private constructor(
         writer.join()
         runCatching { entryJournal.close() }
         runCatching { checkpointJournal.close() }
+        runCatching { entries.close() }
         dirLock.close()
     }
 
@@ -313,9 +350,8 @@ class Ledger private constructor(
                     val req = cmd.request
 
                     // (1) Already committed under this key? Replay or reject; never write twice.
-                    val committedSeq = idempotency[req.idempotencyKey]
-                    if (committedSeq != null) {
-                        val existing = entries[committedSeq.toInt()]
+                    val existing = committed(req.idempotencyKey, cmd.keyHash)
+                    if (existing != null) {
                         if (EntryCodec.fingerprintOf(existing.entry) == cmd.fingerprint) {
                             cmd.future.complete(existing.receipt(replayed = true))
                         } else {
@@ -353,7 +389,7 @@ class Ledger private constructor(
                     ))
                     val sealed = SealedEntry.seal(entry)
                     overlay.putAll(updates)
-                    val s = Staged(sealed, cmd.fingerprint, cmd.future)
+                    val s = Staged(sealed, cmd.fingerprint, cmd.keyHash, cmd.future)
                     staged += s
                     stagedByKey[req.idempotencyKey] = s
                     chain = sealed.chainHash
@@ -364,7 +400,7 @@ class Ledger private constructor(
 
         if (staged.isNotEmpty()) {
             // (5) DURABILITY: one write + one fsync for the whole batch.
-            try {
+            var offset = try {
                 entryJournal.appendBatch(staged.map { it.sealed.journalRecord() })
             } catch (t: Throwable) {
                 failStop(t)
@@ -381,12 +417,15 @@ class Ledger private constructor(
             // (6) PUBLISH, in an order that keeps every reader consistent:
             //     entries first, so anything that points at an entry can resolve it...
             for (s in staged) {
-                entries.add(s.sealed)
+                // Remember where each record starts and what it hashes to; the entry itself stays in the journal.
+                entries.stage(offset, s.sealed.leafHash)
+                entries.remember(s.sealed)
+                offset += Journal.HEADER + s.sealed.recordSize
                 frontier.append(s.sealed.leafHash)
             }
             entries.publish()
             //     ...then the indexes and balances that refer to those entries...
-            for (s in staged) idempotency[s.sealed.entry.idempotencyKey] = s.sealed.entry.seq
+            for (s in staged) idempotency.put(s.keyHash, s.sealed.entry.seq)
             accounts.putAll(overlay)
             //     ...and finally the head, which summarises all of it.
             headRef = LedgerHead(seq, chain, frontier.root(), timestamp)
@@ -448,20 +487,31 @@ class Ledger private constructor(
          * Open (or create) a ledger, fully verifying the existing journal first.
          * Throws [TamperDetectedException] if anything fails verification. A
          * ledger that cannot prove its own history refuses to start.
+         *
+         * Each entry is handed to [listener] as it is verified, so a read model can be
+         * built in the same pass. See [RecoveryListener].
          */
-        fun open(config: LedgerConfig): Ledger {
+        fun open(config: LedgerConfig, listener: RecoveryListener? = null): Ledger {
             Files.createDirectories(config.directory)
             val lock = DirectoryLock.acquire(config.directory.resolve(LOCK_FILE))
+            var entryStore: EntryStore? = null
             var entryJournal: Journal? = null
             var checkpointJournal: Journal? = null
             try {
-                // 1. Replay and verify every entry.
-                val replayer = Replayer(config.ledgerId, config.accountPolicy)
-                val (ej, entryScan) = Journal.openForAppend(config.directory.resolve(ENTRIES_FILE)) { replayer.apply(it) }
+                // 1. Replay and verify every entry. Recovery keeps an offset, a leaf hash and a key
+                //    hash per entry, never the entries themselves, so memory does not limit history.
+                val entriesPath = config.directory.resolve(ENTRIES_FILE)
+                val strings = EntryStrings()
+                val tamperAlarm = AtomicReference<(TamperDetectedException) -> Unit> {}
+                val store = EntryStore(entriesPath, config.entryCacheSize, strings) { tamperAlarm.get()(it) }
+                entryStore = store
+                val keys = KeyIndex()
+                val replayer = Replayer(config.ledgerId, config.accountPolicy, index = RecoveryIndex(store, keys, listener), entryStrings = strings)
+                val (ej, entryScan) = Journal.openForAppendAt(entriesPath) { offset, record -> replayer.apply(record, offset) }
                 entryJournal = ej
 
                 // 2. Verify every signed checkpoint against the replayed history.
-                val prover = MerkleProver { replayer.entries[it.toInt()].leafHash }
+                val prover = MerkleProver(store::leafHash)
                 val trusted = config.trustedKeys.associateBy(::keyIdOf)
                 var latest: SignedTreeHead? = null
                 val (cj, cpScan) = Journal.openForAppend(config.directory.resolve(CHECKPOINTS_FILE)) { bytes ->
@@ -476,8 +526,9 @@ class Ledger private constructor(
                 checkpointJournal = cj
 
                 val report = RecoveryReport(entryScan.records, cpScan.records, entryScan.tornTailBytes + cpScan.tornTailBytes)
-                return Ledger(config, lock, ej, cj, replayer, prover, latest, report).also { it.writer.start() }
+                return Ledger(config, lock, ej, cj, replayer, store, keys, tamperAlarm, prover, latest, report).also { it.writer.start() }
             } catch (t: Throwable) {
+                runCatching { entryStore?.close() }
                 runCatching { entryJournal?.close() }
                 runCatching { checkpointJournal?.close() }
                 lock.close()

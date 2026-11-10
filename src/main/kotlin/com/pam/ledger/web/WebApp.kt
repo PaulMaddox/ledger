@@ -315,9 +315,14 @@ class LedgerWebApp private constructor(
         private fun openServices(dir: Path, signer: Ed25519TreeHeadSigner): Services {
             val resources = ArrayList<AutoCloseable>()
             try {
-                val ledger = Ledger.open(LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000)).also(resources::add)
+                // The read model is indexed in the same pass that verifies the journal, so a restart
+                // reads history once. Nothing is served until Ledger.open has verified all of it.
+                val recovering = ReadModel.Recovering()
+                val ledger = Ledger.open(
+                    LedgerConfig(directory = dir, ledgerId = LEDGER_ID, signer = signer, checkpointEvery = 1_000), recovering,
+                ).also(resources::add)
                 val wallet = SportsbookWallet(ledger)
-                val readModel = ReadModel(ledger).also(resources::add)
+                val readModel = recovering.attach(ledger).also(resources::add)
                 val book = Book(wallet, readModel, dir)
                 val simulator = Simulator(book, wallet).also(resources::add)
                 val stats = Stats(readModel).also(resources::add)

@@ -2,6 +2,7 @@ package com.pam.ledger.web
 
 import com.pam.ledger.AccountId
 import com.pam.ledger.Ledger
+import com.pam.ledger.RecoveryListener
 import com.pam.ledger.SealedEntry
 import com.pam.ledger.SportsbookWallet.Accounts
 import java.math.BigInteger
@@ -32,7 +33,43 @@ import kotlin.concurrent.write
  *  lock guards the read model's own indexes. It is never held by, and never
  *  blocks, the ledger's writer thread.
  */
-class ReadModel(private val ledger: Ledger) : AutoCloseable {
+class ReadModel private constructor() : AutoCloseable {
+
+    /** Tail [ledger] from its first entry. Prefer [Recovering] when opening a ledger with history. */
+    constructor(ledger: Ledger) : this() {
+        attach(ledger)
+    }
+
+    /**
+     * Builds the read model WHILE the ledger recovers, instead of reading the whole journal
+     * a second time afterwards:
+     *
+     *     val recovering = ReadModel.Recovering()
+     *     val ledger = Ledger.open(config, recovering)
+     *     val readModel = recovering.attach(ledger)
+     *
+     * Recovery hands over only entries that passed every check. If the ledger fails to open,
+     * drop this object: it was never attached, so nothing can read what it indexed.
+     */
+    class Recovering : RecoveryListener {
+        private val model = ReadModel()
+        private var indexed = 0L
+
+        override fun recovered(entry: SealedEntry) {
+            model.apply(entry)
+            indexed = entry.entry.seq + 1
+        }
+
+        /** Hand over the indexes built so far; the returned model tails [ledger] from where recovery stopped. */
+        fun attach(ledger: Ledger): ReadModel {
+            check(indexed <= ledger.head().size) { "recovered entries do not belong to this ledger" }
+            model.lock.write { model.next = indexed } // the lock publishes everything recovery wrote to other threads
+            model.attach(ledger)
+            return model
+        }
+    }
+
+    private lateinit var ledger: Ledger
 
     /** A bet as reconstructed from its placement entry and (optionally) its settlement entry. */
     data class BetView(
@@ -80,7 +117,6 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     private val lock = ReentrantReadWriteLock()
     // Read without the lock by catchUp's fast path; written only under the write lock.
     @Volatile private var next = 0L
-    private class BetHistory(val placedSeq: Long, var settledSeq: Long = -1)
     private val byPlayer = HashMap<String, LongHistory>()
     // Placement entries only, so a page of bets never walks deposits and withdrawals.
     private val placementsByPlayer = HashMap<String, LongHistory>()
@@ -89,7 +125,11 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     // Every entry that posts to a player account, so an audit reads only that account's history.
     private val seqsByAccount = HashMap<String, LongHistory>()
     private val fixtureIndexes = HashMap<String, FixtureIndex>()
-    private val bets = LinkedHashMap<String, BetHistory>()
+    // Every bet ever placed, as primitives. Decoded views are kept only for OPEN bets, below.
+    private val bets = BetTable()
+    // Fixture and selection pairs, numbered so a bet's row can name its market in a few bits.
+    private val markets = ArrayList<Pair<String, String>>()
+    private val marketNumbers = HashMap<Pair<String, String>, Int>()
     private val openViews = HashMap<String, BetView>()
     private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
     private val openBetsByFixture = HashMap<String, MutableSet<String>>()
@@ -104,12 +144,17 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
     private val recent = ArrayDeque<Long>()
 
     @Volatile private var running = true
-    private val poller = Thread({
-        while (running) {
-            runCatching { catchUp() }
-            try { Thread.sleep(100) } catch (e: InterruptedException) { break } // close() interrupts the sleep
-        }
-    }, "read-model").apply { isDaemon = true; start() }
+    private var poller: Thread? = null
+
+    private fun attach(ledger: Ledger) {
+        this.ledger = ledger
+        poller = Thread({
+            while (running) {
+                runCatching { catchUp() }
+                try { Thread.sleep(100) } catch (e: InterruptedException) { break } // close() interrupts the sleep
+            }
+        }, "read-model").apply { isDaemon = true; start() }
+    }
 
     /**
      * Process every entry committed so far. Called by the poller, and directly when a caller needs to be current.
@@ -131,6 +176,10 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         }
     }
 
+    /**
+     * Index one entry. Uses nothing but the entry itself: it must not read other entries
+     * from the ledger, because it also runs during recovery, before the ledger exists.
+     */
     private fun apply(sealed: SealedEntry) {
         val e = sealed.entry
         kindCounts.merge(e.kind, 1, Long::plus)
@@ -163,7 +212,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                         selection = parts[1], oddsHundredths = parts[2].toInt(), stake = stake,
                         placedSeq = e.seq, placedAtMicros = e.timestampMicros,
                     )
-                    bets[betId] = BetHistory(e.seq)
+                    bets.place(betId, e.seq, marketNumber(parts[0], parts[1]))
                     openViews[betId] = bet
                     openBetsByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
                     openBetsByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
@@ -181,8 +230,8 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                 val betId = e.metadata.getValue("betId")
                 val payout = cashDelta(e.metadata.getValue("playerId"))
                 returned = returned.add(BigInteger.valueOf(payout))
-                bets[betId]?.let { history ->
-                    recordOutcome(history, e.kind.removePrefix("BET_"))
+                bets.settle(betId, e.seq, OUTCOMES.indexOf(e.kind.removePrefix("BET_")))?.let { before ->
+                    recordOutcome(before, e.kind.removePrefix("BET_"))
                     openViews.remove(betId)?.let {
                         fixtureIndexes[it.fixtureId]?.let { index -> index.open-- }
                         openBetCount--
@@ -194,20 +243,22 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
                         if (openBetsByPlayer[it.playerId]?.isEmpty() == true) openBetsByPlayer.remove(it.playerId)
                         if (openBetsByFixture[it.fixtureId]?.isEmpty() == true) openBetsByFixture.remove(it.fixtureId)
                     }
-                    history.settledSeq = e.seq
                 }
             }
         }
     }
 
+    private fun marketNumber(fixture: String, selection: String): Int = marketNumbers.getOrPut(fixture to selection) {
+        check(markets.size < BetTable.MAX_MARKETS) { "too many markets" }
+        markets.add(fixture to selection)
+        markets.size - 1
+    }
+
     /** Count [outcome] against the bet's fixture and selection, replacing any outcome an earlier settlement recorded. */
-    private fun recordOutcome(history: BetHistory, outcome: String) {
-        val parts = ledger.entry(history.placedSeq).entry.metadata.getValue("selection").split("|")
-        val outcomes = fixtureIndexes.getValue(parts[0]).outcomes.getOrPut(parts[1]) { HashMap() }
-        if (history.settledSeq >= 0) {
-            val previous = ledger.entry(history.settledSeq).entry.kind.removePrefix("BET_")
-            outcomes.computeIfPresent(previous) { _, count -> if (count > 1) count - 1 else null }
-        }
+    private fun recordOutcome(before: BetTable.Row, outcome: String) {
+        val (fixture, selection) = markets[before.market]
+        val outcomes = fixtureIndexes.getValue(fixture).outcomes.getOrPut(selection) { HashMap() }
+        if (before.outcome != 0) outcomes.computeIfPresent(OUTCOMES[before.outcome]) { _, count -> if (count > 1) count - 1 else null }
         outcomes.merge(outcome, 1, Int::plus)
     }
 
@@ -218,7 +269,7 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
             .divide(BigInteger.valueOf(100)).subtract(stake)
     }
 
-    private fun view(history: BetHistory): BetView {
+    private fun view(history: BetTable.Row): BetView {
         val placement = ledger.entry(history.placedSeq).entry
         val id = placement.metadata.getValue("betId")
         if (history.settledSeq < 0) return openViews.getValue(id)
@@ -252,11 +303,17 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
         var index = placements.size - 1
         while (index >= 0 && result.size < limit) {
             // A placement without a well-formed selection has no view; skip it as the full-history walk did.
-            ledger.entry(placements[index--]).entry.metadata["betId"]?.let(bets::get)?.let { result.add(view(it)) }
+            ledger.entry(placements[index--]).entry.metadata["betId"]?.let { bets[it] }?.let { result.add(view(it)) }
         }
         result.asReversed()
     }
-    fun allBets(): List<BetView> = lock.read { bets.values.map(::view) }
+    /** Every bet ever placed, in placement order. Reads each bet's entries: for tests and diagnostics, not for request paths. */
+    fun allBets(): List<BetView> = lock.read {
+        val rows = ArrayList<BetTable.Row>()
+        bets.forEach(rows::add)
+        rows.sortBy { it.placedSeq }
+        rows.map(::view)
+    }
     fun openBetsForPlayer(player: String): List<BetView> = lock.read {
         openBetsByPlayer[player].orEmpty().mapNotNull(openViews::get)
     }
@@ -297,12 +354,16 @@ class ReadModel(private val ledger: Ledger) : AutoCloseable {
 
     override fun close() {
         running = false
-        poller.interrupt()
-        poller.join(5_000)
-        check(!poller.isAlive) { "read model did not stop" }
+        poller?.let {
+            it.interrupt()
+            it.join(5_000)
+            check(!it.isAlive) { "read model did not stop" }
+        }
     }
 
     private companion object {
         const val PLAYER_PREFIX = "player:"
+        // Index in this list is the outcome code stored in a bet's row; 0 means not settled.
+        val OUTCOMES = listOf("", "WON", "LOST", "VOIDED", "CASHED_OUT")
     }
 }

@@ -2,16 +2,31 @@ package com.pam.ledger
 
 import java.util.Collections
 import java.util.TreeMap
+import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.atomic.AtomicInteger
 
-/** Bounded, ledger-scoped sharing of repeated immutable strings; used only by recovery and its writer. */
+/**
+ * Bounded, ledger-scoped sharing of repeated immutable strings (kinds, account ids,
+ * player ids). Used by recovery, by the writer, and by reader threads that load an
+ * entry back from the journal, so it is safe for concurrent use.
+ */
 internal class EntryStrings {
-    private val values = HashMap<String, String>()
-    internal val size get() = values.size
+    private val values = ConcurrentHashMap<String, String>()
+    private val count = AtomicInteger()
+    internal val size get() = count.get()
 
     private fun shared(value: String): String {
         values[value]?.let { return it }
-        if (values.size < MAX_STRINGS && value.length <= MAX_LENGTH) values[value] = value
-        return value
+        if (value.length > MAX_LENGTH) return value
+        // Reserve a slot before inserting, so concurrent callers can never exceed the bound.
+        while (true) {
+            val n = count.get()
+            if (n >= MAX_STRINGS) return value
+            if (count.compareAndSet(n, n + 1)) break
+        }
+        val existing = values.putIfAbsent(value, value) ?: return value
+        count.decrementAndGet() // another thread inserted the same string first
+        return existing
     }
 
     fun share(entry: LedgerEntry): LedgerEntry {

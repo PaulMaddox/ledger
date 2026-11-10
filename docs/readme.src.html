@@ -670,6 +670,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <div><code>SportsbookWallet.kt</code><span>PAM API: deposits, withdrawals, bets, exactly-once settlement.</span></div>
     <div><code>Replay.kt</code><span>Balance rules, journal replay checks, checkpoint verification.</span></div>
     <div><code>Journal.kt</code><span>CRC-framed append-only file, fsync, torn-write recovery, directory lock.</span></div>
+    <div><code>EntryStore.kt</code><span>Entries read from the journal on demand and checked against their verified hash; hashed idempotency index.</span></div>
     <div><code>Merkle.kt</code><span>Incremental root, inclusion and consistency proofs and verifiers.</span></div>
     <div><code>Signing.kt</code><span>Tree heads, Ed25519 signer interface (plug in an HSM or KMS).</span></div>
     <div><code>Hashes.kt · EntryCodec.kt</code><span>Domain-separated SHA-256 and the canonical byte format.</span></div>
@@ -749,7 +750,7 @@ const ARCH = {
   submit: ["Ledger.submit()", "Ledger.kt", "Runs on the caller's thread. Hashes the request's content and offers it to the queue.", ["Returns a future that completes only after the entry is fsync'd.", "Callbacks run on a separate executor so slow client code can never stall the writer.", "A full queue for longer than the timeout yields <code>OverloadedException</code>: back-pressure, nothing written."]],
   queue: ["Bounded queue", "Ledger.kt", "An <code>ArrayBlockingQueue</code> between many callers and one writer.", ["Bounded, so overload produces fast, explicit rejections rather than unbounded memory growth.", "Shutdown is a message in the same queue, so everything queued before it still commits."]],
   writer: ["Writer thread", "Ledger.kt · processBatch", "The only code that changes ledger state. Drains up to 1,024 requests and commits them with a single fsync.", ["No locks, so no deadlocks and no lock-ordering bugs.", "Linearizable: each transaction sees all earlier ones, including those earlier in the same batch.", "Fail-stop: a failed write or fsync stops all further writes until restart."]],
-  read: ["Read side", "Ledger.kt · AppendOnlyList.kt", "Balances, entries and the idempotency index, readable by any thread without locks.", ["Updated only after fsync succeeds, so readers never see uncommitted money.", "Published in dependency order: entries, then indexes and balances, then the head.", "<code>AppendOnlyList</code> uses a volatile size to give readers a safe happens-before edge."]],
+  read: ["Read side", "Ledger.kt · EntryStore.kt", "Balances, entries and the idempotency index, readable by any thread without locks.", ["Updated only after fsync succeeds, so readers never see uncommitted money.", "Published in dependency order: entries, then indexes and balances, then the head.", "Entries stay in the journal. Memory holds each entry's file offset and verified leaf hash, plus a small cache of recent entries.", "An entry read back from disk is re-hashed and compared with that leaf hash. A mismatch stops the ledger.", "The idempotency index stores a hash of each key, confirmed against the entry's own key, so it never mistakes one key for another."]],
   journal: ["entries.journal", "Journal.kt", "Append-only file of <code>[length | CRC32C | entry bytes + chain hash]</code> records.", ["Never updated in place.", "A torn final record (power cut) is copied to a quarantine file before truncation.", "Damage anywhere else is treated as tampering and the ledger refuses to start.", "An OS file lock stops a second process appending to the same ledger."]],
   checkpoints: ["Signed tree heads", "Signing.kt", "Every N entries, and on demand, the writer signs (ledger id, size, Merkle root, chain head, time) with Ed25519.", ["Stops an attacker who rewrites history and recomputes every hash.", "Detects rollback: a checkpoint covering more entries than exist on disk.", "Key ids allow rotation; trusted keys are configured explicitly."]],
   prover: ["Merkle prover & verifier", "Merkle.kt", "Builds inclusion and consistency proofs from stored leaf hashes; the verifier is stateless.", ["Inclusion: this entry is in the tree with this signed root.", "Consistency: the tree at size m is a prefix of the tree at size n, so nothing was rewritten.", "Completed subtrees are cached forever because the ledger only grows."]],
@@ -952,8 +953,8 @@ const SCENARIOS = [
       s => {}, { stack: ["Ledger.append → future.get()"], vars: {} }),
     S(L, "val first = try { queue.take()", 4, "The writer wakes and drains a batch", "take() blocks until there is work; drainTo grabs everything else waiting, up to 1,024. Under load, batches grow and one fsync is shared by all of them.",
       s => { s.batch = s.queue.map(l => ({ label: l, verdict: "pending" })); s.queue = []; th(s, "writer", "Writer thread", "running", "processBatch(1)"); }, { stack: ["Ledger.runWriter"], vars: { "batch.size": "1" } }),
-    S(L, "val committedSeq = idempotency[req.idempotencyKey]", 1, "Already committed?", "The idempotency index is checked first. This key is new, so processing continues.",
-      s => {}, { stack: ["Ledger.processBatch", "Ledger.runWriter"], vars: { key: '"bet:B-8812:place"', committedSeq: "null" } }),
+    S(L, "val existing = committed(req.idempotencyKey, cmd.keyHash)", 1, "Already committed?", "The idempotency index is checked first. This key is new, so processing continues.",
+      s => {}, { stack: ["Ledger.processBatch", "Ledger.runWriter"], vars: { key: '"bet:B-8812:place"', existing: "null" } }),
     S(R, "val newBalance = try {", 9, "Accounting.stage: check the balances", "The new balance is computed with Math.addExact against the overlay (committed state plus anything earlier in this batch). Player accounts may not go negative. 5000 − 1000 = 4000, so it passes.",
       s => {}, { stack: ["Accounting.stage", "Ledger.processBatch"], vars: { "cash.balance": "5000", "cash.newBalance": "4000 ✓ ≥ 0", "escrow.newBalance": "1000" } }),
     S(L, "timestamp = maxOf(timestamp, nowMicros())", 12, "Assign a place in history", "The writer assigns the sequence number and a timestamp that never goes backwards, then seals the entry. The previous chain hash is embedded inside the entry itself.",
@@ -965,7 +966,7 @@ const SCENARIOS = [
       s => { writeBatch(s); log(s, "writer: wrote 1 record"); }, { stack: ["Journal.appendBatch", "Ledger.processBatch"], vars: { bytes: "≈ 230" } }),
     S(J, "channel.force(true)", 1, "fsync", "force(true) flushes data and file metadata. After this returns the entry survives a power cut. One fsync covers the whole batch: that is group commit.",
       s => { fsyncBatch(s); log(s, "writer: fsync ok"); }, { stack: ["Journal.appendBatch", "Ledger.processBatch"], vars: {} }),
-    S(L, "entries.add(s.sealed)", 13, "Publish to readers, in order", "Entries first, then the idempotency index and balances, then the head. A reader that sees a balance can always resolve the entry behind it. Nothing was visible before fsync.",
+    S(L, "entries.stage(offset, s.sealed.leafHash)", 13, "Publish to readers, in order", "Entries first, then the idempotency index and balances, then the head. A reader that sees a balance can always resolve the entry behind it. Nothing was visible before fsync.",
       s => { publish(s); }, { stack: ["Ledger.processBatch"], varsFn: s => ({ "head.size": String(s.head.size), "head.root": short(s.head.root) }) }),
     S(L, "val receipt = s.sealed.receipt(replayed = false)", 4, "Complete the future", "Only now does the phone get its receipt: sequence number, leaf hash and chain hash. With the leaf hash it can later ask for an inclusion proof against any signed checkpoint.",
       s => { s.staged.forEach(e => batchMark(s, e.key, "ok")); th(s, "phone", "Alice · phone", "ok", `receipt seq #${s.staged[0].seq}`); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, `phone: receipt #${s.staged[0].seq}`); s.staged = []; s.batch = []; },
@@ -1020,10 +1021,10 @@ const SCENARIOS = [
       s => { batchMark(s, "settle B7 · WON", "conflict"); }, { stack: ["Ledger.processBatch"], vars: { "sibling.fingerprint": "cash-out", "cmd.fingerprint": "won ≠" } }),
     S(J, "channel.force(true)", 1, "fsync the cash-out", "",
       s => { writeBatch(s); fsyncBatch(s); }, { stack: ["Journal.appendBatch"], vars: {} }),
-    S(L, "entries.add(s.sealed)", 13, "Publish and answer both", "The phone gets its receipt. The feed gets the conflict, and the key it collided with is now visible in the ledger, which is exactly what the regulatory STORM test asserts.",
+    S(L, "entries.stage(offset, s.sealed.leafHash)", 13, "Publish and answer both", "The phone gets its receipt. The feed gets the conflict, and the key it collided with is now visible in the ledger, which is exactly what the regulatory STORM test asserts.",
       s => { publish(s); batchMark(s, "settle B7 · CASH_OUT", "ok"); th(s, "phone", "Bob · phone", "ok", "cashed out €6.00"); th(s, "feed", "Settlement feed", "rejected", "IdempotencyConflict"); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, "feed: IdempotencyConflictException(bet:B7:settle)"); s.staged = []; s.batch = []; }, { stack: ["Ledger.processBatch"], vars: {} }),
-    S(L, "val committedSeq = idempotency[req.idempotencyKey]", 9, "Later: the feed redelivers WON", "Now the key is in the committed index. The fingerprint still differs, so it is refused again. The bet can never be paid twice or paid both ways.",
-      s => { th(s, "feed", "Settlement feed", "rejected", "IdempotencyConflict (redelivery)"); log(s, "feed: redelivery refused"); }, { stack: ["Ledger.processBatch"], vars: { committedSeq: "2", "same fingerprint?": "no" } }),
+    S(L, "val existing = committed(req.idempotencyKey, cmd.keyHash)", 9, "Later: the feed redelivers WON", "Now the key is in the committed index. The fingerprint still differs, so it is refused again. The bet can never be paid twice or paid both ways.",
+      s => { th(s, "feed", "Settlement feed", "rejected", "IdempotencyConflict (redelivery)"); log(s, "feed: redelivery refused"); }, { stack: ["Ledger.processBatch"], vars: { existing: "entry #2", "same fingerprint?": "no" } }),
   ] },
 
 { id: "replay", name: "Webhook redelivered",
@@ -1036,8 +1037,8 @@ const SCENARIOS = [
       s => { s.queue.push("deposit:psp-881"); th(s, "psp", "PSP webhook", "waiting", "future.get()"); }, { stack: ["Ledger.submit"], vars: {} }),
     S(L, "val first = try { queue.take()", 4, "Writer picks it up", "",
       s => { s.batch = s.queue.map(l => ({ label: l, verdict: "pending" })); s.queue = []; th(s, "writer", "Writer thread", "running", "processBatch(1)"); }, { stack: ["Ledger.runWriter"], vars: {} }),
-    S(L, "val committedSeq = idempotency[req.idempotencyKey]", 6, "Found, with a matching fingerprint", "This is an honest retry. The writer completes the future with the original receipt, marked replayed = true. Nothing is written, nothing is fsync'd, no money moves.",
-      s => { batchMark(s, "deposit:psp-881", "replayed"); th(s, "psp", "PSP webhook", "ok", "receipt #0 (replayed)"); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, "psp: replayed receipt #0, balance unchanged"); s.batch = []; }, { stack: ["Ledger.processBatch"], vars: { committedSeq: "0", "fingerprint match": "yes", replayed: "true" } }),
+    S(L, "val existing = committed(req.idempotencyKey, cmd.keyHash)", 6, "Found, with a matching fingerprint", "This is an honest retry. The writer completes the future with the original receipt, marked replayed = true. Nothing is written, nothing is fsync'd, no money moves.",
+      s => { batchMark(s, "deposit:psp-881", "replayed"); th(s, "psp", "PSP webhook", "ok", "receipt #0 (replayed)"); th(s, "writer", "Writer thread", "parked", "queue.take()"); log(s, "psp: replayed receipt #0, balance unchanged"); s.batch = []; }, { stack: ["Ledger.processBatch"], vars: { existing: "entry #0", "fingerprint match": "yes", replayed: "true" } }),
   ] },
 
 { id: "crash", name: "Power cut",
@@ -1048,7 +1049,7 @@ const SCENARIOS = [
       s => { writeBatch(s); s.journal[s.journal.length - 1].st = "torn"; }, { stack: ["Journal.appendBatch", "Ledger.processBatch"], vars: { "frame.len": "230", "bytes on disk": "≈ 100" } }),
     S(J, "channel.force(true)", 1, "Power fails before fsync returns", "The phone never received a receipt, because receipts are only issued after fsync. From its point of view the outcome is unknown.",
       s => { s.banner = ["bad", "⚡ Power lost. Process killed."]; th(s, "phone", "Dan · phone", "rejected", "connection lost"); th(s, "writer", "Writer thread", "dead", "—"); s.overlay = {}; s.batch = []; s.tip = null; s.staged = []; }, { stack: ["Journal.appendBatch"], vars: {} }),
-    S(L, "fun open(config: LedgerConfig)", 1, "Restart: Ledger.open", "Memory is gone. Everything is rebuilt from the journal, and every byte is verified on the way in.",
+    S(L, "fun open(config: LedgerConfig, listener: RecoveryListener? = null)", 1, "Restart: Ledger.open", "Memory is gone. Everything is rebuilt from the journal, and every byte is verified on the way in.",
       s => { s.banner = ["", "Restarting…"]; th(s, "writer", "Writer thread", "starting", "recovery"); s.accounts = {}; }, { stack: ["Ledger.open"], vars: {} }),
     S(J, "if (end > size) return ScanResult", 1, "Scan finds a record running past end of file", "Only the final record can be torn. A bad record anywhere else would be corruption, and the ledger would refuse to start.",
       s => {}, { stack: ["Journal.scan", "Journal.openForAppend", "Ledger.open"], vars: { "end": "pos + 8 + 230", "size": "pos + 100", verdict: "torn tail" } }),
@@ -1073,7 +1074,7 @@ const SCENARIOS = [
   steps: [
     S(R, "if (entry.prevChainHash != chain)", 1, "The forged file", "Entry #1 now says −200. The attacker recomputed #1's chain hash and every one after it, then fixed every CRC.",
       s => { const old = s.journal; let prev = GENESIS; s.journal = old.map((e, i) => { const postings = i === 1 ? [[A.cash("eve"), -200], [A.psp, 200]] : e.postings; const leaf = leafH(JSON.stringify([e.seq, e.kind, e.key, postings])); const chain = chainH(prev, leaf); prev = chain; return { ...e, postings, leaf, prev: e.seq ? old[e.seq - 1].chain : GENESIS, chain, st: "forged" }; }); let p = GENESIS; s.journal.forEach(e => { e.prev = p; p = e.chain; }); th(s, "attacker", "Insider", "ok", "chain recomputed"); log(s, "attacker: rewrote entry #1 and rehashed #1..#2"); }, { stack: ["(offline edit)"], vars: { "entry#1.amount": "−2000 → −200" } }),
-    S(L, "fun open(config: LedgerConfig)", 1, "Restart", "",
+    S(L, "fun open(config: LedgerConfig, listener: RecoveryListener? = null)", 1, "Restart", "",
       s => { th(s, "writer", "Writer thread", "starting", "recovery"); }, { stack: ["Ledger.open"], vars: {} }),
     S(R, "if (entry.prevChainHash != chain)", 5, "Replay: every link checks out", "Because everything was recomputed, the chain checks pass. A hash chain alone cannot stop someone who can rewrite all of it.",
       s => { s.accounts = {}; s.journal.forEach(e => apply(s.accounts, e.postings)); }, { stack: ["Replayer.apply", "Ledger.open"], vars: { "links": "3 / 3 ✓" } }),

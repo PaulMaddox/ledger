@@ -38,6 +38,9 @@ internal class Journal private constructor(
     private val channel: FileChannel,
 ) : AutoCloseable {
 
+    // Where the next record's header will start. Only the single appending thread touches it.
+    private var end = channel.position()
+
     /** Set once a write fails; afterwards the journal refuses everything (fail-stop). */
     @Volatile private var poisoned: Throwable? = null
 
@@ -46,8 +49,11 @@ internal class Journal private constructor(
      *
      * Group commit is the trick that makes a single writer fast: fsync costs
      * roughly the same for 1 record or 1,000, so we pay it once per batch.
+     *
+     * Returns the byte offset at which the first record's header starts. Each
+     * following record starts [HEADER] plus the previous record's length later.
      */
-    fun appendBatch(records: List<ByteArray>) {
+    fun appendBatch(records: List<ByteArray>): Long {
         poisoned?.let { throw LedgerFailedException(it) }
         try {
             val total = records.sumOf { HEADER + it.size }
@@ -64,6 +70,9 @@ internal class Journal private constructor(
             // force(true) also flushes file METADATA (the new length). force(false)
             // can leave the data on disk but the file length stale on some filesystems.
             channel.force(true)
+            val start = end
+            end += total
+            return start
         } catch (t: Throwable) {
             poisoned = t
             throw t
@@ -83,7 +92,11 @@ internal class Journal private constructor(
          * Open (creating if needed) for appending. Every intact record is fed to
          * [onRecord] in order; a torn tail is quarantined then truncated.
          */
-        fun openForAppend(path: Path, onRecord: (ByteArray) -> Unit): Pair<Journal, ScanResult> {
+        fun openForAppend(path: Path, onRecord: (ByteArray) -> Unit): Pair<Journal, ScanResult> =
+            openForAppendAt(path) { _, record -> onRecord(record) }
+
+        /** As [openForAppend], also telling [onRecord] the byte offset at which each record's header starts. */
+        fun openForAppendAt(path: Path, onRecord: (Long, ByteArray) -> Unit): Pair<Journal, ScanResult> {
             val ch = FileChannel.open(path, CREATE, READ, WRITE)
             try {
                 val scan = scan(ch, onRecord)
@@ -111,10 +124,10 @@ internal class Journal private constructor(
          */
         fun scanReadOnly(path: Path, from: Long, onRecord: (ByteArray) -> Unit): ScanResult {
             if (!Files.exists(path)) return ScanResult(0, from, 0)
-            return FileChannel.open(path, READ).use { scan(it, onRecord, from) }
+            return FileChannel.open(path, READ).use { ch -> scan(ch, { _, record -> onRecord(record) }, from) }
         }
 
-        private fun scan(ch: FileChannel, onRecord: (ByteArray) -> Unit, start: Long = 0L): ScanResult {
+        private fun scan(ch: FileChannel, onRecord: (Long, ByteArray) -> Unit, start: Long = 0L): ScanResult {
             val size = ch.size()
             var pos = start
             var count = 0
@@ -149,7 +162,7 @@ internal class Journal private constructor(
                     if (end == size) return ScanResult(count, pos, remaining)
                     throw TamperDetectedException("journal corrupt at byte $pos: CRC mismatch in a non-final record")
                 }
-                onRecord(payload.array())
+                onRecord(pos, payload.array())
                 count++
                 pos = end
             }

@@ -46,6 +46,24 @@ internal object Accounting {
 }
 
 /**
+ * Told about each entry as recovery verifies it, in order, before the ledger opens.
+ * Lets a read model build its indexes in the same pass as verification instead of
+ * reading the whole journal a second time. It only ever sees entries that passed
+ * every check; if a later entry fails, the ledger does not open and whatever the
+ * listener built must be discarded with it.
+ */
+fun interface RecoveryListener {
+    fun recovered(entry: SealedEntry)
+}
+
+/**
+ * Where [Ledger.open] has recovery put what the running ledger keeps: an offset and
+ * leaf hash per entry in [store] and a hash of each idempotency key in [keys],
+ * instead of the entries and key strings themselves.
+ */
+internal class RecoveryIndex(val store: EntryStore, val keys: KeyIndex, val listener: RecoveryListener?)
+
+/**
  * Rebuilds ledger state from journal records, checking EVERYTHING on the way.
  *
  * Used in two places:
@@ -61,9 +79,10 @@ internal class Replayer(
     ledgerId: String,
     private val policy: AccountPolicy,
     private val retainEntries: Boolean = true,
+    private val index: RecoveryIndex? = null,
+    val entryStrings: EntryStrings = EntryStrings(),
 ) {
     val entries = AppendOnlyList<SealedEntry>()
-    val entryStrings = EntryStrings()
     // Offline audits need historical hashes, not a second copy of every decoded entry and its bytes.
     private val leafHashes = AppendOnlyList<Digest>()
     private val chainHashes = AppendOnlyList<Digest>()
@@ -79,7 +98,8 @@ internal class Replayer(
     var size: Long = 0
         private set
 
-    fun apply(record: ByteArray) {
+    /** [offset] is where the record's header starts in the journal; only [RecoveryIndex] recovery needs it. */
+    fun apply(record: ByteArray, offset: Long = -1) {
         val seq = size
         fun tamper(msg: String): Nothing = throw TamperDetectedException("entry #$seq: $msg")
 
@@ -95,14 +115,20 @@ internal class Replayer(
         // Decode-then-re-encode must give back the identical bytes. Otherwise two
         // byte strings would map to one entry, and the hash would not pin it down.
         if (!EntryCodec.encode(decoded).contentEquals(body)) tamper("non-canonical encoding")
-        val entry = if (retainEntries) entryStrings.share(decoded) else decoded
+        val entry = if (retainEntries || index != null) entryStrings.share(decoded) else decoded
         if (entry.seq != seq) tamper("sequence gap: found seq ${entry.seq}")
         if (entry.prevChainHash != chain) tamper("broken hash chain (prev hash does not match entry #${seq - 1})")
         if (entry.timestampMicros < lastTimestamp) tamper("timestamp went backwards")
 
         val sealed = SealedEntry.of(entry, body)
         if (sealed.chainHash != storedChain) tamper("stored chain hash does not match recomputed hash")
-        if (idempotency.containsKey(entry.idempotencyKey)) tamper("duplicate idempotency key '${entry.idempotencyKey}'")
+        // With an index, key strings are not kept: a matching hash names candidate entries, and
+        // only an entry whose full key is equal counts. Those entries are read back from the journal.
+        val keyHash = if (index != null) KeyIndex.hashOf(entry.idempotencyKey) else 0L
+        val duplicate = if (index != null) {
+            index.keys.anyCandidate(keyHash) { index.store[it].entry.idempotencyKey == entry.idempotencyKey }
+        } else idempotency.containsKey(entry.idempotencyKey)
+        if (duplicate) tamper("duplicate idempotency key '${entry.idempotencyKey}'")
 
         val updates = try {
             Accounting.stage(entry.postings, seq, policy, emptyMap()) { accounts[it] }
@@ -111,8 +137,16 @@ internal class Replayer(
         }
 
         accounts.putAll(updates)
-        idempotency[entry.idempotencyKey] = seq
-        if (retainEntries) {
+        if (index != null) {
+            index.store.stage(offset, sealed.leafHash)
+            index.store.remember(sealed)
+            index.store.publish()
+            index.keys.put(keyHash, seq)
+            index.listener?.recovered(sealed)
+        } else idempotency[entry.idempotencyKey] = seq
+        if (index != null) {
+            // Nothing else to retain: the store above is the ledger's memory of this entry.
+        } else if (retainEntries) {
             entries.add(sealed)
             entries.publish()
         } else {
@@ -129,11 +163,17 @@ internal class Replayer(
 
     fun head() = LedgerHead(size, chain, frontier.root(), lastTimestamp)
 
-    fun leafHash(seq: Long): Digest = if (retainEntries) entries[Math.toIntExact(seq)].leafHash
-        else leafHashes[Math.toIntExact(seq)]
+    fun leafHash(seq: Long): Digest = when {
+        index != null -> index.store.leafHash(seq)
+        retainEntries -> entries[Math.toIntExact(seq)].leafHash
+        else -> leafHashes[Math.toIntExact(seq)]
+    }
 
-    fun chainHash(seq: Long): Digest = if (retainEntries) entries[Math.toIntExact(seq)].chainHash
-        else chainHashes[Math.toIntExact(seq)]
+    fun chainHash(seq: Long): Digest = when {
+        index != null -> index.store[seq].chainHash // read back from the journal; needed once per checkpoint
+        retainEntries -> entries[Math.toIntExact(seq)].chainHash
+        else -> chainHashes[Math.toIntExact(seq)]
+    }
 }
 
 /** Checks a signed checkpoint against the replayed journal. */
