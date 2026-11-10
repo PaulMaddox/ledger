@@ -1,9 +1,11 @@
 package com.pam.ledger
 
+import java.io.IOException
 import java.nio.ByteBuffer
+import java.util.concurrent.CompletableFuture
+import java.util.concurrent.CompletionException
 import java.util.concurrent.Semaphore
 import java.util.concurrent.TimeUnit
-import java.util.concurrent.atomic.AtomicLongArray
 import java.util.concurrent.atomic.AtomicReference
 
 /*
@@ -27,43 +29,51 @@ import java.util.concurrent.atomic.AtomicReference
  *
  *  THE WRITER NEVER TOUCHES THE DISK TO ADD A KEY. Adding is a write to the
  *  in-memory table. The background thread changes only this derived index: it is
- *  not a second ledger writer and never sees entries, balances or the head.
+ *  not a second ledger writer. It reads entries only to confirm equal-hash keys.
  *
- *  THE BLOOM FILTER keeps the writer off the disk when LOOKING, too. Almost every
- *  transaction has a new key, and proving a key absent would otherwise mean
- *  searching every run. The filter is a bit array in memory, about ten bits per
- *  key, with two possible answers:
+ *  EACH RUN HAS A FILTER, written beside it in one pass. A fixed budget shared
+ *  by every index holds the smallest/newest filters in memory; other filters
+ *  need one authenticated page per probe. Callers do those reads concurrently.
  *
- *    "definitely not present"   -> answered from memory, no disk read
- *    "possibly present"         -> search the tables and runs for the real answer
- *
- *  It never says "not present" for a key that is present, so it cannot cause a
- *  duplicate commit. A false "possibly" (about 1 in 100) costs one search.
+ *  THE WRITER uses the caller's flush watermark, not disk filters. Current
+ *  tables and the last eight flushed tables cover newer commits exactly. An
+ *  exceptionally stale caller falls back to a full lookup, never a false absence.
  */
 
 /**
  * @param flushSize pairs held in the active in-memory table before it is written out as a run
  * @param bloomBitsPerKey bits of filter per key at capacity; 0 disables the filter (every lookup searches)
+ * @param sameKey confirms full keys for equal-hash pairs during flush/merge, including recovery
  */
 internal class HashIndex(
     private val storage: DerivedStorage,
     private val name: String,
     private val flushSize: Int,
     private val bloomBitsPerKey: Int,
+    private val sameKey: ((Long, Long) -> Boolean)? = null,
+    private val retainedGenerations: Int = KEPT_GENERATIONS,
 ) : AutoCloseable {
 
     /** One consistent view of where every pair is. Immutable; replaced by compare-and-set. */
-    private class State(val active: KeyIndex, val frozen: List<KeyIndex>, val runs: List<Run>)
+    private class Table(val generation: Long, val keys: KeyIndex = KeyIndex())
+    private data class State(
+        val active: Table,
+        val frozen: List<Table> = emptyList(),
+        val runs: List<Run> = emptyList(),
+        val kept: List<Table> = emptyList(),
+        val flushed: Long = 0,
+        val discardedThrough: Long = 0,
+    )
 
-    private val state = AtomicReference(State(KeyIndex(), emptyList(), emptyList()))
+    private val state = AtomicReference(State(Table(1)))
     private var activeCount = 0 // writer only
     /** Pairs added so far. Written by the single writer, read by maintenance. */
     @Volatile var count = 0L
         private set
 
-    @Volatile private var bloom: Bloom? = if (bloomBitsPerKey > 0) Bloom.forKeys(flushSize.toLong() * 2, bloomBitsPerKey) else null
-    // While a larger filter is being filled, the writer adds new keys to both.
-    @Volatile private var pendingBloom: Bloom? = null
+    @Volatile private var compact: CompletableFuture<Unit>? = null
+    /** Run searches after the filter accepted a hash; internal measurements only. */
+    @Volatile internal var onRunSearch: (() -> Unit)? = null
 
     /**
      * True only while recovery is the writer: it may wait briefly for maintenance to catch
@@ -96,35 +106,99 @@ internal class HashIndex(
     /** Single writer only. Duplicate hashes are kept: each is a separate candidate. */
     fun put(hash: Long, seq: Long) {
         val current = state.get()
-        current.active.put(hash, seq)
-        // Table first, filters second, and the pending filter read before the live one: see rebuildBloom.
-        val pending = pendingBloom
-        val live = bloom
-        pending?.add(hash)
-        live?.add(hash)
+        current.active.keys.put(hash, seq)
         count++
         if (++activeCount >= flushSize) {
             // Set the full table aside. Only the list it is filed under changes; its contents stay readable throughout.
-            while (true) {
-                val s = state.get()
-                if (state.compareAndSet(s, State(KeyIndex(), s.frozen + s.active, s.runs))) break
-            }
-            activeCount = 0
-            work.release()
+            freeze()
         }
         if (mayWait) {
-            while (failure == null && !closed && (state.get().frozen.size > MAX_BACKLOG || bloom?.let { count > it.capacity * 4 } == true)) {
+            while (failure == null && !closed && state.get().frozen.size > MAX_BACKLOG) {
                 work.release()
                 Thread.sleep(1)
             }
         }
-        failure?.let { throw LedgerFailedException(it) }
+        failure?.let { throw it }
     }
 
     // ----------------------------------------------------------------- readers
 
-    /** False only if no pair with [hash] exists. Answered from memory. Any thread. */
-    fun mightContain(hash: Long): Boolean = bloom?.mightContain(hash) ?: true
+    private fun freeze() {
+        while (true) {
+            val s = state.get()
+            if (state.compareAndSet(s, s.copy(active = Table(s.active.generation + 1), frozen = s.frozen + s.active))) break
+        }
+        activeCount = 0
+        work.release()
+    }
+
+    /** False only if no pair with [hash] exists. Disk filters are probed on this caller, never the writer. */
+    fun mightContain(hash: Long): Boolean = reading { s ->
+        inTables(s, hash) { true } || matchingRuns(s, hash, Long.MIN_VALUE).isNotEmpty()
+    }
+
+    /** Memory-only candidates, for recovery and the writer's exact post-watermark checks. */
+    fun anyInMemory(hash: Long, visit: (Long) -> Boolean): Boolean = inTables(state.get(), hash, visit)
+
+    private fun inTables(s: State, hash: Long, visit: (Long) -> Boolean): Boolean =
+        s.active.keys.anyCandidate(hash, visit) || s.frozen.any { it.keys.anyCandidate(hash, visit) }
+
+    /**
+     * One snapshot covers every older run. A later commit is in the current tables
+     * or a kept flush generation. Merges cannot erase that coverage: kept tables
+     * are independent of run layout. Publication replaces tables and runs atomically.
+     */
+    fun prefetch(hash: Long, visit: (Long) -> Boolean): Long = reading { s ->
+        search(s, hash, Long.MIN_VALUE, visit)
+        s.flushed
+    }
+
+    /** Writer only. A stale watermark is safe but slower; it must never be treated as absence. */
+    fun anyCandidateAfter(hash: Long, watermark: Long, visit: (Long) -> Boolean): Boolean {
+        val s = state.get()
+        if (watermark < s.discardedThrough) return anyCandidate(hash, visit)
+        return inTables(s, hash, visit) ||
+            s.kept.any { it.generation > watermark && it.keys.anyCandidate(hash, visit) }
+    }
+
+    private inline fun <T> reading(read: (State) -> T): T {
+        while (true) {
+            if (closed) throw LedgerClosedException()
+            failure?.let { throw it }
+            try {
+                return read(state.get())
+            } catch (e: RetiredFileException) {
+                if (closed) throw LedgerClosedException()
+            } catch (e: IOException) {
+                throw IndexUnreadableException(name, e)
+            }
+        }
+    }
+
+    private fun matchingRuns(s: State, hash: Long, minSeq: Long): List<Run> {
+        val runs = s.runs.filter { it.maxSeq >= minSeq }
+        val disk = runs.filter { it.filter?.resident == false }
+        // One virtual thread per disk probe overlaps positional reads without sharing a writer channel.
+        if (disk.size <= 1) return runs.filter { it.filter?.mightContain(hash) != false }
+        val probes = disk.associateWith { run ->
+            CompletableFuture.supplyAsync({ run.filter!!.mightContain(hash) }, storage.filterReads)
+        }
+        try {
+            CompletableFuture.allOf(*probes.values.toTypedArray()).join()
+            return runs.filter { probes[it]?.join() ?: (it.filter?.mightContain(hash) != false) }
+        } catch (e: CompletionException) {
+            throw e.cause ?: e
+        }
+    }
+
+    private fun search(s: State, hash: Long, minSeq: Long, visit: (Long) -> Boolean): Boolean {
+        if (inTables(s, hash, visit)) return true
+        for (run in matchingRuns(s, hash, minSeq)) {
+            onRunSearch?.invoke()
+            if (run.anyCandidate(hash, visit)) return true
+        }
+        return false
+    }
 
     /**
      * Visit candidate sequence numbers for [hash] until [visit] returns true; returns whether it did.
@@ -139,30 +213,16 @@ internal class HashIndex(
      * before [minSeq] are skipped without being read, so a search for something recent
      * touches only recent files. [visit] may still be offered smaller numbers and must check.
      */
-    fun anyCandidate(hash: Long, minSeq: Long, visit: (Long) -> Boolean): Boolean {
-        if (!mightContain(hash)) return false
-        while (true) {
-            val s = state.get()
-            try {
-                if (s.active.anyCandidate(hash, visit)) return true
-                for (table in s.frozen) if (table.anyCandidate(hash, visit)) return true
-                for (run in s.runs) if (run.maxSeq >= minSeq && run.anyCandidate(hash, visit)) return true
-                return false
-            } catch (e: RetiredFileException) {
-                // After close() the runs are deleted and no state replaces them: looking again would spin forever.
-                if (closed) throw LedgerClosedException()
-                continue // the pairs are all still there, in the state that replaced this one
-            }
-        }
-    }
+    fun anyCandidate(hash: Long, minSeq: Long, visit: (Long) -> Boolean): Boolean =
+        reading { search(it, hash, minSeq, visit) }
 
     /** Visit every pair. May visit a pair more than once if a merge completes meanwhile. Any thread. */
     fun forEach(visit: (Long, Long) -> Unit) {
         while (true) {
             val s = state.get()
             try {
-                s.active.forEach(visit)
-                s.frozen.forEach { it.forEach(visit) }
+                s.active.keys.forEach(visit)
+                s.frozen.forEach { it.keys.forEach(visit) }
                 s.runs.forEach { it.forEach(visit) }
                 return
             } catch (e: RetiredFileException) {
@@ -175,59 +235,86 @@ internal class HashIndex(
     /** Runs on disk right now; for tests and diagnostics. */
     val runCount: Int get() = state.get().runs.size
 
+    /** Recovery writer only, after its last put. Full compaction verifies all equal-hash groups before open returns. */
+    fun finishRecovery() {
+        if (closed) throw LedgerClosedException()
+        failure?.let { throw it }
+        if (activeCount > 0) freeze()
+        val done = CompletableFuture<Unit>()
+        compact = done
+        if (closed) done.completeExceptionally(LedgerClosedException())
+        failure?.let { done.completeExceptionally(it) }
+        work.release()
+        try {
+            done.join()
+        } catch (e: CompletionException) {
+            throw e.cause ?: e
+        }
+        failure?.let { throw it }
+    }
+
     // ------------------------------------------------------------- maintenance
 
     private fun maintain() {
         try {
             // Flushing comes first, but never every time: under a sustained load the frozen list may
-            // never empty, and merges and filter growth that waited for it would wait for ever, leaving
-            // runs to pile up and the filter to fill. When both kinds of work are waiting they alternate.
+            // never empty. When both kinds of work are waiting they alternate.
             var flushedLast = false
             while (!closed) {
+                // Observing a compaction request must precede the state snapshot:
+                // that request publishes the recovery writer's final freeze.
+                val request = compact
                 val s = state.get()
-                val bloomNow = bloom
                 val inputs = mergeable(s.runs)
-                val growFilter = bloomNow != null && count > bloomNow.capacity
-                val other = inputs != null || growFilter
                 when {
-                    s.frozen.isNotEmpty() && !(flushedLast && other) -> { flush(s.frozen.first()); flushedLast = true }
+                    s.frozen.isNotEmpty() && !(flushedLast && inputs != null) -> { flush(s.frozen.first()); flushedLast = true }
                     inputs != null -> { merge(inputs); flushedLast = false }
-                    growFilter -> { rebuildBloom(); flushedLast = false }
+                    request != null && s.runs.size > 1 -> { merge(s.runs); flushedLast = false }
+                    request != null -> { compact = null; request.complete(Unit) }
                     else -> work.tryAcquire(100, TimeUnit.MILLISECONDS)
                 }
             }
         } catch (t: Throwable) {
             if (closed) return // close() retired a file under it; the files are about to be deleted anyway
             failure = t
-            storage.failed(t) // the ledger fail-stops: an index that cannot be maintained cannot be relied on
+            try {
+                storage.failed(t) // an index that cannot be maintained cannot be relied on
+            } finally {
+                compact?.completeExceptionally(t)
+            }
         }
     }
 
     /** Write one frozen table out as a sorted run, then swap it for the run in a single step. */
-    private fun flush(table: KeyIndex) {
+    private fun flush(table: Table) {
         var n = 0
-        table.forEach { _, _ -> n++ }
+        table.keys.forEach { _, _ -> n++ }
         val hashes = LongArray(n)
         val seqs = LongArray(n)
         var i = 0
-        table.forEach { hash, seq -> hashes[i] = hash; seqs[i] = seq; i++ }
+        table.keys.forEach { hash, seq -> hashes[i] = hash; seqs[i] = seq; i++ }
         sortPairs(hashes, seqs, 0, n - 1)
-        val file = storage.create("$name-run")
-        val writer = RunWriter(file)
+        val writer = RunWriter(n.toLong())
         for (j in 0 until n) {
-            if (closed) { file.delete(); return } // abandoned between records, never mid-write; see close()
+            if (closed) { writer.abandon(); return } // abandoned between records, never mid-write; see close()
             writer.add(hashes[j], seqs[j])
         }
         val run = writer.finish(seqs.maxOrNull() ?: -1)
         while (true) {
             val s = state.get()
-            if (state.compareAndSet(s, State(s.active, s.frozen - table, s.runs + run))) break
+            val retained = s.kept + table
+            val dropped = retained.dropLast(retainedGenerations)
+            if (state.compareAndSet(s, s.copy(
+                    frozen = s.frozen - table, runs = s.runs + run,
+                    kept = retained.takeLast(retainedGenerations), flushed = table.generation,
+                    discardedThrough = dropped.lastOrNull()?.generation ?: s.discardedThrough,
+                ))) break
         }
     }
 
     /** Runs of similar size are merged once there are [FAN_IN] of them, so the number of runs grows only with log(pairs). */
     private fun mergeable(runs: List<Run>): List<Run>? =
-        runs.groupBy { tier(it.records) }.values.firstOrNull { it.size >= FAN_IN }
+        runs.groupBy { tier(it.records) }.values.firstOrNull { it.size >= FAN_IN }?.take(FAN_IN)
 
     private fun tier(records: Long): Int {
         var t = 0
@@ -237,11 +324,10 @@ internal class HashIndex(
     }
 
     private fun merge(inputs: List<Run>) {
-        val file = storage.create("$name-run")
-        val writer = RunWriter(file)
+        val writer = RunWriter(inputs.sumOf { it.records })
         val cursors = inputs.map { it.cursor() }
         while (true) {
-            if (closed) { file.delete(); return } // as in flush
+            if (closed) { writer.abandon(); return } // as in flush
             var least: Run.Cursor? = null
             for (c in cursors) if (c.valid && (least == null || c.before(least))) least = c
             if (least == null) break
@@ -251,27 +337,11 @@ internal class HashIndex(
         val merged = writer.finish(inputs.maxOf { it.maxSeq })
         while (true) {
             val s = state.get()
-            if (state.compareAndSet(s, State(s.active, s.frozen, s.runs - inputs.toSet() + merged))) break
+            if (state.compareAndSet(s, s.copy(runs = s.runs - inputs.toSet() + merged))) break
         }
         // Only now, with no state naming them, are the inputs removed. A reader still inside one starts again.
-        inputs.forEach { it.file.delete() }
-    }
-
-    /**
-     * Replace the filter with one twice as large, without the writer waiting and without ever
-     * answering "not present" for a key that is present.
-     *
-     * The writer adds each key to its table FIRST, then to the pending filter if it sees one,
-     * then to the live filter. So for any key: either the writer saw the pending filter and
-     * added the key to it, or the key was already in a table when the pending filter was
-     * published, and the copy below finds it there.
-     */
-    private fun rebuildBloom() {
-        val larger = Bloom.forKeys(count * 2, bloomBitsPerKey)
-        pendingBloom = larger
-        forEach { hash, _ -> larger.add(hash) }
-        bloom = larger
-        pendingBloom = null
+        storage.filters.replace(inputs.mapNotNull { it.filter })
+        inputs.forEach { it.delete() }
     }
 
     override fun close() {
@@ -285,13 +355,18 @@ internal class HashIndex(
         maintenance.join(MAINTENANCE_JOIN_MILLIS)
         // Deleting a file marks it retired first, so a write that is somehow still running ends
         // without being mistaken for a disk failure.
-        state.get().runs.forEach { runCatching { it.file.delete() } }
+        compact?.completeExceptionally(LedgerClosedException())
+        val runs = state.get().runs
+        storage.filters.replace(runs.mapNotNull { it.filter })
+        runs.forEach { runCatching { it.delete() } }
     }
 
     // ------------------------------------------------------------------- parts
 
     /** A sorted, immutable file of (hash, sequence) pairs: 16 bytes each, ordered by unsigned hash, then sequence. */
-    private class Run(val file: PagedFile, val records: Long, val maxSeq: Long) {
+    private class Run(val file: PagedFile, val records: Long, val maxSeq: Long, val filter: RunFilter?) {
+
+        fun delete() { file.delete(); filter?.file?.delete() }
 
         private fun hashAt(index: Long): Long = ByteBuffer.wrap(file.page(index / PER_PAGE), (index % PER_PAGE).toInt() * PAIR, 8).long
         private fun seqAt(index: Long): Long = ByteBuffer.wrap(file.page(index / PER_PAGE), (index % PER_PAGE).toInt() * PAIR + 8, 8).long
@@ -348,11 +423,30 @@ internal class HashIndex(
     }
 
     /** Fills pages in order and hands each to the file once, when full: the pages of a run are write-once. */
-    private class RunWriter(private val file: PagedFile) {
+    private inner class RunWriter(expectedRecords: Long) {
+        private val file = storage.create("$name-run")
+        private val filterFile = if (bloomBitsPerKey > 0) storage.create("$name-filter") else null
+        private val filter = filterFile?.let { RunFilter.Writer(it, expectedRecords, bloomBitsPerKey) }
         private var page = ByteBuffer.allocate(PAGE_SIZE)
         private var records = 0L
+        private var previousHash = 0L
+        private var equalFrom = 0L
 
         fun add(hash: Long, seq: Long) {
+            if (records == 0L || hash != previousHash) equalFrom = records
+            else if (sameKey != null) {
+                // A hash match alone is not a duplicate. Compare the whole collision
+                // group, not just adjacent keys: different keys can share a hash.
+                for (i in equalFrom until records) {
+                    val bytes = if (i / PER_PAGE == records / PER_PAGE) page.array() else file.page(i / PER_PAGE)
+                    val other = ByteBuffer.wrap(bytes, (i % PER_PAGE).toInt() * PAIR + 8, 8).long
+                    if (sameKey.invoke(other, seq)) {
+                        throw TamperDetectedException("entry #$seq: duplicate idempotency key (also entry #$other)")
+                    }
+                }
+            }
+            previousHash = hash
+            filter?.add(hash)
             page.putLong(hash).putLong(seq)
             records++
             if (!page.hasRemaining()) {
@@ -363,63 +457,14 @@ internal class HashIndex(
 
         fun finish(maxSeq: Long): Run {
             if (page.position() > 0) file.append(page.array()) // zero padding lies beyond [records] and is never read
-            return Run(file, records, maxSeq)
-        }
-    }
-
-    /** A Bloom filter over 64-bit hashes. Bits are only ever set, so readers need no coordination. */
-    private class Bloom(private val bits: AtomicLongArray, private val probes: Int, val capacity: Long) {
-        private val mask = bits.length().toLong() * 64 - 1
-
-        fun add(hash: Long) {
-            var position = hash
-            val stride = stride(hash)
-            repeat(probes) {
-                val bit = position and mask
-                val word = (bit ushr 6).toInt()
-                val flag = 1L shl (bit and 63).toInt()
-                // The writer and a rebuild may set bits in the same word, so this is a compare-and-set loop.
-                while (true) {
-                    val old = bits.get(word)
-                    if (old and flag != 0L || bits.compareAndSet(word, old, old or flag)) break
-                }
-                position += stride
-            }
+            val built = filter?.finish()
+            storage.filters.replace(emptyList(), built)
+            return Run(file, records, maxSeq, built)
         }
 
-        fun mightContain(hash: Long): Boolean {
-            var position = hash
-            val stride = stride(hash)
-            repeat(probes) {
-                val bit = position and mask
-                if (bits.get((bit ushr 6).toInt()) and (1L shl (bit and 63).toInt()) == 0L) return false
-                position += stride
-            }
-            return true
-        }
-
-        // An odd second hash derived from the first: the standard way to get several probe positions from one hash.
-        private fun stride(hash: Long): Long {
-            var h = hash xor (hash ushr 33)
-            h *= -0xae502812aa7333L
-            h = h xor (h ushr 33)
-            return h or 1L
-        }
-
-        companion object {
-            /** A filter with at least [bitsPerKey] bits for each of [keys] keys, rounded up to a power of two. */
-            fun forKeys(keys: Long, bitsPerKey: Int): Bloom {
-                var words = MIN_WORDS
-                while (words.toLong() * 64 < keys * bitsPerKey) {
-                    check(words < Int.MAX_VALUE / 2) { "Bloom filter would exceed the largest array" }
-                    words *= 2
-                }
-                // 0.69 * bits per key probes minimises false positives for a filter filled to capacity.
-                val probes = (bitsPerKey * 0.69).toInt().coerceIn(1, 16)
-                return Bloom(AtomicLongArray(words), probes, words.toLong() * 64 / bitsPerKey)
-            }
-
-            private const val MIN_WORDS = 1 shl 10 // 8 KiB
+        fun abandon() {
+            file.delete()
+            filterFile?.delete()
         }
     }
 
@@ -428,6 +473,7 @@ internal class HashIndex(
         const val PER_PAGE = (PAGE_SIZE / PAIR).toLong()
         const val FAN_IN = 4
         const val MAX_BACKLOG = 4
+        const val KEPT_GENERATIONS = 8
         // Live writers are not slowed for brief stalls; only a sustained one turns requests away.
         const val MAX_LIVE_BACKLOG = 16
         // Long enough for the largest merge to finish on a slow disk.

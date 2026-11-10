@@ -68,5 +68,9 @@ class TamperDetectedException(message: String) : LedgerException(message)
 class EntryUnreadableException(val seq: Long, cause: Throwable) :
     LedgerException("entry #$seq could not be read from the journal: ${cause.message}", cause)
 
+/** An authenticated index read could not finish (including an interrupted reader); retry the same operation. */
+class IndexUnreadableException(val index: String, cause: Throwable) :
+    LedgerException("index '$index' could not be read: ${cause.message}", cause)
+
 /** A referenced entity (e.g. a bet) does not exist in the ledger. */
 class NotFoundException(message: String) : LedgerException(message)

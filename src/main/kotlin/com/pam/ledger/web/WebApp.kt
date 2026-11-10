@@ -21,6 +21,7 @@ import com.pam.ledger.SignedTreeHead
 import com.pam.ledger.SportsbookWallet
 import com.pam.ledger.SportsbookWallet.Accounts
 import com.pam.ledger.EntryUnreadableException
+import com.pam.ledger.IndexUnreadableException
 import com.pam.ledger.TamperDetectedException
 import com.pam.ledger.VersionConflictException
 import com.pam.ledger.Validation
@@ -508,7 +509,7 @@ class LedgerWebApp private constructor(
                 is NotFoundException -> 404 to "not_found"
                 is OverloadedException -> 503 to "overloaded"
                 is OutcomeUnknownException -> 504 to "outcome_unknown"
-                is LedgerFailedException, is LedgerClosedException, is EntryUnreadableException -> 503 to "ledger_unavailable"
+                is LedgerFailedException, is LedgerClosedException, is EntryUnreadableException, is IndexUnreadableException -> 503 to "ledger_unavailable"
                 is TamperDetectedException -> 500 to "tamper_detected"
                 is IllegalArgumentException -> 400 to "bad_request"
                 else -> 500 to "internal_error"

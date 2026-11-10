@@ -13,6 +13,7 @@ import java.nio.file.StandardOpenOption.WRITE
 import java.security.MessageDigest
 import java.security.SecureRandom
 import java.util.concurrent.ConcurrentHashMap
+import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReferenceArray
 import javax.crypto.Mac
@@ -65,8 +66,12 @@ internal const val PAGE_SIZE = 4096
 internal class DerivedStorage(
     val directory: Path,
     cachePages: Int,
+    filterMemoryBytes: Long = 64L * 1024 * 1024,
+    val bloomBitsPerKey: Int = 12,
     private val onFailure: (Throwable) -> Unit,
 ) : AutoCloseable {
+    internal val filters = FilterMemory(filterMemoryBytes)
+    internal val filterReads = Executors.newVirtualThreadPerTaskExecutor()
     private val key = SecretKeySpec(ByteArray(32).also { SecureRandom().nextBytes(it) }, MAC_ALGORITHM)
     // A Mac is not thread-safe, and initialising one is the expensive part: keep one per thread.
     private val macs = ThreadLocal.withInitial { Mac.getInstance(MAC_ALGORITHM).apply { init(key) } }
@@ -74,6 +79,8 @@ internal class DerivedStorage(
     private val files = ConcurrentHashMap.newKeySet<PagedFile>()
     // Indexes with background threads working on these files; stopped before the files are deleted.
     private val users = ConcurrentHashMap.newKeySet<AutoCloseable>()
+    /** Cache-miss reads, observed on the reading thread; internal diagnostics only. */
+    @Volatile internal var onPageRead: ((String, Long) -> Unit)? = null
 
     private class Cached(val file: Long, val page: Long, val bytes: ByteArray)
     // Direct-mapped and lock-free: a page lives in the slot its file and number hash to.
@@ -126,6 +133,11 @@ internal class DerivedStorage(
         users.remove(user)
     }
 
+    /** Recovery has stopped adding: finish every index's full merge before exposing any ledger. */
+    fun finishRecovery() {
+        users.filterIsInstance<HashIndex>().forEach { it.finishRecovery() }
+    }
+
     internal fun forget(file: PagedFile) {
         files.remove(file)
     }
@@ -137,6 +149,8 @@ internal class DerivedStorage(
     /** Close every file and delete them all. Derived data is never kept for the next start. */
     override fun close() {
         users.toList().forEach { runCatching { it.close() } }
+        filterReads.shutdown()
+        filters.clear()
         files.toList().forEach { runCatching { it.delete() } }
         runCatching { clear() }
         runCatching { Files.deleteIfExists(directory) } // only succeeds if nothing else was put there
@@ -186,6 +200,7 @@ internal class PagedFile(private val storage: DerivedStorage, private val path: 
     fun page(number: Long): ByteArray {
         storage.cached(id, number)?.let { return it }
         if (number < 0 || number >= pages) throw IndexOutOfBoundsException("page $number of $pages")
+        storage.onPageRead?.invoke(path.fileName.toString(), number)
         val slot = ByteBuffer.allocate(SLOT)
         var attempt = 0
         while (true) {

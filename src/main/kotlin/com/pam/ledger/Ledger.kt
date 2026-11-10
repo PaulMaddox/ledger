@@ -70,8 +70,14 @@ import java.util.concurrent.atomic.AtomicBoolean
  *   them on a different device keeps their writes away from the journal's fsync.
  * @property derivedCachePages How many 4 KiB pages of derived files stay in memory.
  * @property indexFlushSize Idempotency keys held in memory before they are written to a sorted file.
- * @property bloomBitsPerKey Size of the in-memory filter that answers "this key is new" without a
- *   disk read. Ten bits gives about one false alarm in a hundred; each costs one index search.
+ * @property bloomBitsPerKey Bits per key in each immutable run's blocked Bloom filter (default 12).
+ *   More bits reduce false run searches but consume more filter disk space and memory budget.
+ * @property filterMemoryBytes Shared heap budget for run filters across this ledger's indexes.
+ *   Smallest/newest filters fit first; others need one authenticated page read per run on the
+ *   submitting caller, concurrently. At 12 bits/key, 64 MiB covers about 45 million keys;
+ *   512 MiB covers about 358 million. More budget trades heap for fewer random reads/IOPS.
+ *   Zero keeps every filter on disk. This excludes the bounded derived page cache and
+ *   the last eight flushed key tables (about 16 MiB at the default flush size).
  */
 data class LedgerConfig(
     val directory: Path,
@@ -89,12 +95,14 @@ data class LedgerConfig(
     val derivedDirectory: Path? = null,
     val derivedCachePages: Int = 16_384,
     val indexFlushSize: Int = 65_536,
-    val bloomBitsPerKey: Int = 10,
+    val bloomBitsPerKey: Int = 12,
+    val filterMemoryBytes: Long = 64L * 1024 * 1024,
 ) {
     init {
         require(ledgerId.isNotBlank()) { "ledgerId required" }
         require(queueCapacity > 0 && maxBatchSize > 0 && checkpointEvery > 0 && entryCacheSize > 0)
         require(derivedCachePages > 0 && indexFlushSize > 0 && bloomBitsPerKey in 1..64)
+        require(filterMemoryBytes >= 0)
     }
 }
 
@@ -116,7 +124,7 @@ class Ledger private constructor(
     // History itself stays in the journal. The store knows where each entry starts and its verified
     // leaf hash, reads entries back on demand, and reports any that no longer match their hash.
     private val entries: EntryStore,
-    // Hashes of committed idempotency keys, mostly on disk behind an in-memory Bloom filter.
+    // Hashes of committed idempotency keys, mostly on disk behind budgeted per-run filters.
     // A match is only a candidate until the entry's own key agrees.
     private val idempotency: HashIndex,
     alarm: FailureAlarm,
@@ -155,7 +163,10 @@ class Ledger private constructor(
 
     /** Messages to the writer thread. */
     private sealed interface Command
-    private class Submit(val request: TransactionRequest, val fingerprint: Digest, val keyHash: Long, val future: CompletableFuture<Receipt>) : Command
+    private class Submit(
+        val request: TransactionRequest, val fingerprint: Digest, val keyHash: Long,
+        val watermark: Long, val prefetched: SealedEntry?, val future: CompletableFuture<Receipt>,
+    ) : Command
     private class CheckpointRequest(val future: CompletableFuture<SignedTreeHead>) : Command
     private data object Shutdown : Command
 
@@ -172,8 +183,8 @@ class Ledger private constructor(
      * Queue [request] for commit. The future completes with a [Receipt] once the
      * entry is durable, or fails with a [LedgerException].
      *
-     * Safe to call from any number of threads. Never blocks longer than
-     * [LedgerConfig.submitTimeout] (that is the back-pressure).
+     * Safe to call from any number of threads. Caller-side index/entry reads precede
+     * the queue-space wait, which is bounded by [LedgerConfig.submitTimeout].
      */
     fun submit(request: TransactionRequest): CompletableFuture<Receipt> {
         failure?.let { return CompletableFuture.failedFuture(LedgerFailedException(it)) }
@@ -185,12 +196,20 @@ class Ledger private constructor(
         // Hash the request on the CALLER's thread to keep work off the writer.
         val fingerprint = EntryCodec.requestFingerprint(request.kind, request.postings, request.metadata)
         val keyHash = KeyIndex.hashOf(request.idempotencyKey)
-        // If this key may already be committed, the writer will have to search the on-disk index and
-        // read the entry. Do that here first, so the pages are in memory by the time the writer asks
-        // and a slow disk delays this caller, not every transaction behind it. The writer still decides.
-        if (idempotency.mightContain(keyHash)) runCatching { committed(request.idempotencyKey, keyHash) }
+        // The snapshot's runs are checked here, including full keys on a hash match.
+        // The writer checks only later generations, exactly, unless this caller is
+        // older than the retained flush history. It still makes the fingerprint decision.
+        var prefetched: SealedEntry? = null
+        val watermark = try {
+            idempotency.prefetch(keyHash) { seq ->
+                val candidate = entries[seq]
+                (candidate.entry.idempotencyKey == request.idempotencyKey).also { if (it) prefetched = candidate }
+            }
+        } catch (t: Throwable) {
+            return CompletableFuture.failedFuture(failure?.let(::LedgerFailedException) ?: t)
+        }
         val internal = CompletableFuture<Receipt>()
-        val cmd = Submit(request, fingerprint, keyHash, internal)
+        val cmd = Submit(request, fingerprint, keyHash, watermark, prefetched, internal)
         if (!queue.offer(cmd, config.submitTimeout.toNanos(), TimeUnit.NANOSECONDS)) {
             return CompletableFuture.failedFuture(OverloadedException())
         }
@@ -260,12 +279,14 @@ class Ledger private constructor(
     fun findByIdempotencyKey(key: String): SealedEntry? = committed(key, KeyIndex.hashOf(key))
 
     /** The entry committed under [key], if any. The index offers candidates by hash; only an equal key is a match. */
-    private fun committed(key: String, keyHash: Long): SealedEntry? {
+    private fun committed(key: String, keyHash: Long, watermark: Long? = null): SealedEntry? {
         var found: SealedEntry? = null
-        idempotency.anyCandidate(keyHash) { seq ->
+        val visit: (Long) -> Boolean = { seq ->
             val candidate = entries[seq]
             (candidate.entry.idempotencyKey == key).also { if (it) found = candidate }
         }
+        if (watermark == null) idempotency.anyCandidate(keyHash, visit)
+        else idempotency.anyCandidateAfter(keyHash, watermark, visit)
         return found
     }
 
@@ -378,7 +399,7 @@ class Ledger private constructor(
                     val req = cmd.request
 
                     // (1) Already committed under this key? Replay or reject; never write twice.
-                    val existing = committed(req.idempotencyKey, cmd.keyHash)
+                    val existing = cmd.prefetched ?: committed(req.idempotencyKey, cmd.keyHash, cmd.watermark)
                     if (existing != null) {
                         if (EntryCodec.fingerprintOf(existing.entry) == cmd.fingerprint) {
                             cmd.future.complete(existing.receipt(replayed = true))
@@ -537,16 +558,21 @@ class Ledger private constructor(
                 // background thread (index maintenance) is latched until the ledger exists to receive it.
                 val alarm = FailureAlarm()
                 val storage = DerivedStorage(config.derivedDirectory ?: config.directory.resolve(DERIVED_DIRECTORY),
-                    config.derivedCachePages, alarm::raise)
+                    config.derivedCachePages, config.filterMemoryBytes, config.bloomBitsPerKey, alarm::raise)
                 derived = storage
                 val store = EntryStore(entriesPath, storage, config.entryCacheSize, strings, alarm::raise)
                 entryStore = store
-                val keys = HashIndex(storage, "keys", config.indexFlushSize, config.bloomBitsPerKey)
+                val keys = HashIndex(storage, "keys", config.indexFlushSize, config.bloomBitsPerKey,
+                    sameKey = { a, b -> store[a].entry.idempotencyKey == store[b].entry.idempotencyKey })
                 keys.mayWait = true // only recovery may pause for index maintenance; the writer thread never does
                 (listener as? DerivedIndexUser)?.useStorage(storage, config.indexFlushSize)
                 val replayer = Replayer(config.ledgerId, config.accountPolicy, index = RecoveryIndex(store, keys, listener), entryStrings = strings)
                 val (ej, entryScan) = Journal.openForAppendAt(entriesPath) { offset, record -> replayer.apply(record, offset) }
                 entryJournal = ej
+                // Replay does not randomly probe old runs. Flush/merge comparisons and this
+                // final full merge prove key uniqueness before any customer operation.
+                storage.finishRecovery()
+                alarm.check()
 
                 // 2. Verify every signed checkpoint against the replayed history.
                 // Complete subtrees are read from the node files recovery just wrote: no hashing, nothing cached.
@@ -563,6 +589,7 @@ class Ledger private constructor(
                     latest = sth
                 }
                 checkpointJournal = cj
+                alarm.check()
 
                 val report = RecoveryReport(entryScan.records, cpScan.records, entryScan.tornTailBytes + cpScan.tornTailBytes)
                 return Ledger(config, lock, ej, cj, replayer, storage, store, keys, alarm, prover, latest, report).also { it.writer.start() }
@@ -593,6 +620,9 @@ class Ledger private constructor(
 internal class FailureAlarm {
     private var pending: Throwable? = null
     private var handler: ((Throwable) -> Unit)? = null
+
+    @Synchronized
+    fun check() { pending?.let { throw it } }
 
     @Synchronized
     fun raise(t: Throwable) {
