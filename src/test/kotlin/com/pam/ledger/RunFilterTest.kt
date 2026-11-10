@@ -250,10 +250,18 @@ class RunFilterTest {
     fun `latched maintenance failures are ledger failures on every index read path`() {
         val cause = IOException("unavailable maintenance reader")
         val failures = AtomicReference<Throwable?>()
+        val allowFailure = CountDownLatch(1)
         storage(0, failures).use { storage ->
-            HashIndex(storage, "failed", 2, 12, sameKey = { _, _ -> throw cause }).use { index ->
-                index.put(1L, 0)
-                index.put(1L, 1)
+            HashIndex(storage, "failed", 2, 12, sameKey = { _, _ ->
+                allowFailure.await()
+                throw cause
+            }).use { index ->
+                try {
+                    index.put(1L, 0)
+                    index.put(1L, 1)
+                } finally {
+                    allowFailure.countDown()
+                }
                 await("maintenance failure") { failures.get() != null }
                 assertSame(cause, failures.get())
                 assertSame(cause, assertFailsWith<LedgerFailedException> { index.mightContain(1L) }.cause)
