@@ -169,7 +169,15 @@ internal class PagedFile(private val storage: DerivedStorage, private val path: 
         val slot = ByteBuffer.allocate(SLOT)
         slot.put(data).put(storage.mac(id, number, data)).flip()
         var position = number * SLOT
-        while (slot.hasRemaining()) position += writer.write(slot, position)
+        try {
+            while (slot.hasRemaining()) position += writer.write(slot, position)
+        } catch (e: IOException) {
+            // A derived file that cannot be written cannot be relied on, whoever was writing it (the
+            // ledger's writer, index maintenance or a read model). Stop the ledger, unless this file
+            // was retired on purpose. The caller must also treat its own state as damaged.
+            if (!closed) storage.failed(e)
+            throw e
+        }
         storage.remember(id, number, data)
         pages = number + 1
     }

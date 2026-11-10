@@ -10,6 +10,8 @@ import org.junit.jupiter.api.Tag
 import java.util.concurrent.Executors
 import kotlin.test.Test
 import kotlin.test.assertEquals
+import kotlin.test.assertFailsWith
+import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
 /**
@@ -118,6 +120,33 @@ class ReadScalingTest {
                 assertEquals(false, reconciles(repeated, escrowSeqs))
                 val padded = cashSeqs.copyOfRange(1, cashSeqs.size) + foreign
                 assertEquals(false, reconciles(padded, escrowSeqs))
+            }
+        }
+    }
+
+    @Test
+    fun `a read-model write that fails part-way stops the model and the ledger`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            ReadModel(ledger).use { model ->
+                wallet.deposit("w", 1, "EUR", "write-0")
+                model.catchUp()
+                // Break the model's history file as a failing disk would: its next full page cannot be written.
+                val chainFile = ReadModel::class.java.getDeclaredField("chainFile").apply { isAccessible = true }.get(model)
+                val channel = PagedFile::class.java.getDeclaredField("writer").apply { isAccessible = true }.get(chainFile)
+                (channel as java.nio.channels.FileChannel).close()
+                // Each deposit adds three history records and a page holds 512, so this soon needs a page
+                // write. The model's own poller may reach it first and stop the ledger mid-loop: also correct.
+                for (i in 1..400) {
+                    try { wallet.deposit("w", 1, "EUR", "write-$i") } catch (e: LedgerFailedException) { break }
+                }
+                runCatching { model.catchUp() }
+                assertTrue(ledger.isFailed, "derived storage that cannot be written stops the ledger")
+                // The model holds part of an entry. It must never apply again or answer from that state.
+                assertFailsWith<IllegalStateException> { model.catchUp() }
+                assertFailsWith<IllegalStateException> { model.historyForPlayer("w", 10) }
+                assertFailsWith<IllegalStateException> { model.totals() }
+                assertFailsWith<LedgerFailedException> { wallet.deposit("w", 1, "EUR", "after") }
             }
         }
     }
