@@ -93,10 +93,12 @@ class ReadModel private constructor() : AutoCloseable {
         chainFile = storage.create("read-model-chains")
         chains = ChainLog(FixedLog(chainFile, 8))
         // The placement index has a filter so a settlement for a bet this model never indexed (one
-        // placed without a market) is recognised from memory. Settlements are only looked up for
+        // placed without a market) is recognised without searching run pairs. Settlements are only looked up for
         // bets that exist, so they need none.
-        placements = HashIndex(storage, "bets-placed", indexFlushSize, 10).apply { mayWait = true }
-        settlements = HashIndex(storage, "bets-settled", indexFlushSize, 0).apply { mayWait = true }
+        placements = HashIndex(storage, "bets-placed", indexFlushSize, storage.bloomBitsPerKey,
+            retainedGenerations = 0).apply { mayWait = true }
+        settlements = HashIndex(storage, "bets-settled", indexFlushSize, 0,
+            retainedGenerations = 0).apply { mayWait = true }
     }
 
     /** A bet as reconstructed from its placement entry and (optionally) its settlement entry. */

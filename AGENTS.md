@@ -145,8 +145,8 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 
 History lives in the journal, not on the heap (issue #73). Keep it that way:
 
-- The heap holds balances, open bets, the Merkle frontier, a Bloom filter over idempotency
-  keys (about ten bits each), a few numbers per player history, and bounded caches. Do not
+- The heap holds balances, open bets, the Merkle frontier, budgeted per-run Bloom
+  filters, the last eight flushed key tables, a few numbers per player history, and bounded caches. Do not
   add a structure that keeps an object, a decoded entry or a key string for every entry or
   every bet.
 - Everything else that grows with history is a derived file (`Derived.kt`): entry offsets,
@@ -171,8 +171,24 @@ History lives in the journal, not on the heap (issue #73). Keep it that way:
 - Never interrupt a thread that writes derived files (index maintenance, the read-model
   poller): Java closes the channel under it, and the failed write stops the ledger. Signal it
   with a flag and join; it stops between records.
-- The Bloom filter may say "possibly present" for a new key, never "absent" for a committed
-  one. Add a key to its table first, then to the filters; see `HashIndex.rebuildBloom`.
+- Each immutable index run has its own blocked Bloom filter, written in unsigned hash
+  order beside the pairs, once, with authenticated pages. Filter addresses are `Long`.
+  `LedgerConfig.filterMemoryBytes` (default 64 MiB) is shared by all indexes: the smallest,
+  newest filters fit first; other probes read at most one page per run concurrently on
+  virtual threads. `bloomBitsPerKey` defaults to 12. Larger budgets trade heap for fewer
+  random reads; the derived page cache has its own independent bound.
+- A filter may say "possibly present" for a new key, never "absent" for a committed one.
+  Submission probes one immutable state snapshot on the caller, carrying its highest
+  flushed generation and any full-key match. The writer checks current tables and the
+  last eight flushed tables exactly for commits after that watermark; merges cannot
+  erase those tables' coverage. A caller older than the retained coverage must fall
+  back to a full lookup, never assume absence. With custom queue/flush sizes or a caller
+  delayed before queue admission, this exceptional path can read disk on the writer.
+- Replay checks nearby keys in memory without probing old on-disk filters. Every flush
+  and merge compares full keys throughout equal-hash groups (not merely adjacent keys).
+  Before open returns, every recovered index is flushed and fully merged, completing
+  global idempotency-key uniqueness verification. Recovery callbacks are provisional
+  until the entire open succeeds; never serve from them sooner.
 - `Ledger.entry` re-hashes what it reads from disk and compares it with the leaf hash
   verified at startup. A mismatch throws `TamperDetectedException` and fail-stops the
   ledger. Never bypass that check or cache unverified bytes.

@@ -48,9 +48,9 @@ internal object Accounting {
 /**
  * Told about each entry as recovery verifies it, in order, before the ledger opens.
  * Lets a read model build its indexes in the same pass as verification instead of
- * reading the whole journal a second time. It only ever sees entries that passed
- * every check; if a later entry fails, the ledger does not open and whatever the
- * listener built must be discarded with it.
+ * reading the whole journal a second time. Entry-local checks precede the callback;
+ * global key uniqueness is completed by the final index merge. If any verification
+ * fails, the ledger does not open and whatever the listener built must be discarded.
  */
 fun interface RecoveryListener {
     fun recovered(entry: SealedEntry)
@@ -131,11 +131,11 @@ internal class Replayer(
 
         val sealed = SealedEntry.of(entry, body)
         if (sealed.chainHash != storedChain) tamper("stored chain hash does not match recomputed hash")
-        // With an index, key strings are not kept: a matching hash names candidate entries, and
-        // only an entry whose full key is equal counts. Those entries are read back from the journal.
+        // Check nearby keys in memory, not old filters on disk. Flush/merge compares
+        // complete equal-hash groups; Ledger.open finishes a full merge before serving.
         val keyHash = if (index != null) KeyIndex.hashOf(entry.idempotencyKey) else 0L
         val duplicate = if (index != null) {
-            index.keys.anyCandidate(keyHash) { index.store[it].entry.idempotencyKey == entry.idempotencyKey }
+            index.keys.anyInMemory(keyHash) { index.store[it].entry.idempotencyKey == entry.idempotencyKey }
         } else idempotency.containsKey(entry.idempotencyKey)
         if (duplicate) tamper("duplicate idempotency key '${entry.idempotencyKey}'")
 
