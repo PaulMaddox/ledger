@@ -416,6 +416,15 @@ class LedgerWebApp private constructor(
         }
         var experiment = false
         var reportRequest = false
+        // The supervisory slot covers replay and JSON serialization, and is given back BEFORE the
+        // response is sent. Released afterwards, a client that had already read its answer could
+        // send its next request while this one still held the slot, and be refused as overlapping.
+        val releaseReport = {
+            if (reportRequest) {
+                reportRequest = false
+                reporting.release()
+            }
+        }
         try {
             val contentLength = ex.requestHeaders.getFirst("Content-Length")
             if (ex.requestHeaders.getFirst("Transfer-Encoding") == null &&
@@ -476,7 +485,7 @@ class LedgerWebApp private constructor(
                     }
                 }
             } else lifecycle.read { checkGeneration(); route(request) }
-            respond(ex, 200, result)
+            respond(ex, 200, result, releaseReport)
         } catch (e: Throwable) {
             val (status, code) = when (e) {
                 is HttpError -> e.status to e.code
@@ -493,11 +502,11 @@ class LedgerWebApp private constructor(
                 else -> 500 to "internal_error"
             }
             if (status == 500) e.printStackTrace()
-            runCatching { respond(ex, status, mapOf("error" to code, "message" to (e.message ?: code))) }
+            runCatching { respond(ex, status, mapOf("error" to code, "message" to (e.message ?: code)), releaseReport) }
         } finally {
             ex.close()
             if (experiment) experiments.unlock()
-            if (reportRequest) reporting.release()
+            releaseReport() // only if serialization itself failed before the slot was given back
             if (!liveness) requests.release()
         }
     }
@@ -606,8 +615,10 @@ class LedgerWebApp private constructor(
         return decodeUtf8(output.toByteArray())
     }
 
-    private fun respond(ex: HttpExchange, status: Int, body: Any?) {
+    /** [serialized] runs once the body is in memory and before any of it is sent. */
+    private fun respond(ex: HttpExchange, status: Int, body: Any?, serialized: () -> Unit = {}) {
         val bytes = Json.of(body).toByteArray()
+        serialized()
         ex.responseHeaders.add("Content-Type", "application/json; charset=utf-8")
         ex.responseHeaders.add("Cache-Control", "no-store")
         ex.sendResponseHeaders(status, bytes.size.toLong())
