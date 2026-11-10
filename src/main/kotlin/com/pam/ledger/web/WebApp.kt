@@ -167,6 +167,7 @@ internal fun replayPlayerAudit(
     cashState: AccountState?,
     escrowState: AccountState?,
     committedSize: Long,
+    indexed: Pair<LongArray, LongArray>? = null,
 ): Map<String, Any?> {
     val cashAccount = Accounts.cash(id, "EUR")
     val escrowAccount = Accounts.openBets(id, "EUR")
@@ -177,7 +178,17 @@ internal fun replayPlayerAudit(
     var neverNegative = true
     // Entries precede account states. A missing state must still reconcile with the
     // previously captured committed prefix, not silently discard that account's history.
-    val rows = (0L..maxOf(cashLastSeq, escrowLastSeq)).mapNotNull { seq ->
+    // With an index, read only the entries it names for these two accounts. The balances are
+    // still recomputed from those entries' own postings, and the index is trusted only if it
+    // holds exactly as many entries per account as the ledger's version counter says exist:
+    // every committed entry that posts to an account raises its version by one.
+    val cashIndexed = indexed?.first?.filter { it <= cashLastSeq }
+    val escrowIndexed = indexed?.second?.filter { it <= escrowLastSeq }
+    val indexComplete = indexed == null ||
+        (cashIndexed!!.size.toLong() == (cashState?.version ?: 0L) && escrowIndexed!!.size.toLong() == (escrowState?.version ?: 0L))
+    val candidates: Iterable<Long> = if (indexed == null) 0L..maxOf(cashLastSeq, escrowLastSeq)
+        else (cashIndexed!! + escrowIndexed!!).toSortedSet()
+    val rows = candidates.mapNotNull { seq ->
         val s = ledger.entry(seq)
         val cashPostings = s.entry.postings.filter { seq <= cashLastSeq && it.account == cashAccount }
         val escrowPostings = s.entry.postings.filter { seq <= escrowLastSeq && it.account == escrowAccount }
@@ -198,7 +209,7 @@ internal fun replayPlayerAudit(
         "replayedCash" to minorUnits(cash), "replayedEscrow" to minorUnits(escrow),
         "ledgerCash" to minorUnits(ledgerCash), "ledgerEscrow" to minorUnits(ledgerEscrow),
         "cashLastSeq" to cashLastSeq, "escrowLastSeq" to escrowLastSeq,
-        "reconciles" to (cash == ledgerCash && escrow == ledgerEscrow),
+        "reconciles" to (indexComplete && cash == ledgerCash && escrow == ledgerEscrow),
         "neverNegative" to neverNegative,
     )
 }
@@ -247,6 +258,7 @@ class LedgerWebApp private constructor(
         private val signingKeyBootstrapLock = Any()
         private const val MAX_URI_LENGTH = 8_192
         private const val MAX_PARAMETERS = 32
+        private const val PLAYER_PAGE = 60
 
         fun start(opts: WebOptions, clock: Clock = Clock.systemUTC()): LedgerWebApp {
             // JDK HTTP configuration is read once, before the first server is created.
@@ -853,10 +865,20 @@ class LedgerWebApp private constructor(
     )
 
     private fun searchPlayers(q: String): Any {
-        val all = (CUSTOMERS + readModel.players()).distinct()
-        val matching = all.filter { q.isBlank() || it.contains(q.trim(), ignoreCase = true) }
-        val ordered = matching.filter { !Simulator.isAutomated(it) } + matching.filter { Simulator.isAutomated(it) }.sorted()
-        return mapOf("total" to matching.size, "players" to ordered.take(60).map(::playerSummary))
+        val needle = q.trim()
+        fun matches(id: String) = needle.isEmpty() || id.contains(needle, ignoreCase = true)
+        // One pass over the sorted player index: count every match, keep only the first page.
+        val named = CUSTOMERS.filter(::matches)
+        val manual = ArrayList<String>()
+        val automated = ArrayList<String>()
+        var total = named.size
+        readModel.forEachPlayer { id ->
+            if (id in CUSTOMERS || !matches(id)) return@forEachPlayer
+            total++
+            val page = if (Simulator.isAutomated(id)) automated else manual
+            if (page.size < PLAYER_PAGE) page.add(id)
+        }
+        return mapOf("total" to total, "players" to (named + manual + automated).take(PLAYER_PAGE).map(::playerSummary))
     }
 
     private fun betView(b: ReadModel.BetView) = mapOf(
@@ -901,7 +923,7 @@ class LedgerWebApp private constructor(
         val totals = readModel.totals()
         return mapOf(
             "scheduler" to active.scheduler.view(),
-            "players" to readModel.players().size,
+            "players" to readModel.playerCount(),
             "entries" to totals.entries,
             "deposits" to minorUnits(totals.deposits),
             "withdrawals" to minorUnits(totals.withdrawals),
@@ -962,7 +984,10 @@ class LedgerWebApp private constructor(
         val committedSize = ledger.head().size
         val cashState = ledger.account(Accounts.cash(id, "EUR"))
         val escrowState = ledger.account(Accounts.openBets(id, "EUR"))
-        return replayPlayerAudit(ledger, id, cashState, escrowState, committedSize)
+        // Balances are published before the head, so read as far as the states themselves reach.
+        readModel.catchUp(maxOf(committedSize, (cashState?.lastSeq ?: -1) + 1, (escrowState?.lastSeq ?: -1) + 1))
+        val indexed = readModel.seqsForAccount(Accounts.cash(id, "EUR")) to readModel.seqsForAccount(Accounts.openBets(id, "EUR"))
+        return replayPlayerAudit(ledger, id, cashState, escrowState, committedSize, indexed)
     }
 
     /** Everything a browser needs to verify, by itself, that entry [seq] is in a signed checkpoint. */

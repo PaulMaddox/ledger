@@ -96,13 +96,15 @@ class Ledger private constructor(
     private val entryJournal: Journal,
     private val checkpointJournal: Journal,
     recovered: Replayer,
+    // The prover recovery used to verify checkpoints. Its cache of completed subtrees is
+    // already warm, so the first proof after a restart does not rehash the whole tree.
+    private val prover: MerkleProver,
     recoveredCheckpoint: SignedTreeHead?,
     val recoveryReport: RecoveryReport,
 ) : AutoCloseable {
 
     // ---- State shared with readers. Written ONLY by the writer thread, after fsync. ----
     private val entries = recovered.entries
-    private val prover = MerkleProver { entries[it.toInt()].leafHash }
     private val idempotency = ConcurrentHashMap<String, Long>(recovered.idempotency)
     private val accounts = ConcurrentHashMap<AccountId, AccountState>(recovered.accounts)
     @Volatile private var headRef: LedgerHead = recovered.head()
@@ -474,7 +476,7 @@ class Ledger private constructor(
                 checkpointJournal = cj
 
                 val report = RecoveryReport(entryScan.records, cpScan.records, entryScan.tornTailBytes + cpScan.tornTailBytes)
-                return Ledger(config, lock, ej, cj, replayer, latest, report).also { it.writer.start() }
+                return Ledger(config, lock, ej, cj, replayer, prover, latest, report).also { it.writer.start() }
             } catch (t: Throwable) {
                 runCatching { entryJournal?.close() }
                 runCatching { checkpointJournal?.close() }
