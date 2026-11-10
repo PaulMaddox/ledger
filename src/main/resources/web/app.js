@@ -1289,6 +1289,17 @@ const bytesText = value => {
   return `${n.toFixed(unit ? 1 : 0)} ${units[unit]}`;
 };
 const percentText = value => value == null ? "Unavailable" : `${value.toFixed(1)}%`;
+function durationText(value) {
+  if (value == null) return "Unavailable";
+  const seconds = Math.floor(value / 1000), minutes = Math.floor(seconds / 60) % 60;
+  const hours = Math.floor(seconds / 3600) % 24, days = Math.floor(seconds / 86400);
+  return [
+    days ? `${days}d` : null,
+    days || hours ? `${hours}h` : null,
+    days || hours || minutes ? `${minutes}m` : null,
+    `${seconds % 60}s`,
+  ].filter(part => part != null).join(" ");
+}
 let stopAdmin = null;
 async function refreshAdmin() {
   try {
@@ -1311,7 +1322,7 @@ async function refreshAdmin() {
     $("adminKpis").innerHTML = [
       kpi("Transactions / sec", last.tps.toFixed(1), "committed entries, not attempts"),
       kpi("JVM CPU", percentText(last.processCpu), `Host CPU ${percentText(last.systemCpu)}`),
-      kpi("Heap used", bytesText(last.heapUsed), `Limit ${bytesText(last.heapMax)}`),
+      kpi("JVM uptime", durationText(last.uptimeMillis), "since this JVM started"),
       kpi("Storage available", bytesText(last.storageFree), `Filesystem ${bytesText(last.storageTotal)}`),
       kpi("Journal size", bytesText(last.journalBytes), `${int.format(last.entries)} durable entries`),
       kpi("Storage writes", last.writeBytesPerSec == null ? "Unavailable" : bytesText(last.writeBytesPerSec) + "/s", "JVM physical I/O, not just journal"),
@@ -1331,6 +1342,13 @@ async function refreshAdmin() {
     };
     chart("adminCpu", "processCpu", percentText);
     chart("adminHeap", "heapUsed", bytesText);
+    $("adminHeapSummary").innerHTML =
+      `Used <b>${esc(bytesText(last.heapUsed))}</b> · Committed <b>${esc(bytesText(last.heapCommitted))}</b> · ` +
+      `After GC <b>${esc(bytesText(last.heapAfterGc))}</b>` +
+      (last.heapAfterGc == null ? "" : ` (${esc(durationText(last.heapAfterGcAgeMillis))} ago)`);
+    $("adminHeapGc").textContent = last.heapAfterGc == null ? "No completed GC measurement available." :
+      `${last.heapAfterGcCollector} · ${durationText(last.heapAfterGcAgeMillis)} ago`;
+    $("adminHeapLimit").textContent = `Heap limit: ${bytesText(last.heapMax)}.`;
     chart("adminTps", "tps", n => n.toFixed(1));
     chart("adminStorage", "storageFree", bytesText);
     chart("adminRead", "readBytesPerSec", n => bytesText(n) + "/s");
@@ -1338,11 +1356,9 @@ async function refreshAdmin() {
     const detail = (name, value) => `<dt>${esc(name)}</dt><dd>${esc(value)}</dd>`;
     $("adminDetails").innerHTML = [
       detail("Data directory", data.directory),
-      detail("JVM uptime", `${Math.floor(last.uptimeMillis / 1000)} seconds`),
       detail("Available processors", last.processors),
       detail("Host load average", last.loadAverage == null ? "Unavailable" : last.loadAverage.toFixed(2)),
       detail("Host memory free / total", `${bytesText(last.systemMemoryFree)} / ${bytesText(last.systemMemoryTotal)}`),
-      detail("Heap committed", bytesText(last.heapCommitted)),
       detail("Non-heap memory", bytesText(last.nonHeapUsed)),
       detail("Garbage collections", `${last.gcCount ?? "Unavailable"} / ${last.gcMillis ?? "Unavailable"} ms cumulative collection time`),
     ].join("");

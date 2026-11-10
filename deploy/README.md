@@ -125,9 +125,10 @@ later application deployments use the same resources.
   The local Gradle `web` task uses the same heap maximum; leave additional host
   memory for Gradle and the operating system. Ensure the AKS node has room for
   the larger request plus the HTTPS sidecar before deploying.
-  This is headroom, not a bounded-storage design: committed entries, canonical
-  bytes, idempotency keys and dashboard indexes remain resident until reset.
-  The disk high-water mark is not a heap guard. Independent audits retain only
+  This is capacity headroom, not a target live-set size. History and derived
+  indexes are on disk, with bounded caches and a shared run-filter budget;
+  balances and open bets still occupy heap. The disk high-water mark is not a
+  heap guard. Independent audits retain only
   historical hashes, exact account state and idempotency keys, rather than a
   second full decoded journal; audit and snapshot-tamper requests run one at a
   time per app. Large reports and tamper copies still need extra working memory.
@@ -160,20 +161,22 @@ check data compatibility first.
 
 `Java heap space` followed by `LedgerFailedException` means the writer has
 failed-stopped, not that settlement may safely retry writes. Record entry count,
-heap maximum/usage, GC time and container memory from Administrator telemetry.
-At a fixed entry count, rising occupancy between collections can be temporary
-garbage; post-GC live-object counts distinguish this from retained history.
-The live engine keeps every committed entry, and fixture archiving bounds the
-active metadata file, not the heap. A restart must replay and verify the existing
-disk and needs enough heap for that history. Deploy the larger memory budget
-before restarting a full ledger; do not delete journals or signing keys to
-recover. The owner-confirmed Administrator reset remains a demo-only option.
-For a longer-lived service, use an indexed on-disk entry/idempotency store and
-Merkle tiles, or enforce a demo admission budget with reserved settlement/audit
-headroom; neither is implemented by increasing the heap.
+heap used/committed/maximum, after-GC occupancy and collection age, GC time and
+container memory from Administrator telemetry. **Used** includes objects waiting
+for collection. **Committed** is capacity held by the JVM, not live data or total
+container memory; it can remain high after objects are collected. **After GC**
+sums heap pools in the latest completed collector snapshot (excluding non-heap
+pools). Its age and collector name matter: a young collection can leave old-generation
+garbage, so this is not necessarily the full live set. Missing or unsupported
+measurements show as unavailable, not zero. Telemetry never triggers GC or changes
+JVM settings. JVM uptime and collection age are displayed in days/hours/minutes/seconds.
+A restart must replay and verify the existing disk and needs working memory for
+that replay. Do not delete journals or signing keys to recover. The owner-confirmed
+Administrator reset remains a demo-only option.
 
-Resident entries share repeated strings through a ledger-scoped pool capped at
-65,536 strings of at most 256 characters. Only recovery and the single writer
+Before the on-disk history migration, resident entries shared repeated strings
+through a ledger-scoped pool capped at 65,536 strings of at most 256 characters.
+Only recovery and the single writer
 use it; unique business keys and reference values are not pooled. Canonical bytes
 and replay rules are unchanged. Player histories use primitive sequence chunks.
 The read model retains complete placement/settlement references but caches decoded
@@ -185,8 +188,9 @@ their drill-down sequences use primitive snapshots. These reduce retention and
 allocation, not the growth of the authoritative ledger. All reports still use a
 single signed prefix and exact amounts, including cross-period settlements.
 
-A local JDK 27 comparison using 300,000 deterministic deposit/place/loss entries
-across 500 players reduced post-GC ledger/read-model heap from 479.6 MiB to
+A historical local JDK 27 comparison of that resident implementation using 300,000
+deterministic deposit/place/loss entries across 500 players reduced post-GC
+ledger/read-model heap from 479.6 MiB to
 349.8 MiB (27.1%) with these optimizations. Report allocation fell 35.2%; the
 chain head, Merkle root and serialized financial/customer/fixture report sections
 were identical. Savings depend on the workload and do not make history bounded.

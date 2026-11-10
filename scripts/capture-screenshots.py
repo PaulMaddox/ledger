@@ -13,6 +13,7 @@ Use --regulator-only to refresh the reporting screenshots without exercising Cha
 Use --about-only to check the default About view and its embedded interactive guide.
 Use --operator-only to refresh the operator view without exercising Chaos Monkey.
 Use --customer-only to check narrow Customer layouts and refresh their screenshots.
+Use --administrator-only to refresh telemetry and check narrow Administrator layouts.
 
 It drives the real UI: starts the simulator with 500 automated customers, lets traffic
 build up, then photographs each persona's view into docs/screenshots/. WARNING: the
@@ -27,7 +28,7 @@ from playwright.async_api import async_playwright
 ROOT = pathlib.Path(__file__).resolve().parent.parent
 
 
-async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False, operator_only: bool = False, customer_only: bool = False) -> None:
+async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, regulator_only: bool = False, about_only: bool = False, operator_only: bool = False, customer_only: bool = False, administrator_only: bool = False) -> None:
     out.mkdir(parents=True, exist_ok=True)
     async with async_playwright() as p:
         launch = {"args": ["--no-sandbox"]}
@@ -52,6 +53,21 @@ async def main(url: str, out: pathlib.Path, chrome: str | None, warmup: int, reg
             """Just one panel, for moments that happen below the fold."""
             await page.locator(selector).screenshot(path=str(out / f"{name}.png"))
             report(name)
+
+        if administrator_only:
+            await page.goto(url + "#administrator")
+            await page.wait_for_selector("#adminKpis .kpi")
+            await page.wait_for_timeout(warmup * 1000)
+            await shot("administrator")
+            for width in [320, 390, 600, 601]:
+                await page.set_viewport_size({"width": width, "height": 1000})
+                await page.wait_for_timeout(300)
+                assert await page.evaluate("document.documentElement.scrollWidth <= innerWidth"), f"Administrator overflow at {width}px"
+                assert await page.locator("#adminHeapSummary").is_visible()
+            await browser.close()
+            if errors:
+                raise SystemExit("page errors while capturing:\n  " + "\n  ".join(errors))
+            return
 
         if not regulator_only and not operator_only and not customer_only:
             await page.goto(url)
@@ -210,5 +226,6 @@ if __name__ == "__main__":
     scope.add_argument("--about-only", action="store_true", help="check and capture About and its embedded guide only")
     scope.add_argument("--operator-only", action="store_true", help="capture the operator view only; skip destructive Chaos Monkey scenarios")
     scope.add_argument("--customer-only", action="store_true", help="check Customer mobile layouts and capture its views only; skip destructive Chaos Monkey scenarios")
+    scope.add_argument("--administrator-only", action="store_true", help="check and capture Administrator telemetry only; skip destructive Chaos Monkey scenarios")
     a = ap.parse_args()
-    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only, a.operator_only, a.customer_only))
+    asyncio.run(main(a.url.rstrip("/") + "/", pathlib.Path(a.out).resolve(), a.chrome, a.warmup, a.regulator_only, a.about_only, a.operator_only, a.customer_only, a.administrator_only))

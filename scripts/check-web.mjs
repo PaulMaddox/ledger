@@ -50,6 +50,81 @@ function context(fetch) {
   return c;
 }
 
+function administratorContext(data) {
+  const c = context(async () => new Response(JSON.stringify(data)));
+  const elements = new Map();
+  c.document = { getElementById: id => {
+    if (!elements.has(id)) elements.set(id, { innerHTML: "", textContent: "", className: "", style: {} });
+    return elements.get(id);
+  } };
+  c.lineChart = () => {};
+  vm.runInContext('let current = "administrator";\n' +
+    source.slice(source.indexOf("const bytesText ="), source.indexOf("views.administrator =")), c);
+  return { c, elements };
+}
+
+test("Administrator durations retain second granularity through minutes, hours and days", () => {
+  const { c } = administratorContext({});
+  for (const [milliseconds, text] of [
+    [0, "0s"], [999, "0s"], [1000, "1s"], [59999, "59s"], [60000, "1m 0s"],
+    [61000, "1m 1s"], [3600000, "1h 0m 0s"], [3661000, "1h 1m 1s"],
+    [86400000, "1d 0h 0m 0s"], [183845000, "2d 3h 4m 5s"], [null, "Unavailable"],
+  ]) assert.equal(c.durationText(milliseconds), text);
+});
+
+test("Administrator distinguishes used, committed and stale post-GC occupancy", async () => {
+  for (const heapAfterGc of [null, 0, 100 * 1024 ** 2]) {
+    const sample = {
+      t: 100000, tps: 0, entries: 20, heapUsed: 3 * 1024 ** 3, heapCommitted: 4 * 1024 ** 3,
+      heapMax: 4 * 1024 ** 3, heapAfterGc,
+      heapAfterGcAgeMillis: heapAfterGc == null ? null : 3661000,
+      heapAfterGcCollector: heapAfterGc == null ? null : "G1 <young>",
+      threads: 20, peakThreads: 21, readModelLag: 0, uptimeMillis: 183845000,
+    };
+    const { c, elements } = administratorContext({ series: [sample], directory: "demo", ioScope: "Read-only" });
+    await c.refreshAdmin();
+    const kpis = elements.get("adminKpis").innerHTML;
+    const heap = elements.get("adminHeapSummary").innerHTML;
+    assert.equal([...kpis.matchAll(/class="kpi"/g)].length, 8);
+    assert.doesNotMatch(kpis, /Heap/);
+    assert.match(heap, /Used <b>3\.0 GiB/);
+    assert.match(heap, /Committed <b>4\.0 GiB/);
+    assert.equal(elements.get("adminHeapLimit").textContent, "Heap limit: 4.0 GiB.");
+    if (heapAfterGc == null) {
+      assert.match(heap, /After GC <b>Unavailable/);
+      assert.match(elements.get("adminHeapGc").textContent, /No completed GC measurement/);
+      assert.doesNotMatch(heap, /ago/);
+    } else {
+      assert.match(heap, new RegExp(`After GC <b>${heapAfterGc ? "100\\.0 MiB" : "0 B"}`));
+      assert.match(heap, /1h 1m 1s ago/);
+      assert.equal(elements.get("adminHeapGc").textContent, "G1 <young> · 1h 1m 1s ago");
+    }
+    assert.match(kpis, /JVM uptime<\/span><b>2d 3h 4m 5s/);
+    assert.equal(elements.get("adminCharts").hidden, false);
+    assert.doesNotMatch(elements.get("adminStatus").innerHTML, /Telemetry unavailable/);
+  }
+});
+
+test("Administrator keeps every heap reading in one chart panel with optional explanation", () => {
+  const html = readFileSync(new URL("../src/main/resources/web/index.html", import.meta.url), "utf8");
+  assert.equal([...html.matchAll(/id="adminHeap"/g)].length, 1);
+  assert.match(html, /<h2>Heap memory<\/h2><p class="hint" id="adminHeapSummary"><\/p><svg id="adminHeap"/);
+  assert.match(html, /<details class="heap-help"><summary>About these readings<\/summary>/);
+  assert.match(html, /young collections can leave old-generation garbage/);
+  assert.match(html, /Measurements never trigger GC/);
+});
+
+test("stopped Administrator telemetry clears heap readings instead of presenting stale live counters", async () => {
+  const { c, elements } = administratorContext({
+    available: false, directory: "demo", journalBytes: 100, storageFree: 1000, reason: "Ledger stopped",
+  });
+  await c.refreshAdmin();
+  assert.equal(elements.get("adminKpis").innerHTML, "");
+  assert.equal(elements.get("adminCharts").hidden, true);
+  assert.doesNotMatch(elements.get("adminDetails").innerHTML, /Heap|JVM uptime/);
+  assert.match(elements.get("adminStatus").innerHTML, /Ledger stopped/);
+});
+
 test("API propagates successful body failures and keeps fallback parsing for error responses", async () => {
   for (const body of ['{"seq":', ""]) {
     const c = context(async () => new Response(body, { status: 200 }));
