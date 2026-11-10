@@ -543,12 +543,25 @@ class WebAppTest {
 
     @Test
     fun `administrator exposes real host counters and committed throughput`() = withApp { app ->
+        var expectedEntries = 0L
         repeat(20) { i ->
-            assertEquals(200, call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "metrics-$i")).first)
+            val (status, body) = call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "metrics-$i"))
+            assertEquals(200, status, body)
+            expectedEntries = Regex("\"seq\":(\\d+)").find(body)!!.groupValues[1].toLong() + 1
         }
-        Thread.sleep(1_200)
-        val (status, body) = call(app, "GET", "administrator")
+        val entries = Regex("\"entries\":(\\d+)")
+        val deadline = System.nanoTime() + TimeUnit.SECONDS.toNanos(5)
+        var response = call(app, "GET", "administrator")
+        // Wait for a sample that includes the deposits, not for OS counters to finish within a fixed sleep.
+        while (response.first == 200 &&
+            (entries.findAll(response.second).lastOrNull()?.groupValues?.get(1)?.toLong() ?: -1) < expectedEntries &&
+            System.nanoTime() < deadline) {
+            Thread.sleep(20)
+            response = call(app, "GET", "administrator")
+        }
+        val (status, body) = response
         assertEquals(200, status, body)
+        assertEquals(expectedEntries, entries.findAll(body).last().groupValues[1].toLong(), "no fresh telemetry sample: $body")
         listOf("processCpu", "systemCpu", "heapUsed", "heapMax", "storageTotal", "storageFree",
             "journalBytes", "readBytesPerSec", "writeBytesPerSec", "threads", "gcMillis", "readModelLag").forEach {
             assertTrue(body.contains("\"$it\":"), "missing $it: $body")
