@@ -168,6 +168,9 @@ History lives in the journal, not on the heap (issue #73). Keep it that way:
   indexing failed part-way is never used again (`ReadModel.broken`): retrying would record part
   of an entry twice. Change read-model state only inside `ReadModel.mutating`, and read what a
   change needs before starting it.
+- Never interrupt a thread that writes derived files (index maintenance, the read-model
+  poller): Java closes the channel under it, and the failed write stops the ledger. Signal it
+  with a flag and join; it stops between records.
 - The Bloom filter may say "possibly present" for a new key, never "absent" for a committed
   one. Add a key to its table first, then to the filters; see `HashIndex.rebuildBloom`.
 - `Ledger.entry` re-hashes what it reads from disk and compares it with the leaf hash
