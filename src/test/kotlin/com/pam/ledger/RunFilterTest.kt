@@ -7,6 +7,7 @@ import java.io.IOException
 import java.nio.ByteBuffer
 import java.nio.channels.FileChannel
 import java.nio.file.Files
+import java.nio.file.StandardOpenOption.READ
 import java.nio.file.StandardOpenOption.WRITE
 import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
@@ -19,6 +20,7 @@ import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
 import kotlin.test.assertFalse
+import kotlin.test.assertSame
 import kotlin.test.assertTrue
 
 class RunFilterTest {
@@ -228,13 +230,44 @@ class RunFilterTest {
             // Open finished the full merge; no background task races these mutations.
             Files.list(dir).use { paths ->
                 paths.filter { it.fileName.toString().startsWith("keys-filter") }.forEach { path ->
-                    FileChannel.open(path, WRITE).use { it.write(ByteBuffer.wrap(byteArrayOf(123)), PAGE_SIZE.toLong()) }
+                    FileChannel.open(path, READ, WRITE).use { channel ->
+                        val mac = ByteBuffer.allocate(1)
+                        assertEquals(1, channel.read(mac, PAGE_SIZE.toLong()))
+                        mac.flip()
+                        mac.put(0, (mac.get(0).toInt() xor 1).toByte())
+                        assertEquals(1, channel.write(mac, PAGE_SIZE.toLong()))
+                    }
                 }
             }
             ledger.derived.create("evict").append(ByteArray(PAGE_SIZE))
             assertFailsWith<TamperDetectedException> { wallet.deposit("p", 1, "EUR", "tamper-after") }
             assertTrue(ledger.isFailed)
             assertEquals(128L, ledger.head().size)
+        }
+    }
+
+    @Test
+    fun `latched maintenance failures are ledger failures on every index read path`() {
+        val cause = IOException("unavailable maintenance reader")
+        val failures = AtomicReference<Throwable?>()
+        val allowFailure = CountDownLatch(1)
+        storage(0, failures).use { storage ->
+            HashIndex(storage, "failed", 2, 12, sameKey = { _, _ ->
+                allowFailure.await()
+                throw cause
+            }).use { index ->
+                try {
+                    index.put(1L, 0)
+                    index.put(1L, 1)
+                } finally {
+                    allowFailure.countDown()
+                }
+                await("maintenance failure") { failures.get() != null }
+                assertSame(cause, failures.get())
+                assertSame(cause, assertFailsWith<LedgerFailedException> { index.mightContain(1L) }.cause)
+                assertSame(cause, assertFailsWith<LedgerFailedException> { index.anyCandidate(1L) { true } }.cause)
+                assertSame(cause, assertFailsWith<LedgerFailedException> { index.prefetch(1L) { true } }.cause)
+            }
         }
     }
 

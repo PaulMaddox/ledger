@@ -678,6 +678,7 @@ footer{margin-top:48px;color:var(--muted);font-size:.84rem}
     <div><code>LedgerVerifier.kt</code><span>Offline auditor that needs only the files and a public key.</span></div>
     <div><code>web/</code><span>Web console: read model, fixtures and betting, simulator, regulator tools, HTTP API.</span></div>
   </div>
+  <p>The read model probes disk-backed placement filters before changing settlement counters or indexes. An unavailable read leaves the entry unapplied for retry; an index maintenance failure instead stops the ledger and wallet requests return <code>503/ledger_unavailable</code>.</p>
   <pre class="cmd">./gradlew test       # full suite: Merkle, integrity, concurrency, multi-device regulatory suite, web console
 ./gradlew run        # demo: 16 threads of betting, then an independent audit and proofs
 ./gradlew web        # web console at http://localhost:8080
