@@ -31,6 +31,7 @@ src/test/kotlin/com/pam/ledger/
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
   ReadScalingTest.kt         read-model indexes; opt-in soak proves reads stay flat as the ledger grows
   EntryStoreTest.kt          entries read back from the journal, on-disk tamper detection, hashed key index
+  VerifyBeforeOpenTest.kt    owner decision: the whole ledger is verified before any customer operation
   WebAppTest.kt              web console API, simulator, bets racing settlement
 docs/
   readme.src.html        SOURCE of the interactive guide (edit this)

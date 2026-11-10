@@ -16,7 +16,15 @@ import java.time.ZoneId
  * Fixture descriptions are a separately captured, unsigned source. Compliance
  * scenarios are deterministic examples, not evidence of controls being enforced.
  */
-internal class RegulatorReports(private val ledger: Ledger, private val book: Book, private val audit: Audit) {
+internal class RegulatorReports(
+    private val ledger: Ledger,
+    private val book: Book,
+    private val audit: Audit,
+    private val cache: ReportCache = ReportCache(),
+) {
+    /** Everything in a report that comes from the signed ledger prefix, and so can never change. */
+    private class Frozen(val report: LinkedHashMap<String, Any?>, val fixtureTotals: Map<String, FixtureTotals>)
+
     private class Customer(val id: String, val firstSeq: Long, val firstTime: Long) {
         var openingCash = BigInteger.ZERO
         var openingEscrow = BigInteger.ZERO
@@ -105,6 +113,12 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
         fun selected(id: String) = population == "all" || Simulator.isAutomated(id) == (population == "automated")
         fun inPeriod(t: Long) = t >= from && t < to
 
+        // A report is computed against a signed checkpoint, which never changes, so a repeat of the
+        // same request reuses the ledger-derived sections instead of scanning the journal again.
+        // Fixture descriptions come from the book, are unsigned and can change, so they are joined
+        // in fresh on every request, below.
+        val key = ReportCache.Key(anchor.head.treeSize, anchor.head.rootHash.toHex(), currency, population, from, to, zone.id)
+        val frozen = cache.get(key) {
         val customers = linkedMapOf<String, Customer>()
         val bets = linkedMapOf<String, Bet>()
         val days = sortedMapOf<String, MutableMap<String, BigInteger>>()
@@ -269,6 +283,70 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
             signals += signal("activity-review", c.id, c.firstSeq, null, "20 or more bets in the reporting period",
                 "Illustrative activity threshold, not a diagnosis or a prescribed regulatory limit.")
         }
+        val customerRows = customers.values.sortedBy { it.id }.map { c ->
+            mapOf("id" to c.id, "automated" to Simulator.isAutomated(c.id),
+                "firstSeq" to c.firstSeq, "firstActivity" to iso(c.firstTime), "lastActivity" to iso(c.lastTime),
+                "entries" to c.entries, "bets" to c.bets, "deposits" to c.deposits.toString(),
+                "withdrawals" to c.withdrawals.toString(), "stakes" to c.stakes.toString(),
+                "payouts" to c.payouts.toString(), "netSettledLoss" to c.revenue.toString(),
+                "openingCash" to c.openingCash.toString(), "cash" to c.cash.toString(),
+                "openingEscrow" to c.openingEscrow.toString(), "escrow" to c.escrow.toString(),
+                "activityShareBps" to if (stakes.signum() > 0) (c.stakes * TEN_THOUSAND / stakes).toString() else null)
+        }
+        val definitions = linkedMapOf(
+            "deposits" to "Committed customer cash credits classified DEPOSIT in [from, to).",
+            "withdrawals" to "Committed customer cash debits classified WITHDRAWAL in [from, to).",
+            "stakes" to "Placement-period stakes; includes bets not yet settled.",
+            "payouts" to "Settlement-period returns, including stake, void refunds and cash-outs.",
+            "revenue" to "Settlement-period house revenue postings, not stakes minus unrelated period payouts; not a jurisdiction-specific tax return.",
+            "customerLiability" to "Replayed cash plus escrow at the cutoff, not proof of bank funds or safeguarding.",
+            "activeCustomers" to "Distinct customers with any recorded transaction in the period; not registrations.",
+            "worstWinningPayout" to "Largest selection winning payout for outstanding single-selection bets; VOID refunds and unknown markets are separate.",
+        )
+        Frozen(linkedMapOf(
+            "manifest" to linkedMapOf(
+                "version" to "supervisory-report-v1", "ledgerId" to anchor.head.ledgerId,
+                "dataset" to if (size > 0) ledger.entry(0).chainHash.toHex() else anchor.head.rootHash.toHex(),
+                "generatedAt" to iso(anchor.head.timestampMicros), "from" to iso(from), "to" to iso(to),
+                "timezone" to zone.id, "currency" to currency, "population" to population,
+                "availableFrom" to iso(firstTime), "availableThrough" to iso(endOfSnapshot),
+                "coverage" to if (from >= firstTime && to <= endOfSnapshot) "Available demo history" else "Partial period",
+                "historyNote" to "Demo history resets daily. No report proves activity before the retained history.",
+                "sourceNotes" to listOf("Financial and activity figures: signed ledger prefix.",
+                    "Fixture descriptions and declared results: unsigned snapshot captured separately.",
+                    "Compliance scenarios: deterministic synthetic examples; no controls are enforced by these reports."),
+                "definitions" to definitions, "anchor" to anchorView(anchor), "publicKey" to ledger.publicKey.encoded),
+            "financial" to linkedMapOf("openingLiability" to opening.toString(), "closingLiability" to closing.toString(),
+                "cashLiability" to sum { it.cash }.toString(), "escrowLiability" to sum { it.escrow }.toString(),
+                "deposits" to deposits.toString(), "withdrawals" to withdrawals.toString(), "stakes" to stakes.toString(),
+                "payouts" to payouts.toString(), "revenue" to revenue.toString(),
+                "winPayouts" to winPayouts.toString(), "voidRefunds" to voidRefunds.toString(), "cashOuts" to cashOuts.toString(),
+                "settledStakes" to returnedStakes.toString(), "otherMovement" to otherMovement.toString(),
+                "conservation" to conservation.toString(), "openBets" to openBets, "openStakes" to openStakes.toString(),
+                "escrowReconciles" to (openStakes == sum { it.escrow }), "unclassifiedEntries" to unclassified,
+                "otherEntries" to otherEntries, "periodEntries" to periodEntries, "outcomes" to outcomes,
+                "bankReconciliation" to null, "tax" to null),
+            "customers" to customerRows, "fixtures" to emptyList<Any?>(),
+            "customerSummary" to mapOf("observed" to customers.size, "active" to active.size,
+                "bettors" to active.count { it.bets > 0 }, "depositors" to active.count { it.deposits.signum() > 0 },
+                "firstActivityInPeriod" to active.count { inPeriod(it.firstTime) },
+                "registrations" to null, "verified" to null, "excluded" to null),
+            "daily" to days.map { (day, values) -> mapOf("day" to day) +
+                listOf("deposits", "withdrawals", "stakes", "payouts", "revenue").associateWith { values.getOrDefault(it, BigInteger.ZERO).toString() } },
+            "signals" to signals,
+            "compliance" to scenarios(),
+            "coverage" to listOf(
+                coverage("Money and betting activity", "Ledger-derived", "Exact amounts, period flows, liabilities and transaction drill-down."),
+                coverage("Fixture catalogue", "Unsigned snapshot", "Sport, event, selections, times and declared results are demo metadata, not authenticated by the ledger signature."),
+                coverage("Customer eligibility", "Not collected", "Registration, age, identity, location, sanctions and due-diligence decisions."),
+                coverage("Player protection", "Not collected", "Real limits, exclusions, blocked attempts, sessions, interventions and outcomes."),
+                coverage("Cases and governance", "Synthetic examples", "Example case timelines, control owners, training and audit findings; not live compliance evidence."),
+                coverage("External financial reconciliation", "Not collected", "Bank balances, payment-provider statements, safeguarding and taxes."),
+                coverage("Monitoring", "Illustrative rules", "Explainable transaction signals requiring human review, not determinations of harm or crime."),
+            ),
+        ), fixtureTotals)
+        }
+        val fixtureTotals = frozen.fixtureTotals
         val fixtureDefinitions = book.fixtures().associate { f ->
             f.id to mapOf("home" to f.home, "away" to f.away, "sport" to f.sport.name, "event" to f.event,
                 "startsAt" to f.startsAt, "endsAt" to f.endsAt,
@@ -299,68 +377,7 @@ internal class RegulatorReports(private val ledger: Ledger, private val book: Bo
                     "exceptions" to exceptions,
                     "entrySeqs" to totals.seqs.sorted())
             }
-        val customerRows = customers.values.sortedBy { it.id }.map { c ->
-            mapOf("id" to c.id, "automated" to Simulator.isAutomated(c.id),
-                "firstSeq" to c.firstSeq, "firstActivity" to iso(c.firstTime), "lastActivity" to iso(c.lastTime),
-                "entries" to c.entries, "bets" to c.bets, "deposits" to c.deposits.toString(),
-                "withdrawals" to c.withdrawals.toString(), "stakes" to c.stakes.toString(),
-                "payouts" to c.payouts.toString(), "netSettledLoss" to c.revenue.toString(),
-                "openingCash" to c.openingCash.toString(), "cash" to c.cash.toString(),
-                "openingEscrow" to c.openingEscrow.toString(), "escrow" to c.escrow.toString(),
-                "activityShareBps" to if (stakes.signum() > 0) (c.stakes * TEN_THOUSAND / stakes).toString() else null)
-        }
-        val definitions = linkedMapOf(
-            "deposits" to "Committed customer cash credits classified DEPOSIT in [from, to).",
-            "withdrawals" to "Committed customer cash debits classified WITHDRAWAL in [from, to).",
-            "stakes" to "Placement-period stakes; includes bets not yet settled.",
-            "payouts" to "Settlement-period returns, including stake, void refunds and cash-outs.",
-            "revenue" to "Settlement-period house revenue postings, not stakes minus unrelated period payouts; not a jurisdiction-specific tax return.",
-            "customerLiability" to "Replayed cash plus escrow at the cutoff, not proof of bank funds or safeguarding.",
-            "activeCustomers" to "Distinct customers with any recorded transaction in the period; not registrations.",
-            "worstWinningPayout" to "Largest selection winning payout for outstanding single-selection bets; VOID refunds and unknown markets are separate.",
-        )
-        return linkedMapOf(
-            "manifest" to linkedMapOf(
-                "version" to "supervisory-report-v1", "ledgerId" to anchor.head.ledgerId,
-                "dataset" to if (size > 0) ledger.entry(0).chainHash.toHex() else anchor.head.rootHash.toHex(),
-                "generatedAt" to iso(anchor.head.timestampMicros), "from" to iso(from), "to" to iso(to),
-                "timezone" to zone.id, "currency" to currency, "population" to population,
-                "availableFrom" to iso(firstTime), "availableThrough" to iso(endOfSnapshot),
-                "coverage" to if (from >= firstTime && to <= endOfSnapshot) "Available demo history" else "Partial period",
-                "historyNote" to "Demo history resets daily. No report proves activity before the retained history.",
-                "sourceNotes" to listOf("Financial and activity figures: signed ledger prefix.",
-                    "Fixture descriptions and declared results: unsigned snapshot captured separately.",
-                    "Compliance scenarios: deterministic synthetic examples; no controls are enforced by these reports."),
-                "definitions" to definitions, "anchor" to anchorView(anchor), "publicKey" to ledger.publicKey.encoded),
-            "financial" to linkedMapOf("openingLiability" to opening.toString(), "closingLiability" to closing.toString(),
-                "cashLiability" to sum { it.cash }.toString(), "escrowLiability" to sum { it.escrow }.toString(),
-                "deposits" to deposits.toString(), "withdrawals" to withdrawals.toString(), "stakes" to stakes.toString(),
-                "payouts" to payouts.toString(), "revenue" to revenue.toString(),
-                "winPayouts" to winPayouts.toString(), "voidRefunds" to voidRefunds.toString(), "cashOuts" to cashOuts.toString(),
-                "settledStakes" to returnedStakes.toString(), "otherMovement" to otherMovement.toString(),
-                "conservation" to conservation.toString(), "openBets" to openBets, "openStakes" to openStakes.toString(),
-                "escrowReconciles" to (openStakes == sum { it.escrow }), "unclassifiedEntries" to unclassified,
-                "otherEntries" to otherEntries, "periodEntries" to periodEntries, "outcomes" to outcomes,
-                "bankReconciliation" to null, "tax" to null),
-            "customers" to customerRows, "fixtures" to fixtureRows,
-            "customerSummary" to mapOf("observed" to customers.size, "active" to active.size,
-                "bettors" to active.count { it.bets > 0 }, "depositors" to active.count { it.deposits.signum() > 0 },
-                "firstActivityInPeriod" to active.count { inPeriod(it.firstTime) },
-                "registrations" to null, "verified" to null, "excluded" to null),
-            "daily" to days.map { (day, values) -> mapOf("day" to day) +
-                listOf("deposits", "withdrawals", "stakes", "payouts", "revenue").associateWith { values.getOrDefault(it, BigInteger.ZERO).toString() } },
-            "signals" to signals,
-            "compliance" to scenarios(),
-            "coverage" to listOf(
-                coverage("Money and betting activity", "Ledger-derived", "Exact amounts, period flows, liabilities and transaction drill-down."),
-                coverage("Fixture catalogue", "Unsigned snapshot", "Sport, event, selections, times and declared results are demo metadata, not authenticated by the ledger signature."),
-                coverage("Customer eligibility", "Not collected", "Registration, age, identity, location, sanctions and due-diligence decisions."),
-                coverage("Player protection", "Not collected", "Real limits, exclusions, blocked attempts, sessions, interventions and outcomes."),
-                coverage("Cases and governance", "Synthetic examples", "Example case timelines, control owners, training and audit findings; not live compliance evidence."),
-                coverage("External financial reconciliation", "Not collected", "Bank balances, payment-provider statements, safeguarding and taxes."),
-                coverage("Monitoring", "Illustrative rules", "Explainable transaction signals requiring human review, not determinations of harm or crime."),
-            ),
-        )
+        return LinkedHashMap(frozen.report).also { it["fixtures"] = fixtureRows }
     }
 
     /** Bounded, replayable canonical evidence for a report, rejected after a reset. */

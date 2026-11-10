@@ -263,6 +263,45 @@ class RegulatorReportsTest {
     }
 
     @Test
+    fun `a repeated report reuses its frozen sections and still joins live fixture declarations`() {
+        Context().use { c ->
+            c.wallet.deposit("alice", 10_000, "EUR", "cache-funds")
+            c.wallet.deposit("sim-00001", 10_000, "EUR", "cache-sim")
+            val fixture = c.book.addFixture()
+            c.book.placeBet("alice", fixture.id, "HOME", 100, "cache-bet")
+            val cache = com.pam.ledger.web.ReportCache(capacity = 2)
+            fun reports() = RegulatorReports(c.ledger, c.book, c.audit, cache) // one per request, as the web app builds them
+            val uncached = Json.of(RegulatorReports(c.ledger, c.book, c.audit).create(emptyMap()))
+            val first = reports().create(emptyMap())
+            assertEquals(0L to 1L, cache.hits to cache.misses)
+            val second = reports().create(emptyMap())
+            assertEquals(1L to 1L, cache.hits to cache.misses)
+            assertEquals(uncached, Json.of(first), "a cached report must be byte-identical to an uncached one")
+            assertEquals(uncached, Json.of(second))
+            // A different slice of the same signed prefix is a different report.
+            val manual = reports().create(mapOf("population" to "manual"))
+            assertEquals(1L to 2L, cache.hits to cache.misses)
+            assertEquals(1, map(manual["customerSummary"])["observed"])
+            assertEquals(Json.of(manual), Json.of(reports().create(mapOf("population" to "manual"))))
+            assertEquals(2L to 2L, cache.hits to cache.misses)
+            // Fixture declarations are unsigned and live: a result declared after the freeze shows on the cached report.
+            val row = { report: Map<String, Any?> -> rows(report["fixtures"]).single { it["id"] == fixture.id } }
+            assertNull(map(row(second)["definition"])["declaredResult"])
+            c.book.publishResult(fixture.id, "HOME")
+            val declared = reports().create(emptyMap())
+            assertEquals(3L to 2L, cache.hits to cache.misses, "declaring a result writes nothing, so the frozen sections are reused")
+            assertEquals("HOME", map(row(declared)["definition"])["declaredResult"])
+            assertTrue(row(declared)["exceptions"].toString().contains("outstanding bets"))
+            // New history means a new checkpoint and a new report; the cache never holds more than its capacity.
+            c.wallet.deposit("alice", 1, "EUR", "cache-more")
+            val grown = reports().create(emptyMap())
+            assertTrue(map(map(grown["manifest"])["anchor"])["treeSize"] != map(map(first["manifest"])["anchor"])["treeSize"])
+            assertEquals(Json.of(RegulatorReports(c.ledger, c.book, c.audit).create(emptyMap())), Json.of(grown))
+            assertEquals(2, cache.size)
+        }
+    }
+
+    @Test
     fun `reports racing settlement reconcile only their captured durable prefix`() {
         Context().use { c ->
             c.wallet.deposit("alice", 10_000, "EUR", "race")
