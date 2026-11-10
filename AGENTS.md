@@ -32,7 +32,6 @@ src/test/kotlin/com/pam/ledger/
 docs/
   readme.src.html        SOURCE of the interactive guide (edit this)
   index.html             BUILT guide served by GitHub Pages (never edit by hand)
-  read-performance-plan.md  PROPOSED plan for read, heap and restart scaling (issue #73)
 scripts/
   setup.sh, setup.ps1    one-command developer setup (Ubuntu, Windows); keep README in step
   build-readme.py        builds docs/index.html, embedding the real Kotlin sources and tests
