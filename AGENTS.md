@@ -28,6 +28,7 @@ src/main/resources/web/  web console front end: index.html, app.js, app.css (no 
 src/test/kotlin/com/pam/ledger/
   MultiDeviceWalletTest.kt   regulatory properties R1-R6 under multi-device load
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
+  ReadScalingTest.kt         read-model indexes; opt-in soak proves reads stay flat as the ledger grows
   WebAppTest.kt              web console API, simulator, bets racing settlement
 docs/
   readme.src.html        SOURCE of the interactive guide (edit this)
@@ -174,6 +175,11 @@ change it describes:
   `SportsbookWallet` (or `Book`, which uses it); never write ledger state any other way.
 - Dashboards read from `ReadModel`, which tails the ledger. Never base a money decision on
   it: balances shown to users come from the ledger itself.
+- Keep customer reads independent of ledger size (issue #73). A new query must use an
+  index the tailer maintains, never a scan of all entries, players or bets. An index may
+  choose which entries a reader looks at, but anything shown as proof (the player audit)
+  must still recompute from the entries and check the index against the ledger's own
+  account version. `ReadModel` queries share a read lock; only the tailer writes.
 - Placing a bet and settling its fixture are coordinated by the per-fixture lock in `Book`.
   Keep it, and keep the race test in `WebAppTest`.
 - Retain a slip's original player, stake, selection and bet ID while placement is

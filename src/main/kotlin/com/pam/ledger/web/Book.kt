@@ -359,7 +359,8 @@ class Book(
 
     private fun restoreFixtures() {
         readModel.catchUp()
-        val betsByFixture = readModel.allBets().groupBy { it.fixtureId }
+        // Per-fixture summaries, not every bet ever placed: restart cost follows fixtures, not history.
+        val betsByFixture = readModel.fixtureSummaries()
         restoreArchive()
         val file = directory?.resolve(FIXTURES_FILE)?.takeIf { Files.exists(it) }
         val properties = Properties().apply { if (file != null) Files.newInputStream(file).use(::load) }
@@ -389,7 +390,7 @@ class Book(
             val fixture = fixtures[id]
             if (fixture == null) {
                 val odds = mutableMapOf("HOME" to 100, "DRAW" to 100, "AWAY" to 100)
-                bets.forEach { odds[it.selection] = it.oddsHundredths }
+                odds.putAll(bets.odds)
                 fixtures[id] = Fixture(id, "Restored fixture", "result unavailable", odds).apply {
                     result = LEGACY_UNRESOLVED
                 }
@@ -400,25 +401,25 @@ class Book(
             }
             val oldResult = fixture.result
             val oldComplete = fixture.settlementComplete
-            val hasSettledOutcome = bets.any { it.outcome != null && it.outcome != "CASHED_OUT" }
+            val hasSettledOutcome = bets.outcomes.values.any { outcomes -> outcomes.any { it != "CASHED_OUT" } }
             if (fixture.result == null && (hasSettledOutcome || fixture.settlementComplete)) {
                 fixture.result = LEGACY_UNRESOLVED
                 fixture.settlementComplete = false
             } else if (fixture.result != null && fixture.result != LEGACY_UNRESOLVED) {
                 val knownResult = fixture.result in fixture.odds.keys + "VOID"
-                val consistent = knownResult && bets.all { bet ->
-                    val outcome = bet.outcome ?: return@all true
-                    outcome == "CASHED_OUT" || outcome == when {
+                val consistent = knownResult && bets.outcomes.all { (selection, outcomes) ->
+                    val expected = when {
                         fixture.result == "VOID" -> "VOIDED"
-                        bet.selection == fixture.result -> "WON"
+                        selection == fixture.result -> "WON"
                         else -> "LOST"
                     }
+                    outcomes.all { it == "CASHED_OUT" || it == expected }
                 }
                 if (!consistent) {
                     fixture.result = LEGACY_UNRESOLVED
                     fixture.settlementComplete = false
                 } else {
-                    val hasOpenBets = bets.any { it.isOpen }
+                    val hasOpenBets = bets.openBets > 0
                     if (fixture.settlementComplete && hasOpenBets) fixture.settlementComplete = false
                     if (!hasOpenBets) fixture.settlementComplete = true
                 }
