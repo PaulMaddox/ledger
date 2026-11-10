@@ -179,13 +179,20 @@ internal class HashIndex(
 
     private fun maintain() {
         try {
+            // Flushing comes first, but never every time: under a sustained load the frozen list may
+            // never empty, and merges and filter growth that waited for it would wait for ever, leaving
+            // runs to pile up and the filter to fill. When both kinds of work are waiting they alternate.
+            var flushedLast = false
             while (!closed) {
                 val s = state.get()
                 val bloomNow = bloom
+                val inputs = mergeable(s.runs)
+                val growFilter = bloomNow != null && count > bloomNow.capacity
+                val other = inputs != null || growFilter
                 when {
-                    s.frozen.isNotEmpty() -> flush(s.frozen.first())
-                    mergeable(s.runs) != null -> merge(mergeable(s.runs)!!)
-                    bloomNow != null && count > bloomNow.capacity -> rebuildBloom()
+                    s.frozen.isNotEmpty() && !(flushedLast && other) -> { flush(s.frozen.first()); flushedLast = true }
+                    inputs != null -> { merge(inputs); flushedLast = false }
+                    growFilter -> { rebuildBloom(); flushedLast = false }
                     else -> work.tryAcquire(100, TimeUnit.MILLISECONDS)
                 }
             }

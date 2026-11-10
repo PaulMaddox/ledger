@@ -167,7 +167,11 @@ class ReadModel private constructor() : AutoCloseable {
     /** Every query: refuse to answer from a model that may hold part of an entry twice (see [broken]). */
     private inline fun <T> guarded(block: () -> T): T {
         broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
-        return lock.read(block)
+        return lock.read {
+            // Again under the lock: a query that queued behind a catch-up which then failed must refuse too.
+            broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
+            block()
+        }
     }
     // Read without the lock by catchUp's fast path; written only under the write lock.
     @Volatile private var next = 0L
