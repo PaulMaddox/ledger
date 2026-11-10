@@ -197,7 +197,7 @@ internal class HashIndex(
                 }
             }
         } catch (t: Throwable) {
-            if (closed) return // interrupted by close(); the files are about to be deleted anyway
+            if (closed) return // close() retired a file under it; the files are about to be deleted anyway
             failure = t
             storage.failed(t) // the ledger fail-stops: an index that cannot be maintained cannot be relied on
         }
@@ -212,8 +212,12 @@ internal class HashIndex(
         var i = 0
         table.forEach { hash, seq -> hashes[i] = hash; seqs[i] = seq; i++ }
         sortPairs(hashes, seqs, 0, n - 1)
-        val writer = RunWriter(storage.create("$name-run"))
-        for (j in 0 until n) writer.add(hashes[j], seqs[j])
+        val file = storage.create("$name-run")
+        val writer = RunWriter(file)
+        for (j in 0 until n) {
+            if (closed) { file.delete(); return } // abandoned between records, never mid-write; see close()
+            writer.add(hashes[j], seqs[j])
+        }
         val run = writer.finish(seqs.maxOrNull() ?: -1)
         while (true) {
             val s = state.get()
@@ -233,9 +237,11 @@ internal class HashIndex(
     }
 
     private fun merge(inputs: List<Run>) {
-        val writer = RunWriter(storage.create("$name-run"))
+        val file = storage.create("$name-run")
+        val writer = RunWriter(file)
         val cursors = inputs.map { it.cursor() }
         while (true) {
+            if (closed) { file.delete(); return } // as in flush
             var least: Run.Cursor? = null
             for (c in cursors) if (c.valid && (least == null || c.before(least))) least = c
             if (least == null) break
@@ -272,9 +278,13 @@ internal class HashIndex(
         if (closed) return
         closed = true
         storage.unregister(this)
+        // Never interrupt maintenance: Java closes a channel when a thread blocked in it is interrupted,
+        // and a derived write that fails stops the ledger. Signal it instead, and let the operation in
+        // hand finish; it checks [closed] before starting another.
         work.release()
-        maintenance.interrupt()
-        maintenance.join(10_000)
+        maintenance.join(MAINTENANCE_JOIN_MILLIS)
+        // Deleting a file marks it retired first, so a write that is somehow still running ends
+        // without being mistaken for a disk failure.
         state.get().runs.forEach { runCatching { it.file.delete() } }
     }
 
@@ -420,6 +430,8 @@ internal class HashIndex(
         const val MAX_BACKLOG = 4
         // Live writers are not slowed for brief stalls; only a sustained one turns requests away.
         const val MAX_LIVE_BACKLOG = 16
+        // Long enough for the largest merge to finish on a slow disk.
+        const val MAINTENANCE_JOIN_MILLIS = 60_000L
 
         fun unsignedToDouble(value: Long): Double =
             if (value >= 0) value.toDouble() else (value ushr 1).toDouble() * 2.0
