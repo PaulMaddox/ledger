@@ -161,6 +161,19 @@ class WebAppTest {
     }
 
     @Test
+    fun `back to back supervisory requests from one client are never refused as concurrent`() = withApp { app ->
+        val (status, report) = call(app, "POST", "regulator/report")
+        assertEquals(200, status, report)
+        val size = Regex("\"treeSize\":(\\d+)").find(report)!!.groupValues[1]
+        val root = Regex("\"rootHash\":\"([a-f0-9]+)\"").find(report)!!.groupValues[1]
+        val params = mapOf("size" to size, "root" to root, "seq" to "0")
+        // Supervisory requests are single-flight. A client that waits for each answer before sending
+        // the next is never running two at once, so none of its requests may be turned away as overlapping.
+        val statuses = (1..3_000).map { call(app, "GET", "regulator/report/proof", params).first }
+        assertEquals(emptyMap(), statuses.filter { it != 200 }.groupingBy { it }.eachCount())
+    }
+
+    @Test
     fun `daily demo reset uses 03 UAE time regardless of the host timezone`() {
         val before = Instant.parse("2026-10-31T22:59:59Z")
         val boundary = Instant.parse("2026-10-31T23:00:00Z")
