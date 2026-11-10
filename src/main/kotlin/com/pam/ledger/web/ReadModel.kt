@@ -1,7 +1,14 @@
 package com.pam.ledger.web
 
 import com.pam.ledger.AccountId
+import com.pam.ledger.ChainLog
+import com.pam.ledger.DerivedIndexUser
+import com.pam.ledger.DerivedStorage
+import com.pam.ledger.FixedLog
+import com.pam.ledger.HashIndex
+import com.pam.ledger.KeyIndex
 import com.pam.ledger.Ledger
+import com.pam.ledger.PagedFile
 import com.pam.ledger.RecoveryListener
 import com.pam.ledger.SealedEntry
 import com.pam.ledger.SportsbookWallet.Accounts
@@ -37,6 +44,7 @@ class ReadModel private constructor() : AutoCloseable {
 
     /** Tail [ledger] from its first entry. Prefer [Recovering] when opening a ledger with history. */
     constructor(ledger: Ledger) : this() {
+        useStorage(ledger.derived, ledger.indexFlushSize)
         attach(ledger)
     }
 
@@ -51,9 +59,11 @@ class ReadModel private constructor() : AutoCloseable {
      * Recovery hands over only entries that passed every check. If the ledger fails to open,
      * drop this object: it was never attached, so nothing can read what it indexed.
      */
-    class Recovering : RecoveryListener {
+    internal class Recovering : RecoveryListener, DerivedIndexUser {
         private val model = ReadModel()
         private var indexed = 0L
+
+        override fun useStorage(storage: DerivedStorage, indexFlushSize: Int) = model.useStorage(storage, indexFlushSize)
 
         override fun recovered(entry: SealedEntry) {
             model.apply(entry)
@@ -70,6 +80,24 @@ class ReadModel private constructor() : AutoCloseable {
     }
 
     private lateinit var ledger: Ledger
+
+    // ---- Histories and the bet index live in the ledger's derived files, not on the heap. ----
+    private lateinit var chainFile: PagedFile
+    private lateinit var chains: ChainLog
+    // Hash of a bet ID -> sequence numbers of its placement (and settlement) entries. As in the
+    // engine's key index, a match is a candidate until the entry's own betId agrees.
+    private lateinit var placements: HashIndex
+    private lateinit var settlements: HashIndex
+
+    private fun useStorage(storage: DerivedStorage, indexFlushSize: Int) {
+        chainFile = storage.create("read-model-chains")
+        chains = ChainLog(FixedLog(chainFile, 8))
+        // The placement index has a filter so a settlement for a bet this model never indexed (one
+        // placed without a market) is recognised from memory. Settlements are only looked up for
+        // bets that exist, so they need none.
+        placements = HashIndex(storage, "bets-placed", indexFlushSize, 10).apply { mayWait = true }
+        settlements = HashIndex(storage, "bets-settled", indexFlushSize, 0).apply { mayWait = true }
+    }
 
     /** A bet as reconstructed from its placement entry and (optionally) its settlement entry. */
     data class BetView(
@@ -117,19 +145,21 @@ class ReadModel private constructor() : AutoCloseable {
     private val lock = ReentrantReadWriteLock()
     // Read without the lock by catchUp's fast path; written only under the write lock.
     @Volatile private var next = 0L
-    private val byPlayer = HashMap<String, LongHistory>()
+    // In memory a history is only its length and a few file positions; see ChainLog.
+    private val byPlayer = HashMap<String, ChainLog.Chain>()
     // Placement entries only, so a page of bets never walks deposits and withdrawals.
-    private val placementsByPlayer = HashMap<String, LongHistory>()
+    private val placementsByPlayer = HashMap<String, ChainLog.Chain>()
     // Sorted, so a search scans in a stable order without copying or sorting per request.
     private val playerIds = TreeSet<String>()
     // Every entry that posts to a player account, so an audit reads only that account's history.
-    private val seqsByAccount = HashMap<String, LongHistory>()
+    private val seqsByAccount = HashMap<String, ChainLog.Chain>()
     private val fixtureIndexes = HashMap<String, FixtureIndex>()
-    // Every bet ever placed, as primitives. Decoded views are kept only for OPEN bets, below.
-    private val bets = BetTable()
-    // Fixture and selection pairs, numbered so a bet's row can name its market in a few bits.
-    private val markets = ArrayList<Pair<String, String>>()
-    private val marketNumbers = HashMap<Pair<String, String>, Int>()
+    // Settlements of bets that were not open when they arrived: an unknown bet, or a bet settled
+    // again under a nonstandard key. Rare. Their effect on the fixture summaries needs the bet's
+    // entries, which recovery cannot read, so it is worked out when the summaries are next asked for.
+    private class LateSettlement(val betId: String, val seq: Long, val outcome: String)
+    private val lateSettlements = ArrayList<LateSettlement>()
+    // Decoded views are kept only for OPEN bets. Everything else about a bet is in the index files.
     private val openViews = HashMap<String, BetView>()
     private val openBetsByPlayer = HashMap<String, MutableSet<String>>()
     private val openBetsByFixture = HashMap<String, MutableSet<String>>()
@@ -173,6 +203,8 @@ class ReadModel private constructor() : AutoCloseable {
                 apply(ledger.entry(next))
                 next++
             }
+            // Keep the set-aside list short: with the ledger at hand it can be settled up straight away.
+            if (lateSettlements.isNotEmpty()) resolveLateSettlements()
         }
     }
 
@@ -186,12 +218,12 @@ class ReadModel private constructor() : AutoCloseable {
         recent.addLast(e.seq)
         if (recent.size > 60) recent.removeFirst()
         e.metadata["playerId"]?.let { player ->
-            byPlayer.getOrPut(player) { playerIds.add(player); LongHistory() }.add(e.seq)
-            if (e.kind == "BET_PLACED") placementsByPlayer.getOrPut(player) { LongHistory() }.add(e.seq)
+            chains.append(byPlayer.getOrPut(player) { playerIds.add(player); ChainLog.Chain() }, e.seq)
+            if (e.kind == "BET_PLACED") chains.append(placementsByPlayer.getOrPut(player) { ChainLog.Chain() }, e.seq)
         }
         // Validation rejects a transaction naming an account twice, so each entry is recorded once per account.
         for (p in e.postings) if (p.account.value.startsWith(PLAYER_PREFIX)) {
-            seqsByAccount.getOrPut(p.account.value) { LongHistory() }.add(e.seq)
+            chains.append(seqsByAccount.getOrPut(p.account.value) { ChainLog.Chain() }, e.seq)
         }
 
         fun cashDelta(player: String) = e.postings.firstOrNull { it.account == Accounts.cash(player, it.currency) }?.amount ?: 0L
@@ -212,7 +244,7 @@ class ReadModel private constructor() : AutoCloseable {
                         selection = parts[1], oddsHundredths = parts[2].toInt(), stake = stake,
                         placedSeq = e.seq, placedAtMicros = e.timestampMicros,
                     )
-                    bets.place(betId, e.seq, marketNumber(parts[0], parts[1]))
+                    placements.put(KeyIndex.hashOf(betId), e.seq)
                     openViews[betId] = bet
                     openBetsByPlayer.getOrPut(player) { LinkedHashSet() }.add(betId)
                     openBetsByFixture.getOrPut(parts[0]) { LinkedHashSet() }.add(betId)
@@ -230,36 +262,70 @@ class ReadModel private constructor() : AutoCloseable {
                 val betId = e.metadata.getValue("betId")
                 val payout = cashDelta(e.metadata.getValue("playerId"))
                 returned = returned.add(BigInteger.valueOf(payout))
-                bets.settle(betId, e.seq, OUTCOMES.indexOf(e.kind.removePrefix("BET_")))?.let { before ->
-                    recordOutcome(before, e.kind.removePrefix("BET_"))
-                    openViews.remove(betId)?.let {
-                        fixtureIndexes[it.fixtureId]?.let { index -> index.open-- }
-                        openBetCount--
-                        val amount = BigInteger.valueOf(it.stake)
-                        openStakes = openStakes.subtract(amount)
-                        exposure = exposure.subtract(openExposure(it))
-                        openBetsByPlayer[it.playerId]?.remove(betId)
-                        openBetsByFixture[it.fixtureId]?.remove(betId)
-                        if (openBetsByPlayer[it.playerId]?.isEmpty() == true) openBetsByPlayer.remove(it.playerId)
-                        if (openBetsByFixture[it.fixtureId]?.isEmpty() == true) openBetsByFixture.remove(it.fixtureId)
+                settlements.put(KeyIndex.hashOf(betId), e.seq)
+                val outcome = e.kind.removePrefix("BET_")
+                val open = openViews.remove(betId)
+                if (open == null) {
+                    // Not an open bet. If it may have been placed at all, settle up later; see lateSettlements.
+                    if (placements.mightContain(KeyIndex.hashOf(betId))) lateSettlements.add(LateSettlement(betId, e.seq, outcome))
+                } else {
+                    fixtureIndexes[open.fixtureId]?.let { index ->
+                        index.open--
+                        index.outcomes.getOrPut(open.selection) { HashMap() }.merge(outcome, 1, Int::plus)
                     }
+                    openBetCount--
+                    val amount = BigInteger.valueOf(open.stake)
+                    openStakes = openStakes.subtract(amount)
+                    exposure = exposure.subtract(openExposure(open))
+                    openBetsByPlayer[open.playerId]?.remove(betId)
+                    openBetsByFixture[open.fixtureId]?.remove(betId)
+                    if (openBetsByPlayer[open.playerId]?.isEmpty() == true) openBetsByPlayer.remove(open.playerId)
+                    if (openBetsByFixture[open.fixtureId]?.isEmpty() == true) openBetsByFixture.remove(open.fixtureId)
                 }
             }
         }
     }
 
-    private fun marketNumber(fixture: String, selection: String): Int = marketNumbers.getOrPut(fixture to selection) {
-        check(markets.size < BetTable.MAX_MARKETS) { "too many markets" }
-        markets.add(fixture to selection)
-        markets.size - 1
+    /** Where a bet was placed and, if it has been, settled. */
+    private class BetRow(val placedSeq: Long, val settledSeq: Long)
+
+    /**
+     * Find a bet by ID as it stood just before entry [before]. The index offers candidate
+     * entries by hash; each is read from the ledger and counts only if its own betId matches.
+     * The newest placement defines the bet, and the newest settlement after it settles it.
+     */
+    private fun row(betId: String, before: Long = Long.MAX_VALUE, knownPlacement: Long = -1): BetRow? {
+        val hash = KeyIndex.hashOf(betId)
+        // A caller that already holds one of the bet's placements only needs to learn of a newer
+        // one, and a settlement always follows its placement, so older index files are not searched.
+        var placed = knownPlacement
+        placements.anyCandidate(hash, knownPlacement + 1) { seq ->
+            if (seq > placed && seq < before && ledger.entry(seq).entry.metadata["betId"] == betId) placed = seq
+            false
+        }
+        if (placed < 0) return null
+        var settled = -1L
+        settlements.anyCandidate(hash, placed + 1) { seq ->
+            if (seq > settled && seq > placed && seq < before && ledger.entry(seq).entry.metadata["betId"] == betId) settled = seq
+            false
+        }
+        return BetRow(placed, settled)
     }
 
-    /** Count [outcome] against the bet's fixture and selection, replacing any outcome an earlier settlement recorded. */
-    private fun recordOutcome(before: BetTable.Row, outcome: String) {
-        val (fixture, selection) = markets[before.market]
-        val outcomes = fixtureIndexes.getValue(fixture).outcomes.getOrPut(selection) { HashMap() }
-        if (before.outcome != 0) outcomes.computeIfPresent(OUTCOMES[before.outcome]) { _, count -> if (count > 1) count - 1 else null }
-        outcomes.merge(outcome, 1, Int::plus)
+    /** Apply the settlements set aside by [apply] to the fixture summaries. Needs the ledger; caller holds the write lock. */
+    private fun resolveLateSettlements() {
+        for (late in lateSettlements) {
+            val before = row(late.betId, late.seq) ?: continue // no such bet when this entry was committed
+            val parts = ledger.entry(before.placedSeq).entry.metadata.getValue("selection").split("|")
+            val outcomes = fixtureIndexes.getValue(parts[0]).outcomes.getOrPut(parts[1]) { HashMap() }
+            if (before.settledSeq >= 0) {
+                // Settled again: the newest outcome replaces the one counted before.
+                val previous = ledger.entry(before.settledSeq).entry.kind.removePrefix("BET_")
+                outcomes.computeIfPresent(previous) { _, count -> if (count > 1) count - 1 else null }
+            }
+            outcomes.merge(late.outcome, 1, Int::plus)
+        }
+        lateSettlements.clear()
     }
 
     private fun openExposure(bet: BetView): BigInteger {
@@ -269,7 +335,7 @@ class ReadModel private constructor() : AutoCloseable {
             .divide(BigInteger.valueOf(100)).subtract(stake)
     }
 
-    private fun view(history: BetTable.Row): BetView {
+    private fun view(history: BetRow): BetView {
         val placement = ledger.entry(history.placedSeq).entry
         val id = placement.metadata.getValue("betId")
         if (history.settledSeq < 0) return openViews.getValue(id)
@@ -288,36 +354,40 @@ class ReadModel private constructor() : AutoCloseable {
 
     fun seqsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<Long> = lock.read {
         require(limit >= 0) { "history limit must be non-negative" }
-        byPlayer[player]?.tail(limit) ?: emptyList()
+        byPlayer[player]?.let { chains.tail(it, limit).asList() } ?: emptyList()
     }
     fun historyForPlayer(player: String, limit: Int): HistoryPage = lock.read {
         require(limit >= 0) { "history limit must be non-negative" }
         val history = byPlayer[player]
-        HistoryPage(history?.size ?: 0, history?.tail(limit) ?: emptyList())
+        HistoryPage(Math.toIntExact(history?.count ?: 0), history?.let { chains.tail(it, limit).asList() } ?: emptyList())
     }
     /** The player's most recent [limit] bets, oldest first. Reads placements only, however long the rest of the history is. */
     fun betsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<BetView> = lock.read {
         require(limit >= 0) { "bet limit must be non-negative" }
-        val placements = placementsByPlayer[player] ?: return@read emptyList()
+        val placed = placementsByPlayer[player] ?: return@read emptyList()
         val result = ArrayList<BetView>()
-        var index = placements.size - 1
-        while (index >= 0 && result.size < limit) {
-            // A placement without a well-formed selection has no view; skip it as the full-history walk did.
-            ledger.entry(placements[index--]).entry.metadata["betId"]?.let { bets[it] }?.let { result.add(view(it)) }
+        if (limit > 0) chains.walkBack(placed) { seq ->
+            val placement = ledger.entry(seq).entry
+            // A well-formed placement is itself indexed, so the search can start from it. One without
+            // a market is not; it has a view only if the same bet ID was also placed properly elsewhere.
+            val indexed = placement.metadata["selection"]?.split("|")?.size == 3
+            placement.metadata["betId"]?.let { row(it, knownPlacement = if (indexed) seq else -1) }?.let { result.add(view(it)) }
+            result.size < limit
         }
         result.asReversed()
     }
     /** Every bet ever placed, in placement order. Reads each bet's entries: for tests and diagnostics, not for request paths. */
     fun allBets(): List<BetView> = lock.read {
-        val rows = ArrayList<BetTable.Row>()
-        bets.forEach(rows::add)
-        rows.sortBy { it.placedSeq }
-        rows.map(::view)
+        val ids = LinkedHashSet<String>()
+        val seqs = ArrayList<Long>()
+        placements.forEach { _, seq -> seqs.add(seq) }
+        for (seq in seqs.distinct().sorted()) ledger.entry(seq).entry.metadata["betId"]?.let(ids::add)
+        ids.mapNotNull { row(it) }.sortedBy { it.placedSeq }.map(::view)
     }
     fun openBetsForPlayer(player: String): List<BetView> = lock.read {
         openBetsByPlayer[player].orEmpty().mapNotNull(openViews::get)
     }
-    fun bet(betId: String): BetView? = lock.read { bets[betId]?.let(::view) }
+    fun bet(betId: String): BetView? = lock.read { row(betId)?.let(::view) }
     fun openBets(): List<BetView> = lock.read {
         openViews.values.sortedWith { a, b -> a.placedSeq.compareTo(b.placedSeq) }
     }
@@ -336,11 +406,16 @@ class ReadModel private constructor() : AutoCloseable {
      * the count against the ledger's own account version, never trust this list alone.
      */
     fun seqsForAccount(account: AccountId): LongArray = lock.read {
-        val history = seqsByAccount[account.value] ?: return@read LongArray(0)
-        LongArray(history.size) { history[it] }
+        seqsByAccount[account.value]?.let { chains.tail(it) } ?: LongArray(0)
     }
     /** One summary per fixture that has ever had a bet. Size depends on fixtures and selections, not on bets. */
-    fun fixtureSummaries(): Map<String, FixtureSummary> = lock.read {
+    fun fixtureSummaries(): Map<String, FixtureSummary> {
+        // Settlements set aside while indexing are settled up first; that changes the index, so it needs the write lock.
+        if (lock.read { lateSettlements.isNotEmpty() }) lock.write { resolveLateSettlements() }
+        return lock.read { summaries() }
+    }
+
+    private fun summaries(): Map<String, FixtureSummary> = run {
         fixtureIndexes.mapValues { (_, index) ->
             FixtureSummary(LinkedHashMap(index.odds), index.outcomes.mapValues { it.value.keys.toSet() }, index.open)
         }
@@ -359,11 +434,15 @@ class ReadModel private constructor() : AutoCloseable {
             it.join(5_000)
             check(!it.isAlive) { "read model did not stop" }
         }
+        // Stop index maintenance and remove this model's derived files; the ledger's own are untouched.
+        if (::placements.isInitialized) {
+            placements.close()
+            settlements.close()
+            runCatching { chainFile.delete() }
+        }
     }
 
     private companion object {
         const val PLAYER_PREFIX = "player:"
-        // Index in this list is the outcome code stored in a bet's row; 0 means not settled.
-        val OUTCOMES = listOf("", "WON", "LOST", "VOIDED", "CASHED_OUT")
     }
 }

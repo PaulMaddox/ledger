@@ -66,6 +66,13 @@ import java.util.concurrent.atomic.AtomicReference
  * @property completionExecutor Runs callers' future callbacks, so slow user code never stalls the writer.
  * @property entryCacheSize How many recently used entries stay decoded in memory. Every other
  *   entry is read back from the journal, and checked against its verified hash, on demand.
+ * @property derivedDirectory Where derived index files go (default: `derived` inside [directory]).
+ *   They are emptied and rebuilt on every start and are never trusted across restarts. Putting
+ *   them on a different device keeps their writes away from the journal's fsync.
+ * @property derivedCachePages How many 4 KiB pages of derived files stay in memory.
+ * @property indexFlushSize Idempotency keys held in memory before they are written to a sorted file.
+ * @property bloomBitsPerKey Size of the in-memory filter that answers "this key is new" without a
+ *   disk read. Ten bits gives about one false alarm in a hundred; each costs one index search.
  */
 data class LedgerConfig(
     val directory: Path,
@@ -80,10 +87,15 @@ data class LedgerConfig(
     val clock: Clock = Clock.systemUTC(),
     val completionExecutor: Executor = ForkJoinPool.commonPool(),
     val entryCacheSize: Int = 16_384,
+    val derivedDirectory: Path? = null,
+    val derivedCachePages: Int = 16_384,
+    val indexFlushSize: Int = 65_536,
+    val bloomBitsPerKey: Int = 10,
 ) {
     init {
         require(ledgerId.isNotBlank()) { "ledgerId required" }
         require(queueCapacity > 0 && maxBatchSize > 0 && checkpointEvery > 0 && entryCacheSize > 0)
+        require(derivedCachePages > 0 && indexFlushSize > 0 && bloomBitsPerKey in 1..64)
     }
 }
 
@@ -100,12 +112,15 @@ class Ledger private constructor(
     private val entryJournal: Journal,
     private val checkpointJournal: Journal,
     recovered: Replayer,
-    // History itself stays in the journal. The store keeps an offset and a verified leaf hash per
-    // entry, reads entries back on demand, and reports any that no longer match their hash.
+    // Derived index files: rebuilt by the recovery that just ran, authenticated page by page.
+    internal val derived: DerivedStorage,
+    // History itself stays in the journal. The store knows where each entry starts and its verified
+    // leaf hash, reads entries back on demand, and reports any that no longer match their hash.
     private val entries: EntryStore,
-    // Hashes of committed idempotency keys. A match is only a candidate until the entry's own key agrees.
-    private val idempotency: KeyIndex,
-    tamperAlarm: AtomicReference<(TamperDetectedException) -> Unit>,
+    // Hashes of committed idempotency keys, mostly on disk behind an in-memory Bloom filter.
+    // A match is only a candidate until the entry's own key agrees.
+    private val idempotency: HashIndex,
+    alarm: AtomicReference<(Throwable) -> Unit>,
     // The prover recovery used to verify checkpoints. Its cache of completed subtrees is
     // already warm, so the first proof after a restart does not rehash the whole tree.
     private val prover: MerkleProver,
@@ -129,8 +144,11 @@ class Ledger private constructor(
     private val queue = ArrayBlockingQueue<Command>(config.queueCapacity)
 
     init {
-        // A reader that finds the journal changed underneath us stops the ledger: it can no longer prove its history.
-        tamperAlarm.set { failStop(it) }
+        // A reader that finds the journal or an index changed underneath us, or index maintenance
+        // that fails, stops the ledger: it can no longer prove its history or its decisions.
+        alarm.set { failStop(it) }
+        // Recovery is over. From here the writer thread adds keys, and it never waits for index maintenance.
+        idempotency.mayWait = false
     }
     private val writer = Thread(::runWriter, "pam-ledger-writer-${config.ledgerId}").apply { isDaemon = true }
 
@@ -163,6 +181,10 @@ class Ledger private constructor(
         // Hash the request on the CALLER's thread to keep work off the writer.
         val fingerprint = EntryCodec.requestFingerprint(request.kind, request.postings, request.metadata)
         val keyHash = KeyIndex.hashOf(request.idempotencyKey)
+        // If this key may already be committed, the writer will have to search the on-disk index and
+        // read the entry. Do that here first, so the pages are in memory by the time the writer asks
+        // and a slow disk delays this caller, not every transaction behind it. The writer still decides.
+        if (idempotency.mightContain(keyHash)) runCatching { committed(request.idempotencyKey, keyHash) }
         val internal = CompletableFuture<Receipt>()
         val cmd = Submit(request, fingerprint, keyHash, internal)
         if (!queue.offer(cmd, config.submitTimeout.toNanos(), TimeUnit.NANOSECONDS)) {
@@ -214,6 +236,7 @@ class Ledger private constructor(
     fun balance(account: AccountId): Long = accounts[account]?.balance ?: 0L
     fun account(account: AccountId): AccountState? = accounts[account]
     val publicKey: PublicKey get() = config.signer.publicKey
+    internal val indexFlushSize: Int get() = config.indexFlushSize
     val isFailed: Boolean get() = failure != null
 
     /**
@@ -274,6 +297,7 @@ class Ledger private constructor(
         runCatching { entryJournal.close() }
         runCatching { checkpointJournal.close() }
         runCatching { entries.close() }
+        runCatching { derived.close() } // stops index maintenance and deletes the derived files
         dirLock.close()
     }
 
@@ -418,10 +442,11 @@ class Ledger private constructor(
             //     entries first, so anything that points at an entry can resolve it...
             for (s in staged) {
                 // Remember where each record starts and what it hashes to; the entry itself stays in the journal.
-                entries.stage(offset, s.sealed.leafHash)
+                // The leaf goes into the tree (and its node files) before the entry can be published.
+                frontier.append(s.sealed.leafHash)
+                entries.stage(offset)
                 entries.remember(s.sealed)
                 offset += Journal.HEADER + s.sealed.recordSize
-                frontier.append(s.sealed.leafHash)
             }
             entries.publish()
             //     ...then the indexes and balances that refer to those entries...
@@ -482,6 +507,7 @@ class Ledger private constructor(
         const val ENTRIES_FILE = "entries.journal"
         const val CHECKPOINTS_FILE = "checkpoints.journal"
         const val LOCK_FILE = "ledger.lock"
+        const val DERIVED_DIRECTORY = "derived"
 
         /**
          * Open (or create) a ledger, fully verifying the existing journal first.
@@ -495,6 +521,7 @@ class Ledger private constructor(
             Files.createDirectories(config.directory)
             val lock = DirectoryLock.acquire(config.directory.resolve(LOCK_FILE))
             var entryStore: EntryStore? = null
+            var derived: DerivedStorage? = null
             var entryJournal: Journal? = null
             var checkpointJournal: Journal? = null
             try {
@@ -502,16 +529,23 @@ class Ledger private constructor(
                 //    hash per entry, never the entries themselves, so memory does not limit history.
                 val entriesPath = config.directory.resolve(ENTRIES_FILE)
                 val strings = EntryStrings()
-                val tamperAlarm = AtomicReference<(TamperDetectedException) -> Unit> {}
-                val store = EntryStore(entriesPath, config.entryCacheSize, strings) { tamperAlarm.get()(it) }
+                // During recovery a failure simply propagates out of open(); afterwards it stops the ledger.
+                val alarm = AtomicReference<(Throwable) -> Unit> {}
+                val storage = DerivedStorage(config.derivedDirectory ?: config.directory.resolve(DERIVED_DIRECTORY),
+                    config.derivedCachePages) { alarm.get()(it) }
+                derived = storage
+                val store = EntryStore(entriesPath, storage, config.entryCacheSize, strings) { alarm.get()(it) }
                 entryStore = store
-                val keys = KeyIndex()
+                val keys = HashIndex(storage, "keys", config.indexFlushSize, config.bloomBitsPerKey)
+                keys.mayWait = true // only recovery may pause for index maintenance; the writer thread never does
+                (listener as? DerivedIndexUser)?.useStorage(storage, config.indexFlushSize)
                 val replayer = Replayer(config.ledgerId, config.accountPolicy, index = RecoveryIndex(store, keys, listener), entryStrings = strings)
                 val (ej, entryScan) = Journal.openForAppendAt(entriesPath) { offset, record -> replayer.apply(record, offset) }
                 entryJournal = ej
 
                 // 2. Verify every signed checkpoint against the replayed history.
-                val prover = MerkleProver(store::leafHash)
+                // Complete subtrees are read from the node files recovery just wrote: no hashing, nothing cached.
+                val prover = MerkleProver.stored(store::leafHash, store.nodes::node)
                 val trusted = config.trustedKeys.associateBy(::keyIdOf)
                 var latest: SignedTreeHead? = null
                 val (cj, cpScan) = Journal.openForAppend(config.directory.resolve(CHECKPOINTS_FILE)) { bytes ->
@@ -526,9 +560,10 @@ class Ledger private constructor(
                 checkpointJournal = cj
 
                 val report = RecoveryReport(entryScan.records, cpScan.records, entryScan.tornTailBytes + cpScan.tornTailBytes)
-                return Ledger(config, lock, ej, cj, replayer, store, keys, tamperAlarm, prover, latest, report).also { it.writer.start() }
+                return Ledger(config, lock, ej, cj, replayer, storage, store, keys, alarm, prover, latest, report).also { it.writer.start() }
             } catch (t: Throwable) {
                 runCatching { entryStore?.close() }
+                runCatching { derived?.close() }
                 runCatching { entryJournal?.close() }
                 runCatching { checkpointJournal?.close() }
                 lock.close()

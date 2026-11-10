@@ -20,8 +20,12 @@ import java.util.zip.CRC32C
  *  full. The journal already holds every entry, so the engine keeps only what it
  *  needs to FIND an entry and to PROVE it is the one that was verified:
  *
- *      per entry, in memory:   where its record starts in the journal  (8 bytes)
- *                              its Merkle leaf hash                    (32 bytes)
+ *      per entry:   where its record starts in the journal  (8 bytes)
+ *                   its Merkle leaf hash                    (32 bytes)
+ *
+ *  Even those are not on the heap. They live in derived files whose pages are
+ *  authenticated with a key held only in memory (see Derived.kt), so what the
+ *  heap holds per entry is nothing at all.
  *
  *  Reading entry #n means: look in a small cache of recent entries; otherwise
  *  read the record at its offset, hash the bytes, and compare with the leaf hash
@@ -30,76 +34,36 @@ import java.util.zip.CRC32C
  *  mismatch means the file changed underneath a running ledger: the read fails
  *  with [TamperDetectedException] and the ledger stops accepting writes.
  *
- *  Nothing here changes what is written to disk. The offsets and hashes are
- *  DERIVED data: recovery rebuilds them from the journal on every start.
+ *  Nothing here changes what is written to the journal. The offsets and hashes
+ *  are DERIVED data: recovery rebuilds them from the journal on every start.
  */
 
 /**
- * Append-only list of longs with ONE writer and any number of lock-free readers,
- * indexed by Long so it is not limited to two billion elements.
+ * The Merkle tree's nodes, in derived files: one append-only log per level.
  *
- * Safe publication works exactly as in [AppendOnlyList]: the writer stores values,
- * then the owner publishes a count through a volatile write; a reader reads that
- * count first and never looks beyond it.
+ * Level 0 holds the leaf hashes; level k holds the root of every COMPLETE subtree
+ * of 2^k leaves, in order. A complete subtree never changes (the ledger is
+ * append-only), so each node is written once, when its last leaf arrives. A proof
+ * then reads about log2(n) nodes instead of rehashing leaves, and the writer keeps
+ * only the frontier, which is already O(log n).
+ *
+ * ONE writer adds nodes, before the entry that completes them is published;
+ * readers ask only about trees no larger than the published ledger.
  */
-internal class LongLog {
-    @Volatile private var directory: Array<LongArray?> = arrayOfNulls(16)
-    var size: Long = 0 // writer only; readers are bounded by the owner's published count
-        private set
+internal class MerkleNodes(private val storage: DerivedStorage) {
+    private val levels = AtomicReferenceArray<FixedLog?>(64)
 
-    /** Writer thread only. */
-    fun add(value: Long) {
-        val chunkIndex = (size ushr CHUNK_BITS).toInt()
-        var dir = directory
-        if (chunkIndex >= dir.size) {
-            dir = dir.copyOf(dir.size * 2) // copies chunk REFERENCES only
-            directory = dir
-        }
-        val chunk = dir[chunkIndex] ?: LongArray(CHUNK_SIZE).also { dir[chunkIndex] = it }
-        chunk[(size and MASK).toInt()] = value
-        size++
+    /** Writer only. Nodes of one level must be added in order; [MerkleFrontier] does exactly that. */
+    fun add(level: Int, node: Digest) {
+        val log = levels[level] ?: FixedLog(storage.create("merkle-$level"), Digest.SIZE).also { levels.set(level, it) }
+        log.add(node.rawBytes())
     }
 
-    /** Caller guarantees [index] is below a count it read from a volatile AFTER the element was added. */
-    operator fun get(index: Long): Long = directory[(index ushr CHUNK_BITS).toInt()]!![(index and MASK).toInt()]
-
-    private companion object {
-        const val CHUNK_BITS = 14
-        const val CHUNK_SIZE = 1 shl CHUNK_BITS // 16,384 longs = 128 KiB per chunk
-        const val MASK = (CHUNK_SIZE - 1).toLong()
-    }
-}
-
-/** Append-only list of 32-byte digests packed into byte arrays: 32 bytes per element, no object per hash. */
-internal class DigestLog {
-    @Volatile private var directory: Array<ByteArray?> = arrayOfNulls(16)
-    var size: Long = 0 // writer only
-        private set
-
-    /** Writer thread only. */
-    fun add(value: Digest) {
-        val chunkIndex = (size ushr CHUNK_BITS).toInt()
-        var dir = directory
-        if (chunkIndex >= dir.size) {
-            dir = dir.copyOf(dir.size * 2)
-            directory = dir
-        }
-        val chunk = dir[chunkIndex] ?: ByteArray(CHUNK_SIZE * Digest.SIZE).also { dir[chunkIndex] = it }
-        System.arraycopy(value.rawBytes(), 0, chunk, (size and MASK).toInt() * Digest.SIZE, Digest.SIZE)
-        size++
-    }
-
-    /** Caller guarantees [index] is below a published count, as for [LongLog.get]. */
-    operator fun get(index: Long): Digest {
-        val chunk = directory[(index ushr CHUNK_BITS).toInt()]!!
-        val from = (index and MASK).toInt() * Digest.SIZE
-        return Digest(chunk.copyOfRange(from, from + Digest.SIZE))
-    }
-
-    private companion object {
-        const val CHUNK_BITS = 12
-        const val CHUNK_SIZE = 1 shl CHUNK_BITS // 4,096 digests = 128 KiB per chunk
-        const val MASK = (CHUNK_SIZE - 1).toLong()
+    /** Root of the complete subtree of 2^[level] leaves starting at leaf [index] * 2^[level]. */
+    fun node(level: Int, index: Long): Digest {
+        val bytes = ByteArray(Digest.SIZE)
+        levels[level]!!.read(index, bytes)
+        return Digest(bytes)
     }
 }
 
@@ -163,6 +127,17 @@ internal class KeyIndex {
             if (h == 0L) return false
             if (h == hash && visit(table.seqs[i])) return true
             i = (i + 1) and table.mask
+        }
+    }
+
+    /** Visit every pair. Complete for pairs added before the call; a table no longer being written to is visited exactly. */
+    fun forEach(visit: (Long, Long) -> Unit) {
+        for (s in 0 until SEGMENTS) {
+            val table = segments[s]
+            for (i in 0 until table.hashes.length()) {
+                val h = table.hashes[i]
+                if (h != 0L) visit(h, table.seqs[i])
+            }
         }
     }
 
@@ -272,17 +247,22 @@ internal class JournalReader(private val path: Path) : AutoCloseable {
  * [publish]; any thread may read. Readers only ever see published entries, and
  * the writer publishes only after the batch is fsynced.
  *
+ * The writer must add each entry's leaf to [nodes] (through the Merkle frontier)
+ * before publishing it, because a read proves an entry against that leaf.
+ *
  * @param onTamper told when a record read back from disk no longer matches the
  *   hash verified at startup, so the ledger can fail-stop.
  */
 internal class EntryStore(
     path: Path,
+    storage: DerivedStorage,
     cacheSize: Int,
     private val strings: EntryStrings,
     private val onTamper: (TamperDetectedException) -> Unit,
 ) : AutoCloseable {
-    private val offsets = LongLog()
-    private val leaves = DigestLog()
+    private val offsets = FixedLog(storage.create("offsets"), 8)
+    /** The Merkle tree over all staged entries. Level 0 is the leaf hash of each entry. */
+    val nodes = MerkleNodes(storage)
     private val reader = JournalReader(path)
     @Volatile private var published = 0L
 
@@ -293,11 +273,8 @@ internal class EntryStore(
 
     val size: Long get() = published
 
-    /** Writer only: record where entry number [offsets.size] starts and what it hashes to. Invisible until [publish]. */
-    fun stage(offset: Long, leafHash: Digest) {
-        offsets.add(offset)
-        leaves.add(leafHash)
-    }
+    /** Writer only: record where the next entry's record starts. Invisible until [publish]. */
+    fun stage(offset: Long) = offsets.addLong(offset)
 
     /** Writer only: keep a just-sealed entry so its first readers (receipts, the read model) need no disk read. */
     fun remember(sealed: SealedEntry) = cache.set((sealed.entry.seq and cacheMask).toInt(), sealed)
@@ -310,7 +287,7 @@ internal class EntryStore(
     fun leafHash(seq: Long): Digest {
         val n = published // volatile read FIRST: establishes happens-before with the writer
         if (seq < 0 || seq >= n) throw IndexOutOfBoundsException("entry $seq, size $n")
-        return leaves[seq]
+        return nodes.node(0, seq)
     }
 
     operator fun get(seq: Long): SealedEntry {
@@ -338,14 +315,10 @@ internal class EntryStore(
     /** Read entry [seq] from the journal and prove it is the entry that was verified. */
     private fun load(seq: Long): SealedEntry {
         try {
-            val record = try {
-                reader.record(offsets[seq])
-            } catch (e: IOException) {
-                throw EntryUnreadableException(seq, e)
-            }
+            val record = reader.record(offsets.long(seq))
             if (record.size <= Digest.SIZE) throw TamperDetectedException("entry #$seq: record too short")
             val body = record.copyOfRange(0, record.size - Digest.SIZE)
-            if (Hashes.leaf(body) != leaves[seq]) {
+            if (Hashes.leaf(body) != nodes.node(0, seq)) {
                 throw TamperDetectedException("entry #$seq on disk no longer matches the hash verified at startup")
             }
             // The bytes are exactly those recovery accepted, so they decode; a failure here is still tampering.
@@ -361,6 +334,9 @@ internal class EntryStore(
         } catch (e: TamperDetectedException) {
             onTamper(e)
             throw e
+        } catch (e: IOException) {
+            // The journal or an index file could not be read (or this thread was interrupted mid-read).
+            throw EntryUnreadableException(seq, e)
         }
     }
 

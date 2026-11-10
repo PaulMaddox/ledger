@@ -30,8 +30,12 @@ import kotlin.test.assertTrue
 class EntryStoreTest {
     private fun entriesPath(dir: Path) = dir.resolve(Ledger.ENTRIES_FILE)
 
-    /** A ledger whose cache holds one entry, so almost every read comes from the journal. */
-    private fun coldConfig(dir: Path, signer: TreeHeadSigner) = config(dir, signer).copy(entryCacheSize = 1)
+    /**
+     * A ledger that keeps as little in memory as it can: one cached entry, two cached index pages,
+     * and an idempotency table flushed to disk every 32 keys. Almost every read comes from a file.
+     */
+    private fun coldConfig(dir: Path, signer: TreeHeadSigner) =
+        config(dir, signer).copy(entryCacheSize = 1, derivedCachePages = 2, indexFlushSize = 32)
 
     /** Overwrite the body of record [index] in place, optionally repairing the frame CRC as a careful attacker would. */
     private fun alterRecord(dir: Path, index: Int, repairCrc: Boolean) {
@@ -178,21 +182,6 @@ class EntryStoreTest {
         assertFalse(index.anyCandidate(Long.MIN_VALUE + 12345) { true })
         assertTrue(KeyIndex.hashOf("bet:1:place") != 0L && KeyIndex.hashOf("bet:1:place") == KeyIndex.hashOf("bet:1:place"))
         assertTrue(KeyIndex.hashOf("bet:1:place") != KeyIndex.hashOf("bet:1:settle"))
-    }
-
-    @Test
-    fun `append-only logs keep values across chunk boundaries`() {
-        val longs = LongLog()
-        val digests = DigestLog()
-        repeat(40_000) {
-            longs.add(it * 31L - 7)
-            digests.add(Hashes.sha256(byteArrayOf((it and 0xFF).toByte(), (it ushr 8).toByte())))
-        }
-        assertEquals(40_000L, longs.size)
-        for (i in listOf(0, 1, 4_095, 4_096, 16_383, 16_384, 39_999)) {
-            assertEquals(i * 31L - 7, longs[i.toLong()])
-            assertEquals(Hashes.sha256(byteArrayOf((i and 0xFF).toByte(), (i ushr 8).toByte())), digests[i.toLong()])
-        }
     }
 
     @Test

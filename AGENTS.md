@@ -18,7 +18,10 @@ src/main/kotlin/com/pam/ledger/
   SportsbookWallet.kt    deposits, withdrawals, bets, exactly-once settlement
   Replay.kt              balance rules, replay verification, checkpoint checks
   Journal.kt             CRC-framed append-only file, fsync, torn-write recovery, lock
-  EntryStore.kt          entries read from the journal on demand and re-verified; hashed key index
+  EntryStore.kt          entries read from the journal on demand and re-verified; Merkle node files
+  Derived.kt             derived index files: write-once pages, MAC under an in-memory key, rebuilt each start
+  HashIndex.kt           idempotency index: in-memory table, sorted runs on disk, Bloom filter
+  ChainLog.kt            per-player and per-account histories in a derived file
   Merkle.kt              incremental root, inclusion and consistency proofs
   Signing.kt             signed tree heads, TreeHeadSigner interface
   EntryCodec.kt, Hashes.kt   canonical byte format and domain-separated hashing
@@ -31,6 +34,7 @@ src/test/kotlin/com/pam/ledger/
   ConcurrencyTest.kt, IntegrityTest.kt, MerkleTest.kt, TestSupport.kt
   ReadScalingTest.kt         read-model indexes; opt-in soak proves reads stay flat as the ledger grows
   EntryStoreTest.kt          entries read back from the journal, on-disk tamper detection, hashed key index
+  DerivedIndexTest.kt        derived files: page authentication, tampering, index and filter equivalence, chains
   VerifyBeforeOpenTest.kt    owner decision: the whole ledger is verified before any customer operation
   WebAppTest.kt              web console API, simulator, bets racing settlement
 docs/
@@ -141,9 +145,24 @@ Each of these is load-bearing. If a task seems to require breaking one, stop and
 
 History lives in the journal, not on the heap (issue #73). Keep it that way:
 
-- The engine holds an offset and a verified leaf hash per entry, a hash per idempotency
-  key, balances, and a bounded cache of recent entries. Do not add a structure that keeps
-  an object, a decoded entry or a key string for every entry or every bet.
+- The heap holds balances, open bets, the Merkle frontier, a Bloom filter over idempotency
+  keys (about ten bits each), a few numbers per player history, and bounded caches. Do not
+  add a structure that keeps an object, a decoded entry or a key string for every entry or
+  every bet.
+- Everything else that grows with history is a derived file (`Derived.kt`): entry offsets,
+  Merkle nodes, the idempotency index, per-player histories. Three rules make those files
+  safe, and all three must hold for any new one:
+  1. Never trusted across a restart. The derived directory is emptied at open and rebuilt
+     by the full replay. Never load a derived file in place of that replay.
+  2. Every page is authenticated with a MAC under a key that exists only in memory. A page
+     that fails stops the ledger.
+  3. Every page is written once. Never rewrite a page in place: that is what makes putting
+     back an older valid copy impossible. Changing data means a new file (as index merges do).
+- The writer never reads or writes a file to add an idempotency key, and never waits for
+  index maintenance. The maintenance thread touches only derived index files; it is not a
+  second ledger writer.
+- The Bloom filter may say "possibly present" for a new key, never "absent" for a committed
+  one. Add a key to its table first, then to the filters; see `HashIndex.rebuildBloom`.
 - `Ledger.entry` re-hashes what it reads from disk and compares it with the leaf hash
   verified at startup. A mismatch throws `TamperDetectedException` and fail-stops the
   ledger. Never bypass that check or cache unverified bytes.
