@@ -331,11 +331,11 @@ class DerivedIndexTest {
 
     @Test
     fun `a bet settled again under another key replaces its outcome in the fixture summary`() {
-        fun settle(ledger: Ledger, key: String, kind: String, payout: Long) = ledger.append(TransactionRequest(key, kind,
+        fun settle(ledger: Ledger, key: String, kind: String, payout: Long, betId: String = "legacy") = ledger.append(TransactionRequest(key, kind,
             if (payout > 0) listOf(
                 Posting(AccountId("house:funds:EUR"), "EUR", -payout), Posting(AccountId("player:alice:cash:EUR"), "EUR", payout))
             else listOf(Posting(AccountId("house:funds:EUR"), "EUR", -1), Posting(AccountId("house:other:EUR"), "EUR", 1)),
-            mapOf("playerId" to "alice", "betId" to "legacy")))
+            mapOf("playerId" to "alice", "betId" to betId)))
         val dir = tempDir()
         val signer = Ed25519TreeHeadSigner.generate()
         val expected = ReadModel.FixtureSummary(mapOf("HOME" to 200), mapOf("HOME" to setOf("WON")), 0)
@@ -349,10 +349,11 @@ class DerivedIndexTest {
                 assertEquals(mapOf("HOME" to setOf("LOST")), model.fixtureSummaries().getValue("F1").outcomes)
                 settle(ledger, "legacy-second", "BET_WON", 200)
                 // A settlement for a bet this model never saw placed changes nothing.
-                settle(ledger, "unknown-bet", "BET_WON", 5).also { assertTrue(it.seq > 0) }
+                settle(ledger, "unknown-bet", "BET_LOST", 0, betId = "never-placed").also { assertTrue(it.seq > 0) }
                 model.catchUp()
                 assertEquals(expected, model.fixtureSummaries().getValue("F1"))
                 assertEquals("WON", model.bet("legacy")!!.outcome)
+                assertEquals(null, model.bet("never-placed"))
             }
         }
         // The same answer when the model is built during recovery, where it cannot read other entries.
