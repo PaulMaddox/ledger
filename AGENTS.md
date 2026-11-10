@@ -167,7 +167,9 @@ History lives in the journal, not on the heap (issue #73). Keep it that way:
 - A derived file that fails to write stops the ledger (`PagedFile.append`). A read model whose
   indexing failed part-way is never used again (`ReadModel.broken`): retrying would record part
   of an entry twice. Change read-model state only inside `ReadModel.mutating`, and read what a
-  change needs before starting it.
+  change needs before starting it, including disk-backed placement-filter probes for late
+  settlements. A failed probe leaves the entry unapplied and retryable; a latched index
+  maintenance failure instead surfaces as `LedgerFailedException`.
 - Never interrupt a thread that writes derived files (index maintenance, the read-model
   poller): Java closes the channel under it, and the failed write stops the ledger. Signal it
   with a flag and join; it stops between records.

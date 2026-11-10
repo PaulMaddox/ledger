@@ -66,7 +66,7 @@ class ReadModel private constructor() : AutoCloseable {
         override fun useStorage(storage: DerivedStorage, indexFlushSize: Int) = model.useStorage(storage, indexFlushSize)
 
         override fun recovered(entry: SealedEntry) {
-            model.apply(entry)
+            model.apply(entry, model.mayBeLateSettlement(entry))
             indexed = entry.entry.seq + 1
         }
 
@@ -239,8 +239,9 @@ class ReadModel private constructor() : AutoCloseable {
             // Stop between entries once closing, so close() never waits for a whole backlog.
             while (next < size && running) {
                 val sealed = ledger.entry(next) // a failure here has changed nothing, so it may be retried
+                val lateSettlement = mayBeLateSettlement(sealed)
                 mutating {
-                    apply(sealed)
+                    apply(sealed, lateSettlement)
                     next++
                 }
             }
@@ -249,11 +250,21 @@ class ReadModel private constructor() : AutoCloseable {
         }
     }
 
+    // Probe before changing counters or indexes: a disk-backed filter read may fail and be retried.
+    // The live caller holds the write lock; recovery has exclusive access before attachment.
+    private fun mayBeLateSettlement(sealed: SealedEntry): Boolean = when (sealed.entry.kind) {
+        "BET_WON", "BET_LOST", "BET_VOIDED", "BET_CASHED_OUT" -> {
+            val betId = sealed.entry.metadata.getValue("betId")
+            betId !in openViews && placements.mightContain(KeyIndex.hashOf(betId))
+        }
+        else -> false
+    }
+
     /**
      * Index one entry. Uses nothing but the entry itself: it must not read other entries
      * from the ledger, because it also runs during recovery, before the ledger exists.
      */
-    private fun apply(sealed: SealedEntry) {
+    private fun apply(sealed: SealedEntry, lateSettlement: Boolean) {
         val e = sealed.entry
         kindCounts.merge(e.kind, 1, Long::plus)
         recent.addLast(e.seq)
@@ -308,7 +319,7 @@ class ReadModel private constructor() : AutoCloseable {
                 val open = openViews.remove(betId)
                 if (open == null) {
                     // Not an open bet. If it may have been placed at all, settle up later; see lateSettlements.
-                    if (placements.mightContain(KeyIndex.hashOf(betId))) lateSettlements.add(LateSettlement(betId, e.seq, outcome))
+                    if (lateSettlement) lateSettlements.add(LateSettlement(betId, e.seq, outcome))
                 } else {
                     fixtureIndexes[open.fixtureId]?.let { index ->
                         index.open--

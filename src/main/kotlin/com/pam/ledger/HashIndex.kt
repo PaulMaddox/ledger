@@ -164,7 +164,7 @@ internal class HashIndex(
     private inline fun <T> reading(read: (State) -> T): T {
         while (true) {
             if (closed) throw LedgerClosedException()
-            failure?.let { throw it }
+            failure?.let { throw LedgerFailedException(it) }
             try {
                 return read(state.get())
             } catch (e: RetiredFileException) {

@@ -13,6 +13,7 @@ import com.pam.ledger.web.allowedRequestHosts
 import com.pam.ledger.TestSupport.config
 import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
+import java.io.IOException
 import java.net.URI
 import java.net.Socket
 import java.net.ServerSocket
@@ -341,6 +342,24 @@ class WebAppTest {
             assertTrue(call(app, "GET", "overview").second.contains("\"entries\":12"))
             assertTrue(call(app, "POST", "regulator/audit").second.contains("\"ok\":true"))
         }
+    }
+
+    @Test
+    fun `wallet admission after a latched index maintenance failure returns unavailable`() = withApp { app ->
+        val services = LedgerWebApp::class.java.getDeclaredField("services").apply { isAccessible = true }.get(app)!!
+        val ledger = services.javaClass.getDeclaredField("ledger").apply { isAccessible = true }.get(services) as Ledger
+        val index = Ledger::class.java.getDeclaredField("idempotency").apply { isAccessible = true }.get(ledger) as HashIndex
+        val cause = IOException("failed index maintenance")
+        // Reproduce maintenance's latched failure and storage alarm without racing live file writes.
+        HashIndex::class.java.getDeclaredField("failure").apply { isAccessible = true }.set(index, cause)
+        ledger.derived.failed(cause)
+        val size = ledger.head().size
+        repeat(2) {
+            val (status, body) = call(app, "POST", "players/alice/deposit", mapOf("amount" to 1, "ref" to "failed-index"))
+            assertEquals(503, status, body)
+            assertTrue(body.contains("\"error\":\"ledger_unavailable\""), body)
+        }
+        assertEquals(size, ledger.head().size)
     }
 
     @Test

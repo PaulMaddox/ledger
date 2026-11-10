@@ -7,10 +7,14 @@ import com.pam.ledger.TestSupport.tempDir
 import com.pam.ledger.web.ReadModel
 import com.pam.ledger.web.replayPlayerAudit
 import org.junit.jupiter.api.Tag
+import java.io.IOException
 import java.util.concurrent.Executors
+import java.util.concurrent.locks.ReentrantReadWriteLock
+import kotlin.concurrent.write
 import kotlin.test.Test
 import kotlin.test.assertEquals
 import kotlin.test.assertFailsWith
+import kotlin.test.assertFalse
 import kotlin.test.assertNotNull
 import kotlin.test.assertTrue
 
@@ -120,6 +124,64 @@ class ReadScalingTest {
                 assertEquals(false, reconciles(repeated, escrowSeqs))
                 val padded = cashSeqs.copyOfRange(1, cashSeqs.size) + foreign
                 assertEquals(false, reconciles(padded, escrowSeqs))
+            }
+        }
+    }
+
+    @Test
+    fun `a settlement filter read failure leaves the read model unchanged and retryable`() {
+        val cfg = config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(
+            filterMemoryBytes = 0, indexFlushSize = 64, derivedCachePages = 1,
+        )
+        Ledger.open(cfg).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            wallet.deposit("p", 10_000, "EUR", "filter-funds")
+            repeat(64) {
+                wallet.placeBet("p", "filter-$it", 10, "EUR", "F1|HOME|200")
+                wallet.settleLoss("filter-$it")
+            }
+        }
+        val recovering = ReadModel.Recovering()
+        Ledger.open(cfg, recovering).use { ledger ->
+            recovering.attach(ledger).use { model ->
+                val lock = ReadModel::class.java.getDeclaredField("lock").apply { isAccessible = true }
+                    .get(model) as ReentrantReadWriteLock
+                // Keep the poller out while exercising a failed read and its retry on this thread.
+                lock.write {
+                    model.catchUp()
+                    val before = model.totals()
+                    val history = model.seqsForPlayer("p")
+                    val recent = model.recentSeqs()
+                    val summaries = model.fixtureSummaries()
+                    val receipt = ledger.append(TransactionRequest("filter-resettle", "BET_WON", listOf(
+                        Posting(AccountId("house:funds:EUR"), "EUR", -20),
+                        Posting(Accounts.cash("p", "EUR"), "EUR", 20),
+                    ), mapOf("playerId" to "p", "betId" to "filter-0")))
+                    ledger.derived.create("evict").append(ByteArray(PAGE_SIZE))
+                    ledger.derived.onPageRead = { file, _ ->
+                        if (file.startsWith("bets-placed-filter")) throw IOException("unavailable placement filter")
+                    }
+                    try {
+                        assertFailsWith<IndexUnreadableException> { model.catchUp() }
+                        assertFalse(ledger.isFailed)
+                        assertEquals(before, model.totals())
+                        assertEquals(history, model.seqsForPlayer("p"))
+                        assertEquals(recent, model.recentSeqs())
+                        assertEquals(summaries, model.fixtureSummaries())
+                    } finally {
+                        ledger.derived.onPageRead = null
+                    }
+                    model.catchUp()
+                    assertEquals(before.copy(
+                        entries = before.entries + 1,
+                        returned = before.returned.add(java.math.BigInteger.valueOf(20)),
+                        kindCounts = before.kindCounts + ("BET_WON" to 1L),
+                    ), model.totals())
+                    assertEquals(history + receipt.seq, model.seqsForPlayer("p"))
+                    assertEquals("WON", model.bet("filter-0")!!.outcome)
+                    assertEquals(mapOf("HOME" to setOf("LOST", "WON")),
+                        model.fixtureSummaries().getValue("F1").outcomes)
+                }
             }
         }
     }
