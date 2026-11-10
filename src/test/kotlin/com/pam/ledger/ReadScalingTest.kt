@@ -112,7 +112,32 @@ class ReadScalingTest {
                 // An index naming an entry that does not post to the account must fail too.
                 val foreign = model.seqsForAccount(Accounts.cash("ben", "EUR")).first()
                 assertEquals(false, reconciles(cashSeqs + foreign, escrowSeqs))
+                // Lengths prove nothing: missing rows padded out to the right count, with a repeated
+                // entry or with an entry of another account, must fail as well.
+                val repeated = LongArray(cashSeqs.size) { cashSeqs[0] }
+                assertEquals(false, reconciles(repeated, escrowSeqs))
+                val padded = cashSeqs.copyOfRange(1, cashSeqs.size) + foreign
+                assertEquals(false, reconciles(padded, escrowSeqs))
             }
+        }
+    }
+
+    @Test
+    fun `an audit index repeating one entry fails even when the balance happens to agree`() {
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate())).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            // Three entries for one account, balance 100: the first alone also replays to 100.
+            val first = wallet.deposit("q", 100, "EUR", "pad-in-1").seq
+            wallet.withdraw("q", 10, "EUR", "pad-out")
+            wallet.deposit("q", 10, "EUR", "pad-in-2")
+            val cash = ledger.account(Accounts.cash("q", "EUR"))!!
+            assertEquals(3L, cash.version)
+            assertEquals(100L, cash.balance)
+            val size = ledger.head().size
+            val forged = LongArray(3) { first } to LongArray(0)
+            val report = replayPlayerAudit(ledger, "q", cash, null, size, forged)
+            assertEquals("100", report["replayedCash"], "the forged index replays to the right balance...")
+            assertEquals(false, report["reconciles"], "...and must still not reconcile")
         }
     }
 

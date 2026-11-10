@@ -5,6 +5,8 @@ import com.pam.ledger.TestSupport.race
 import com.pam.ledger.TestSupport.tempDir
 import com.pam.ledger.web.ReadModel
 import java.nio.ByteBuffer
+import java.time.Duration
+import org.junit.jupiter.api.Assertions.assertTimeoutPreemptively
 import java.nio.channels.FileChannel
 import java.nio.file.Files
 import java.nio.file.Path
@@ -144,7 +146,8 @@ class DerivedIndexTest {
                 // Flip one byte in the first page of every such file. Each write races index maintenance
                 // only in that a merged-away run may already be gone, which is fine.
                 for (file in targets) runCatching { overwrite(file, 17, byteArrayOf(readAt(file, 17, 1)[0].inc())) }
-                assertFalse(ledger.isFailed)
+                // Background index maintenance may read a damaged run page first and stop the ledger before
+                // the reads below do. Either detector is correct; what must hold is checked after them.
                 // Something that needs the damaged page: old entries, their proofs, and retries of old keys.
                 val failure = runCatching {
                     repeat(1_200) { i ->
@@ -158,6 +161,35 @@ class DerivedIndexTest {
                 assertTrue(ledger.isFailed, prefix)
                 assertFailsWith<LedgerFailedException> { wallet.deposit("p", 1, "EUR", "after-$prefix") }
                 assertEquals(1_200L, ledger.head().size, "$prefix: nothing was written on the strength of a damaged index")
+            }
+        }
+    }
+
+    @Test
+    fun `a failure raised before the ledger exists is delivered when it connects`() {
+        val alarm = FailureAlarm()
+        val early = TamperDetectedException("early")
+        alarm.raise(early)
+        alarm.raise(TamperDetectedException("second")) // only the first is kept; it is enough to stop
+        val seen = ArrayList<Throwable>()
+        alarm.connect { seen += it }
+        assertEquals(listOf<Throwable>(early), seen, "a failure in the gap before connect is not lost")
+        val late = TamperDetectedException("late")
+        alarm.raise(late)
+        assertEquals(listOf<Throwable>(early, late), seen, "afterwards failures go straight to the ledger")
+    }
+
+    @Test
+    fun `a lookup on a closed index ends instead of retrying forever`() {
+        storage(cachePages = 1).use { storage ->
+            val index = HashIndex(storage, "closing", flushSize = 16, bloomBitsPerKey = 0).apply { mayWait = true }
+            repeat(2_000) { index.put(it + 1L, it.toLong()) }
+            awaitTrue("runs on disk") { index.runCount > 0 }
+            index.close()
+            // The runs are gone and nothing replaces them. Every page read must give up, not spin.
+            assertTimeoutPreemptively(Duration.ofSeconds(10)) {
+                runCatching { (1L..2_000L).forEach { h -> index.anyCandidate(h) { false } } }
+                runCatching { index.forEach { _, _ -> } }
             }
         }
     }

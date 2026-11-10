@@ -72,6 +72,16 @@ internal class HashIndex(
      */
     @Volatile var mayWait = false
 
+    /**
+     * True when tables are waiting for maintenance faster than it writes them out: the derived
+     * disk is stalled or slower than the writer. Each waiting table holds [flushSize] pairs in
+     * memory, so a ledger stops ADMITTING requests while this is true (callers get
+     * OverloadedException and retry with the same key) rather than letting the backlog grow
+     * until the heap is gone. The writer itself still never waits: whatever is already queued
+     * commits, which adds at most one queue's worth of keys beyond this limit.
+     */
+    val backlogged: Boolean get() = state.get().frozen.size > MAX_LIVE_BACKLOG
+
     @Volatile private var closed = false
     @Volatile private var failure: Throwable? = null
     private val work = Semaphore(0)
@@ -139,6 +149,8 @@ internal class HashIndex(
                 for (run in s.runs) if (run.maxSeq >= minSeq && run.anyCandidate(hash, visit)) return true
                 return false
             } catch (e: RetiredFileException) {
+                // After close() the runs are deleted and no state replaces them: looking again would spin forever.
+                if (closed) throw LedgerClosedException()
                 continue // the pairs are all still there, in the state that replaced this one
             }
         }
@@ -154,6 +166,7 @@ internal class HashIndex(
                 s.runs.forEach { it.forEach(visit) }
                 return
             } catch (e: RetiredFileException) {
+                if (closed) throw LedgerClosedException() // as in anyCandidate
                 continue
             }
         }
@@ -398,6 +411,8 @@ internal class HashIndex(
         const val PER_PAGE = (PAGE_SIZE / PAIR).toLong()
         const val FAN_IN = 4
         const val MAX_BACKLOG = 4
+        // Live writers are not slowed for brief stalls; only a sustained one turns requests away.
+        const val MAX_LIVE_BACKLOG = 16
 
         fun unsignedToDouble(value: Long): Double =
             if (value >= 0) value.toDouble() else (value ushr 1).toDouble() * 2.0

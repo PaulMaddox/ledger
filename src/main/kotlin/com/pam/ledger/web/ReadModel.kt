@@ -143,6 +143,12 @@ class ReadModel private constructor() : AutoCloseable {
     }
 
     private val lock = ReentrantReadWriteLock()
+
+    /** Every query: refuse to answer from a model that may hold part of an entry twice (see [broken]). */
+    private inline fun <T> guarded(block: () -> T): T {
+        broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
+        return lock.read(block)
+    }
     // Read without the lock by catchUp's fast path; written only under the write lock.
     @Volatile private var next = 0L
     // In memory a history is only its length and a few file positions; see ChainLog.
@@ -174,6 +180,9 @@ class ReadModel private constructor() : AutoCloseable {
     private val recent = ArrayDeque<Long>()
 
     @Volatile private var running = true
+    // Set if indexing an entry failed part-way. Counters and history files may then hold part of
+    // that entry, and indexing it again would record it twice, so the model is never used again.
+    @Volatile private var broken: Throwable? = null
     private var poller: Thread? = null
 
     private fun attach(ledger: Ledger) {
@@ -196,11 +205,22 @@ class ReadModel private constructor() : AutoCloseable {
      */
     fun catchUp(atLeast: Long = 0) {
         // Already current: do not take the write lock, or idle readers would queue behind each other here.
+        broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
         if (next >= maxOf(ledger.head().size, atLeast)) return
         lock.write {
+            broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
             val size = maxOf(ledger.head().size, atLeast)
             while (next < size) {
-                apply(ledger.entry(next))
+                val sealed = ledger.entry(next) // a failure here has changed nothing, so it may be retried
+                try {
+                    apply(sealed)
+                } catch (t: Throwable) {
+                    broken = t
+                    // The model shares the ledger's derived storage. A write that fails there means the
+                    // derived files cannot be relied on, so the ledger fail-stops as it does for its own.
+                    if (running) ledger.derived.failed(t)
+                    throw t
+                }
                 next++
             }
             // Keep the set-aside list short: with the ledger at hand it can be settled up straight away.
@@ -352,19 +372,19 @@ class ReadModel private constructor() : AutoCloseable {
 
     // ---- Queries (all return copies, safe to use after the lock is released) ----
 
-    fun seqsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<Long> = lock.read {
+    fun seqsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<Long> = guarded {
         require(limit >= 0) { "history limit must be non-negative" }
         byPlayer[player]?.let { chains.tail(it, limit).asList() } ?: emptyList()
     }
-    fun historyForPlayer(player: String, limit: Int): HistoryPage = lock.read {
+    fun historyForPlayer(player: String, limit: Int): HistoryPage = guarded {
         require(limit >= 0) { "history limit must be non-negative" }
         val history = byPlayer[player]
         HistoryPage(Math.toIntExact(history?.count ?: 0), history?.let { chains.tail(it, limit).asList() } ?: emptyList())
     }
     /** The player's most recent [limit] bets, oldest first. Reads placements only, however long the rest of the history is. */
-    fun betsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<BetView> = lock.read {
+    fun betsForPlayer(player: String, limit: Int = Int.MAX_VALUE): List<BetView> = guarded {
         require(limit >= 0) { "bet limit must be non-negative" }
-        val placed = placementsByPlayer[player] ?: return@read emptyList()
+        val placed = placementsByPlayer[player] ?: return@guarded emptyList()
         val result = ArrayList<BetView>()
         if (limit > 0) chains.walkBack(placed) { seq ->
             val placement = ledger.entry(seq).entry
@@ -377,42 +397,42 @@ class ReadModel private constructor() : AutoCloseable {
         result.asReversed()
     }
     /** Every bet ever placed, in placement order. Reads each bet's entries: for tests and diagnostics, not for request paths. */
-    fun allBets(): List<BetView> = lock.read {
+    fun allBets(): List<BetView> = guarded {
         val ids = LinkedHashSet<String>()
         val seqs = ArrayList<Long>()
         placements.forEach { _, seq -> seqs.add(seq) }
         for (seq in seqs.distinct().sorted()) ledger.entry(seq).entry.metadata["betId"]?.let(ids::add)
         ids.mapNotNull { row(it) }.sortedBy { it.placedSeq }.map(::view)
     }
-    fun openBetsForPlayer(player: String): List<BetView> = lock.read {
+    fun openBetsForPlayer(player: String): List<BetView> = guarded {
         openBetsByPlayer[player].orEmpty().mapNotNull(openViews::get)
     }
-    fun bet(betId: String): BetView? = lock.read { row(betId)?.let(::view) }
-    fun openBets(): List<BetView> = lock.read {
+    fun bet(betId: String): BetView? = guarded { row(betId)?.let(::view) }
+    fun openBets(): List<BetView> = guarded {
         openViews.values.sortedWith { a, b -> a.placedSeq.compareTo(b.placedSeq) }
     }
-    fun openBetsOn(fixtureId: String): List<BetView> = lock.read {
+    fun openBetsOn(fixtureId: String): List<BetView> = guarded {
         openBetsByFixture[fixtureId].orEmpty().mapNotNull(openViews::get)
     }
-    fun recentSeqs(): List<Long> = lock.read { recent.toList().asReversed() }
-    fun players(): Set<String> = lock.read { byPlayer.keys.toSet() }
+    fun recentSeqs(): List<Long> = guarded { recent.toList().asReversed() }
+    fun players(): Set<String> = guarded { byPlayer.keys.toSet() }
     /** How many players have any entry. Constant time: dashboards poll this. */
-    fun playerCount(): Int = lock.read { playerIds.size }
+    fun playerCount(): Int = guarded { playerIds.size }
     /** Visit every player ID in sorted order without copying the set. [visit] must be quick: it runs under the read lock. */
-    fun forEachPlayer(visit: (String) -> Unit) = lock.read { playerIds.forEach(visit) }
+    fun forEachPlayer(visit: (String) -> Unit) = guarded { playerIds.forEach(visit) }
     /**
      * Sequence numbers of every indexed entry posting to player account [account], oldest first.
      * A convenience for audits: the caller must still recompute from the entries and check
      * the count against the ledger's own account version, never trust this list alone.
      */
-    fun seqsForAccount(account: AccountId): LongArray = lock.read {
+    fun seqsForAccount(account: AccountId): LongArray = guarded {
         seqsByAccount[account.value]?.let { chains.tail(it) } ?: LongArray(0)
     }
     /** One summary per fixture that has ever had a bet. Size depends on fixtures and selections, not on bets. */
     fun fixtureSummaries(): Map<String, FixtureSummary> {
         // Settlements set aside while indexing are settled up first; that changes the index, so it needs the write lock.
-        if (lock.read { lateSettlements.isNotEmpty() }) lock.write { resolveLateSettlements() }
-        return lock.read { summaries() }
+        if (guarded { lateSettlements.isNotEmpty() }) lock.write { resolveLateSettlements() }
+        return guarded { summaries() }
     }
 
     private fun summaries(): Map<String, FixtureSummary> = run {
@@ -421,7 +441,7 @@ class ReadModel private constructor() : AutoCloseable {
         }
     }
     /** Exact aggregates for one indexed prefix; polling never scans or sorts the open bets. */
-    fun totals(): Totals = lock.read {
+    fun totals(): Totals = guarded {
         Totals(next, deposits, withdrawals, staked, returned, HashMap(kindCounts), openBetCount, openStakes, exposure)
     }
 

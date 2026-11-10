@@ -16,7 +16,6 @@ import java.util.concurrent.ForkJoinPool
 import java.util.concurrent.TimeUnit
 import java.util.concurrent.TimeoutException
 import java.util.concurrent.atomic.AtomicBoolean
-import java.util.concurrent.atomic.AtomicReference
 
 /*
  * ============================================================================
@@ -120,7 +119,7 @@ class Ledger private constructor(
     // Hashes of committed idempotency keys, mostly on disk behind an in-memory Bloom filter.
     // A match is only a candidate until the entry's own key agrees.
     private val idempotency: HashIndex,
-    alarm: AtomicReference<(Throwable) -> Unit>,
+    alarm: FailureAlarm,
     // The prover recovery used to verify checkpoints. Its cache of completed subtrees is
     // already warm, so the first proof after a restart does not rehash the whole tree.
     private val prover: MerkleProver,
@@ -146,7 +145,9 @@ class Ledger private constructor(
     init {
         // A reader that finds the journal or an index changed underneath us, or index maintenance
         // that fails, stops the ledger: it can no longer prove its history or its decisions.
-        alarm.set { failStop(it) }
+        // A failure raised while recovery was finishing was latched; connecting delivers it here,
+        // before the writer thread starts, so the ledger opens already failed and accepts nothing.
+        alarm.connect(::failStop)
         // Recovery is over. From here the writer thread adds keys, and it never waits for index maintenance.
         idempotency.mayWait = false
     }
@@ -177,6 +178,9 @@ class Ledger private constructor(
     fun submit(request: TransactionRequest): CompletableFuture<Receipt> {
         failure?.let { return CompletableFuture.failedFuture(LedgerFailedException(it)) }
         if (closed.get()) return CompletableFuture.failedFuture(LedgerClosedException())
+        // Index maintenance has fallen far behind (a stalled derived disk). Turn new work away here,
+        // on the caller's thread, so the in-memory backlog stays bounded and the writer never waits.
+        if (idempotency.backlogged) return CompletableFuture.failedFuture(OverloadedException())
 
         // Hash the request on the CALLER's thread to keep work off the writer.
         val fingerprint = EntryCodec.requestFingerprint(request.kind, request.postings, request.metadata)
@@ -529,12 +533,13 @@ class Ledger private constructor(
                 //    hash per entry, never the entries themselves, so memory does not limit history.
                 val entriesPath = config.directory.resolve(ENTRIES_FILE)
                 val strings = EntryStrings()
-                // During recovery a failure simply propagates out of open(); afterwards it stops the ledger.
-                val alarm = AtomicReference<(Throwable) -> Unit> {}
+                // During recovery a failure on a reading thread propagates out of open(). One raised by a
+                // background thread (index maintenance) is latched until the ledger exists to receive it.
+                val alarm = FailureAlarm()
                 val storage = DerivedStorage(config.derivedDirectory ?: config.directory.resolve(DERIVED_DIRECTORY),
-                    config.derivedCachePages) { alarm.get()(it) }
+                    config.derivedCachePages, alarm::raise)
                 derived = storage
-                val store = EntryStore(entriesPath, storage, config.entryCacheSize, strings) { alarm.get()(it) }
+                val store = EntryStore(entriesPath, storage, config.entryCacheSize, strings, alarm::raise)
                 entryStore = store
                 val keys = HashIndex(storage, "keys", config.indexFlushSize, config.bloomBitsPerKey)
                 keys.mayWait = true // only recovery may pause for index maintenance; the writer thread never does
@@ -576,5 +581,29 @@ class Ledger private constructor(
             while ((c is ExecutionException || c is CompletionException) && c.cause != null) c = c.cause!!
             return c
         }
+    }
+}
+
+/**
+ * Carries failures from background threads (index maintenance, readers that find a file altered)
+ * to the ledger, including any raised before the ledger object exists. The first failure raised
+ * before [connect] is kept and delivered by it, so none falls in the gap between recovery ending
+ * and the writer starting. The lock makes "raised before" and "raised after" the only two cases.
+ */
+internal class FailureAlarm {
+    private var pending: Throwable? = null
+    private var handler: ((Throwable) -> Unit)? = null
+
+    @Synchronized
+    fun raise(t: Throwable) {
+        val h = handler
+        if (h != null) h(t) else if (pending == null) pending = t
+    }
+
+    @Synchronized
+    fun connect(h: (Throwable) -> Unit) {
+        handler = h
+        pending?.let(h)
+        pending = null
     }
 }
