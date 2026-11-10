@@ -194,6 +194,30 @@ class DerivedIndexTest {
         }
     }
 
+    @Test
+    fun `closing an index or a read model mid-write never stops a healthy ledger`() {
+        // Closing must let a background write finish, not interrupt it: Java closes a channel when
+        // a thread blocked in it is interrupted, and a failed derived write stops the ledger.
+        repeat(20) { round ->
+            val failures = AtomicReference<Throwable?>()
+            storage(failures, cachePages = 4).use { storage ->
+                val index = HashIndex(storage, "closing-$round", flushSize = 16, bloomBitsPerKey = 10)
+                repeat(20_000) { index.put(it + 1L, it.toLong()) } // leaves maintenance busy flushing and merging
+                index.close()
+                assertNull(failures.get(), "round $round: closing the index reported a failure")
+            }
+        }
+        Ledger.open(config(tempDir(), Ed25519TreeHeadSigner.generate()).copy(indexFlushSize = 16)).use { ledger ->
+            val wallet = SportsbookWallet(ledger)
+            repeat(10) { round ->
+                repeat(300) { wallet.deposit("c$round-$it", 1, "EUR", "close-$round-$it") }
+                ReadModel(ledger).close() // its poller is likely indexing the whole ledger when closed
+                assertFalse(ledger.isFailed, "round $round: closing a read model stopped the ledger")
+            }
+            assertTrue(wallet.deposit("c", 1, "EUR", "after-closes").seq > 0)
+        }
+    }
+
     // ----------------------------------------------------------- hash index
 
     @Test

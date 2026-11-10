@@ -214,7 +214,7 @@ class ReadModel private constructor() : AutoCloseable {
         poller = Thread({
             while (running && broken == null) { // a broken model is never applied to again
                 runCatching { catchUp() }
-                try { Thread.sleep(100) } catch (e: InterruptedException) { break } // close() interrupts the sleep
+                try { Thread.sleep(100) } catch (e: InterruptedException) { break }
             }
         }, "read-model").apply { isDaemon = true; start() }
     }
@@ -234,7 +234,8 @@ class ReadModel private constructor() : AutoCloseable {
         lock.write {
             broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
             val size = maxOf(ledger.head().size, atLeast)
-            while (next < size) {
+            // Stop between entries once closing, so close() never waits for a whole backlog.
+            while (next < size && running) {
                 val sealed = ledger.entry(next) // a failure here has changed nothing, so it may be retried
                 mutating {
                     apply(sealed)
@@ -473,9 +474,11 @@ class ReadModel private constructor() : AutoCloseable {
 
     override fun close() {
         running = false
+        // Never interrupt the poller: it writes derived files, Java closes a channel when a thread
+        // blocked in it is interrupted, and a derived write that fails stops the ledger. It stops by
+        // itself once its current entry is indexed, or within one 100 ms sleep if idle.
         poller?.let {
-            it.interrupt()
-            it.join(5_000)
+            it.join(30_000)
             check(!it.isAlive) { "read model did not stop" }
         }
         // Stop index maintenance and remove this model's derived files; the ledger's own are untouched.
