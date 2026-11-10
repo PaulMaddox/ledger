@@ -144,6 +144,26 @@ class ReadModel private constructor() : AutoCloseable {
 
     private val lock = ReentrantReadWriteLock()
 
+    /**
+     * Every change to the model's state goes through here, under the write lock. If [block] throws,
+     * the model may hold part of a change, and applying it again would count it twice, so the
+     * model is marked [broken] for good. It shares the ledger's derived storage, and a write that
+     * fails there means those files cannot be relied on either, so the ledger fail-stops too.
+     */
+    private inline fun mutating(block: () -> Unit) {
+        try {
+            block()
+        } catch (t: Throwable) {
+            markBroken(t)
+            throw t
+        }
+    }
+
+    private fun markBroken(t: Throwable) {
+        broken = t
+        if (::ledger.isInitialized && running) ledger.derived.failed(t) // not during recovery: open() fails instead
+    }
+
     /** Every query: refuse to answer from a model that may hold part of an entry twice (see [broken]). */
     private inline fun <T> guarded(block: () -> T): T {
         broken?.let { throw IllegalStateException("read model is unusable after an indexing failure", it) }
@@ -188,7 +208,7 @@ class ReadModel private constructor() : AutoCloseable {
     private fun attach(ledger: Ledger) {
         this.ledger = ledger
         poller = Thread({
-            while (running) {
+            while (running && broken == null) { // a broken model is never applied to again
                 runCatching { catchUp() }
                 try { Thread.sleep(100) } catch (e: InterruptedException) { break } // close() interrupts the sleep
             }
@@ -212,16 +232,10 @@ class ReadModel private constructor() : AutoCloseable {
             val size = maxOf(ledger.head().size, atLeast)
             while (next < size) {
                 val sealed = ledger.entry(next) // a failure here has changed nothing, so it may be retried
-                try {
+                mutating {
                     apply(sealed)
-                } catch (t: Throwable) {
-                    broken = t
-                    // The model shares the ledger's derived storage. A write that fails there means the
-                    // derived files cannot be relied on, so the ledger fail-stops as it does for its own.
-                    if (running) ledger.derived.failed(t)
-                    throw t
+                    next++
                 }
-                next++
             }
             // Keep the set-aside list short: with the ledger at hand it can be settled up straight away.
             if (lateSettlements.isNotEmpty()) resolveLateSettlements()
@@ -334,18 +348,24 @@ class ReadModel private constructor() : AutoCloseable {
 
     /** Apply the settlements set aside by [apply] to the fixture summaries. Needs the ledger; caller holds the write lock. */
     private fun resolveLateSettlements() {
-        for (late in lateSettlements) {
-            val before = row(late.betId, late.seq) ?: continue // no such bet when this entry was committed
+        val pending = lateSettlements.iterator()
+        while (pending.hasNext()) {
+            val late = pending.next()
+            // Read everything this settlement needs BEFORE changing anything. A read that fails
+            // (an entry that no longer matches its hash, say) then leaves the counts as they were,
+            // and this settlement is still on the list for the next attempt: never counted twice.
+            val before = row(late.betId, late.seq)
+            if (before == null) { pending.remove(); continue } // no such bet when this entry was committed
             val parts = ledger.entry(before.placedSeq).entry.metadata.getValue("selection").split("|")
-            val outcomes = fixtureIndexes.getValue(parts[0]).outcomes.getOrPut(parts[1]) { HashMap() }
-            if (before.settledSeq >= 0) {
+            val previous = if (before.settledSeq >= 0) ledger.entry(before.settledSeq).entry.kind.removePrefix("BET_") else null
+            mutating {
+                val outcomes = fixtureIndexes.getValue(parts[0]).outcomes.getOrPut(parts[1]) { HashMap() }
                 // Settled again: the newest outcome replaces the one counted before.
-                val previous = ledger.entry(before.settledSeq).entry.kind.removePrefix("BET_")
-                outcomes.computeIfPresent(previous) { _, count -> if (count > 1) count - 1 else null }
+                if (previous != null) outcomes.computeIfPresent(previous) { _, count -> if (count > 1) count - 1 else null }
+                outcomes.merge(late.outcome, 1, Int::plus)
+                pending.remove()
             }
-            outcomes.merge(late.outcome, 1, Int::plus)
         }
-        lateSettlements.clear()
     }
 
     private fun openExposure(bet: BetView): BigInteger {

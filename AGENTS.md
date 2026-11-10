@@ -164,8 +164,10 @@ History lives in the journal, not on the heap (issue #73). Keep it that way:
   turns new requests away with `OverloadedException` instead; never make the writer wait.
 - A background failure raised before the ledger object exists goes through `FailureAlarm`,
   which holds it until the ledger connects. Never route one through a callback that can drop it.
-- A read model whose indexing failed part-way is never used again (`ReadModel.broken`) and
-  stops the ledger: retrying the entry would record part of it twice.
+- A derived file that fails to write stops the ledger (`PagedFile.append`). A read model whose
+  indexing failed part-way is never used again (`ReadModel.broken`): retrying would record part
+  of an entry twice. Change read-model state only inside `ReadModel.mutating`, and read what a
+  change needs before starting it.
 - The Bloom filter may say "possibly present" for a new key, never "absent" for a committed
   one. Add a key to its table first, then to the filters; see `HashIndex.rebuildBloom`.
 - `Ledger.entry` re-hashes what it reads from disk and compares it with the leaf hash
