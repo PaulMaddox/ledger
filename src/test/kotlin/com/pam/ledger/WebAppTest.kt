@@ -581,12 +581,25 @@ class WebAppTest {
         val (status, body) = response
         assertEquals(200, status, body)
         assertEquals(expectedEntries, entries.findAll(body).last().groupValues[1].toLong(), "no fresh telemetry sample: $body")
-        listOf("processCpu", "systemCpu", "heapUsed", "heapMax", "storageTotal", "storageFree",
+        listOf("processCpu", "systemCpu", "heapUsed", "heapCommitted", "heapMax",
+            "heapAfterGc", "heapAfterGcAgeMillis", "heapAfterGcCollector", "uptimeMillis", "storageTotal", "storageFree",
             "journalBytes", "readBytesPerSec", "writeBytesPerSec", "threads", "gcMillis", "readModelLag").forEach {
             assertTrue(body.contains("\"$it\":"), "missing $it: $body")
         }
         val heap = Regex("\"heapUsed\":(\\d+)").findAll(body).last().groupValues[1].toLong()
         assertTrue(heap > 0)
+        val afterGc = Regex("\"heapAfterGc\":(null|\\d+),\"heapAfterGcAgeMillis\":(null|\\d+),\"heapAfterGcCollector\":(null|\"[^\"]+\")")
+            .findAll(body).toList()
+        assertEquals(entries.findAll(body).count(), afterGc.size, "each sample needs consistent post-GC fields: $body")
+        afterGc.forEach { sample ->
+            if (sample.groupValues[1] == "null") {
+                assertEquals("null", sample.groupValues[2])
+                assertEquals("null", sample.groupValues[3])
+            } else {
+                assertTrue(sample.groupValues[2].toLong() >= 0)
+                assertTrue(sample.groupValues[3] != "null")
+            }
+        }
         val disk = Regex("\"journalBytes\":(\\d+)").findAll(body).last().groupValues[1].toLong()
         assertEquals(Files.size(app.directory.resolve(Ledger.ENTRIES_FILE)) +
             Files.size(app.directory.resolve(Ledger.CHECKPOINTS_FILE)), disk)

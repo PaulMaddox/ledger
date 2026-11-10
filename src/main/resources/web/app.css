@@ -138,6 +138,9 @@ button:disabled { opacity: .45; cursor: default; }
 .kpi span { font-size: .7rem; text-transform: uppercase; letter-spacing: .08em; color: var(--muted); }
 .kpi b { font: 650 1.4rem var(--f-mono); font-variant-numeric: tabular-nums; }
 .kpi small { color: var(--muted); font-size: .76rem; }
+#adminKpis .kpi { min-width: 0; }
+.heap-help { font-size: .78rem; color: var(--muted); }
+.heap-help summary { cursor: pointer; }
 #view-operator .kpi { min-width: 0; gap: 6px; }
 #view-operator .kpi b { font-family: var(--f-ui); font-size: clamp(1.4rem, 2.4vw, 2rem); line-height: 1.15; overflow-wrap: anywhere; letter-spacing: -.035em; }
 .fixture-history summary { cursor: pointer; font-weight: 600; padding: 8px 0; }
@@ -328,6 +331,11 @@ button.danger:hover { background: color-mix(in srgb, var(--bad) 8%, var(--panel)
   .tip { display: none; }
 }
 @media (max-width: 600px) {
+  #adminKpis { gap: 8px; }
+  #adminKpis .kpi { padding: 12px; }
+  #adminKpis .kpi b { font-size: clamp(1rem, 4vw, 1.4rem); overflow-wrap: anywhere; }
+  #adminDetails { grid-template-columns: minmax(0, 1fr); gap: 4px; }
+  #adminDetails dd { word-break: normal; overflow-wrap: anywhere; margin-bottom: 8px; }
   #view-operator .operator-fixtures { grid-template-columns: 1fr; }
   #view-operator .kpis { gap: 8px; }
   #view-operator .kpi { padding: 12px; }
