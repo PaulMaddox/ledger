@@ -57,11 +57,19 @@ fun interface RecoveryListener {
 }
 
 /**
+ * A [RecoveryListener] that keeps its own indexes in the ledger's derived files.
+ * [Ledger.open] hands it the storage before the first entry is replayed.
+ */
+internal interface DerivedIndexUser {
+    fun useStorage(storage: DerivedStorage, indexFlushSize: Int)
+}
+
+/**
  * Where [Ledger.open] has recovery put what the running ledger keeps: an offset and
  * leaf hash per entry in [store] and a hash of each idempotency key in [keys],
  * instead of the entries and key strings themselves.
  */
-internal class RecoveryIndex(val store: EntryStore, val keys: KeyIndex, val listener: RecoveryListener?)
+internal class RecoveryIndex(val store: EntryStore, val keys: HashIndex, val listener: RecoveryListener?)
 
 /**
  * Rebuilds ledger state from journal records, checking EVERYTHING on the way.
@@ -86,7 +94,8 @@ internal class Replayer(
     // Offline audits need historical hashes, not a second copy of every decoded entry and its bytes.
     private val leafHashes = AppendOnlyList<Digest>()
     private val chainHashes = AppendOnlyList<Digest>()
-    val frontier = MerkleFrontier()
+    // With an index, each completed tree node goes straight to the store's node files.
+    val frontier = MerkleFrontier(index?.let { it.store.nodes::add })
     val idempotency = HashMap<String, Long>()
     val accounts = HashMap<AccountId, AccountState>()
     val genesis: Digest = Hashes.genesis(ledgerId)
@@ -137,8 +146,10 @@ internal class Replayer(
         }
 
         accounts.putAll(updates)
+        // The leaf must be in the tree before the entry is published: a read proves an entry against it.
+        frontier.append(sealed.leafHash)
         if (index != null) {
-            index.store.stage(offset, sealed.leafHash)
+            index.store.stage(offset)
             index.store.remember(sealed)
             index.store.publish()
             index.keys.put(keyHash, seq)
@@ -155,7 +166,6 @@ internal class Replayer(
             leafHashes.publish()
             chainHashes.publish()
         }
-        frontier.append(sealed.leafHash)
         chain = sealed.chainHash
         lastTimestamp = entry.timestampMicros
         size++

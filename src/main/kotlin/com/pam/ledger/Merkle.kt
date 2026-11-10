@@ -37,8 +37,12 @@ import java.util.concurrent.ConcurrentHashMap
  * subtrees merge, just as 1 + 1 carries.
  *
  * Used only by the single writer thread, so it needs no synchronisation.
+ *
+ * @param completed told each node as it becomes final: (0, leaf) for every leaf, and
+ *   (k, root) whenever a subtree of 2^k leaves is completed. Nodes of each level arrive
+ *   in order. This is how the tree's nodes reach disk without ever being recomputed.
  */
-internal class MerkleFrontier {
+internal class MerkleFrontier(private val completed: ((Int, Digest) -> Unit)? = null) {
     // levels[i] = root of the perfect subtree of 2^i leaves, if bit i of size is set.
     private val levels = arrayOfNulls<Digest>(64)
     var size: Long = 0
@@ -48,11 +52,13 @@ internal class MerkleFrontier {
         var carry = leaf
         var i = 0
         var s = size
+        completed?.invoke(0, leaf)
         while (s and 1L == 1L) {          // a subtree of this size already exists...
             carry = Hashes.node(levels[i]!!, carry) // ...so merge (older stuff is on the LEFT)
             levels[i] = null
             s = s ushr 1
             i++
+            completed?.invoke(i, carry)   // a subtree of 2^i leaves is now complete, for ever
         }
         levels[i] = carry
         size++
@@ -79,8 +85,20 @@ internal class MerkleFrontier {
  *
  * Thread-safe: callers only ever ask about sizes <= the published ledger size,
  * the leaf accessor is safe for concurrent reads, and the cache is concurrent.
+ *
+ * @param nodeAt if given, the stored root of the complete subtree of 2^level leaves at
+ *   that index (see MerkleNodes). The prover then reads complete subtrees instead of
+ *   hashing and caching them, so it holds nothing in memory.
  */
-internal class MerkleProver(private val leafAt: (Long) -> Digest) {
+internal class MerkleProver private constructor(private val leafAt: (Long) -> Digest, private val nodeAt: ((Int, Long) -> Digest)?) {
+    /** A prover that hashes subtrees from the leaves and caches the complete ones. */
+    constructor(leafAt: (Long) -> Digest) : this(leafAt, null)
+
+    companion object {
+        /** A prover that reads complete subtrees from stored nodes. */
+        fun stored(leafAt: (Long) -> Digest, nodeAt: (Int, Long) -> Digest) = MerkleProver(leafAt, nodeAt)
+    }
+
     private val cache = ConcurrentHashMap<Long, Digest>()
 
     fun root(size: Long): Digest = if (size == 0L) Hashes.EMPTY_ROOT else subtree(0, size)
@@ -90,6 +108,7 @@ internal class MerkleProver(private val leafAt: (Long) -> Digest) {
         val n = hi - lo
         if (n == 1L) return leafAt(lo)
         val perfect = (n and (n - 1)) == 0L && lo % n == 0L
+        if (perfect && nodeAt != null) return nodeAt(java.lang.Long.numberOfTrailingZeros(n), lo / n)
         // Only cache bigger subtrees: caching every pair would double memory for little gain.
         val key = if (perfect && n >= 16) (java.lang.Long.numberOfTrailingZeros(n).toLong() shl 56) or (lo / n) else -1L
         if (key >= 0) cache[key]?.let { return it }
