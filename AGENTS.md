@@ -160,7 +160,12 @@ History lives in the journal, not on the heap (issue #73). Keep it that way:
      back an older valid copy impossible. Changing data means a new file (as index merges do).
 - The writer never reads or writes a file to add an idempotency key, and never waits for
   index maintenance. The maintenance thread touches only derived index files; it is not a
-  second ledger writer.
+  second ledger writer. If maintenance falls far behind (a stalled derived disk), `submit`
+  turns new requests away with `OverloadedException` instead; never make the writer wait.
+- A background failure raised before the ledger object exists goes through `FailureAlarm`,
+  which holds it until the ledger connects. Never route one through a callback that can drop it.
+- A read model whose indexing failed part-way is never used again (`ReadModel.broken`) and
+  stops the ledger: retrying the entry would record part of it twice.
 - The Bloom filter may say "possibly present" for a new key, never "absent" for a committed
   one. Add a key to its table first, then to the filters; see `HashIndex.rebuildBloom`.
 - `Ledger.entry` re-hashes what it reads from disk and compares it with the leaf hash
@@ -221,7 +226,8 @@ change it describes:
   index the tailer maintains, never a scan of all entries, players or bets. An index may
   choose which entries a reader looks at, but anything shown as proof (the player audit)
   must still recompute from the entries and check the index against the ledger's own
-  account version. `ReadModel` queries share a read lock; only the tailer writes.
+  account version: count the distinct listed entries whose postings really touch the
+  account, never just the length of the list. `ReadModel` queries share a read lock; only the tailer writes.
 - Placing a bet and settling its fixture are coordinated by the per-fixture lock in `Book`.
   Keep it, and keep the race test in `WebAppTest`.
 - Retain a slip's original player, stake, selection and bet ID while placement is

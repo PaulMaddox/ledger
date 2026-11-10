@@ -180,20 +180,28 @@ internal fun replayPlayerAudit(
     // Entries precede account states. A missing state must still reconcile with the
     // previously captured committed prefix, not silently discard that account's history.
     // With an index, read only the entries it names for these two accounts. The balances are
-    // still recomputed from those entries' own postings, and the index is trusted only if it
-    // holds exactly as many entries per account as the ledger's version counter says exist:
-    // every committed entry that posts to an account raises its version by one.
+    // still recomputed from those entries' own postings, and the result is trusted only if, for
+    // each account, the DISTINCT entries in that account's own list whose verified postings touch
+    // the account number exactly what the ledger's version counter says exist: every committed
+    // entry that posts to an account raises its version by one. Each list must also be exactly that
+    // long. Neither check is enough alone: a damaged list could be the right length by naming one
+    // entry several times, or entries of other accounts, in place of the missing ones; or hold
+    // every entry plus strays that do not belong in it.
     val cashIndexed = indexed?.first?.filter { it <= cashLastSeq }
     val escrowIndexed = indexed?.second?.filter { it <= escrowLastSeq }
-    val indexComplete = indexed == null ||
-        (cashIndexed!!.size.toLong() == (cashState?.version ?: 0L) && escrowIndexed!!.size.toLong() == (escrowState?.version ?: 0L))
     val candidates: Iterable<Long> = if (indexed == null) 0L..maxOf(cashLastSeq, escrowLastSeq)
         else (cashIndexed!! + escrowIndexed!!).toSortedSet()
+    val cashListed = cashIndexed?.toHashSet()
+    val escrowListed = escrowIndexed?.toHashSet()
+    var cashEntries = 0L
+    var escrowEntries = 0L
     val rows = candidates.mapNotNull { seq ->
         val s = ledger.entry(seq)
         val cashPostings = s.entry.postings.filter { seq <= cashLastSeq && it.account == cashAccount }
         val escrowPostings = s.entry.postings.filter { seq <= escrowLastSeq && it.account == escrowAccount }
         if (cashPostings.isEmpty() && escrowPostings.isEmpty()) return@mapNotNull null
+        if (cashPostings.isNotEmpty() && (cashListed == null || seq in cashListed)) cashEntries++
+        if (escrowPostings.isNotEmpty() && (escrowListed == null || seq in escrowListed)) escrowEntries++
         val dc = cashPostings.fold(0L) { total, posting -> Math.addExact(total, posting.amount) }
         val de = escrowPostings.fold(0L) { total, posting -> Math.addExact(total, posting.amount) }
         cash = Math.addExact(cash, dc)
@@ -203,6 +211,10 @@ internal fun replayPlayerAudit(
             "cashDelta" to minorUnits(dc), "cash" to minorUnits(cash), "escrowDelta" to minorUnits(de),
             "escrow" to minorUnits(escrow), "chainHash" to s.chainHash)
     }
+    val cashVersion = cashState?.version ?: 0L
+    val escrowVersion = escrowState?.version ?: 0L
+    val indexComplete = cashEntries == cashVersion && escrowEntries == escrowVersion &&
+        (indexed == null || (cashIndexed!!.size.toLong() == cashVersion && escrowIndexed!!.size.toLong() == escrowVersion))
     val ledgerCash = cashState?.balance ?: 0L
     val ledgerEscrow = escrowState?.balance ?: 0L
     return mapOf(
